@@ -1344,6 +1344,53 @@ function _renderAccountsStrip() {
       _loadEmails({ force: true, useCache: false });
     });
   });
+  // Idempotent — wire wheel + grab-drag scroll once per strip element.
+  if (!strip._scrollWired) {
+    strip._scrollWired = true;
+    // Vertical wheel → horizontal scroll. Only intercept when there's
+    // actually horizontal overflow to scroll through, otherwise let the
+    // page do its normal vertical scroll.
+    strip.addEventListener('wheel', (e) => {
+      if (strip.scrollWidth <= strip.clientWidth) return;
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      e.preventDefault();
+      strip.scrollLeft += e.deltaY;
+    }, { passive: false });
+    // Click-and-drag scroll. Track mousedown, then mousemove deltas
+    // bump scrollLeft. Cancel a chip click if the user actually dragged
+    // more than a few pixels.
+    let dragging = false;
+    let startX = 0;
+    let startScroll = 0;
+    let moved = 0;
+    strip.style.cursor = 'grab';
+    strip.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      dragging = true;
+      moved = 0;
+      startX = e.pageX;
+      startScroll = strip.scrollLeft;
+      strip.style.cursor = 'grabbing';
+      strip.style.userSelect = 'none';
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const dx = e.pageX - startX;
+      moved = Math.max(moved, Math.abs(dx));
+      strip.scrollLeft = startScroll - dx;
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      strip.style.cursor = 'grab';
+      strip.style.userSelect = '';
+    });
+    // Swallow chip clicks fired after a real drag — the user meant to scroll,
+    // not select.
+    strip.addEventListener('click', (e) => {
+      if (moved > 5) { e.stopPropagation(); e.preventDefault(); moved = 0; }
+    }, true);
+  }
   _publishActiveAccount();
 }
 
