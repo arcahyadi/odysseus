@@ -5923,49 +5923,31 @@ function _showAiReplyChoice(btn, em, data) {
   // Full = layered concentric circles to suggest "more, deeper" — not a fully
   // filled circle so it reads as a complement to the lightning, not as a "stop".
   menu.innerHTML = `
-    <div class="email-ai-reply-row" data-step="choose" style="display:flex;flex-direction:column;gap:6px;min-width:180px;">
-      <div data-mode-row style="display:flex;align-items:center;gap:4px;">
-        <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft" style="display:inline-flex;align-items:center;gap:5px;">
+    <div class="email-ai-reply-row" style="display:flex;flex-direction:column;gap:6px;min-width:180px;">
+      <textarea data-note-input rows="2" placeholder="Add context (optional)" style="width:100%;box-sizing:border-box;resize:vertical;min-height:42px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
+      <div style="display:flex;align-items:center;gap:4px;">
+        <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:1;">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
           Fast
         </button>
-        <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Uses the fuller reply context" style="display:inline-flex;align-items:center;gap:5px;">
+        <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Uses the fuller reply context" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:1;">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><circle cx="12" cy="12" r="6"/></svg>
           Full
         </button>
       </div>
-      <div data-note-panel hidden style="display:flex;flex-direction:column;gap:6px;">
-        <textarea data-note-input rows="2" placeholder="Add context (optional)" style="width:100%;box-sizing:border-box;resize:vertical;min-height:42px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
-        <button data-act="note-ok" class="memory-toolbar-btn" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;">OK</button>
-      </div>
     </div>
   `;
-  const modeRow = menu.querySelector('[data-mode-row]');
-  const notePanel = menu.querySelector('[data-note-panel]');
   const noteInput = menu.querySelector('[data-note-input]');
-  let pendingMode = null;
+  setTimeout(() => noteInput.focus(), 0);
   menu.addEventListener('click', async (ev) => {
     const choice = ev.target.closest('[data-mode]');
-    if (choice) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      // First click reveals the optional-context textarea; the actual
-      // draft runs on OK. Empty context just runs the chosen mode.
-      pendingMode = choice.getAttribute('data-mode') || 'ai-reply';
-      modeRow.setAttribute('hidden', '');
-      notePanel.removeAttribute('hidden');
-      setTimeout(() => noteInput.focus(), 0);
-      return;
-    }
-    const ok = ev.target.closest('[data-act="note-ok"]');
-    if (ok) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      const noteHint = (noteInput.value || '').trim();
-      const mode = pendingMode || 'ai-reply';
-      _closeAiReplyChoice();
-      await _runAiReplyFromButton(btn, em, data, mode, noteHint);
-    }
+    if (!choice) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const mode = choice.getAttribute('data-mode') || 'ai-reply';
+    const noteHint = (noteInput.value || '').trim();
+    _closeAiReplyChoice();
+    await _runAiReplyFromButton(btn, em, data, mode, noteHint);
   });
   // Esc closes the popover; ignore plain clicks inside the menu so the
   // textarea stays focused.
