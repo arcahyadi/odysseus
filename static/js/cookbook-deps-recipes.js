@@ -5,6 +5,11 @@
 // Entries are matched first-hit; put the more specific patterns ABOVE the
 // generic fallback for that backend.
 
+// Recipes hold ONLY the install command(s). The renderer prepends a
+// `source <venv>/bin/activate` line for context using the active server's
+// configured envPath; the Run button reuses env_prefix to activate that
+// same venv before executing, so the install lands in your existing
+// environment rather than a fresh `.venv` in some random CWD.
 const _RECIPES = [
   // ── vllm ──────────────────────────────────────────────────────────────
   // MiniMax M2/M2.7 — same generic vllm install for now; kept as its own
@@ -15,8 +20,6 @@ const _RECIPES = [
     label: 'MiniMax M2 / M2.7',
     match: (m) => /minimax[-_]?m\s?2(\.7)?/i.test(m || ''),
     commands: [
-      'uv venv',
-      'source .venv/bin/activate',
       'uv pip install -U vllm --torch-backend auto',
     ],
   },
@@ -27,8 +30,6 @@ const _RECIPES = [
     label: 'Any vLLM model',
     match: () => true,
     commands: [
-      'uv venv',
-      'source .venv/bin/activate',
       'uv pip install -U vllm --torch-backend auto',
     ],
   },
@@ -39,8 +40,6 @@ const _RECIPES = [
     label: 'Any SGLang model',
     match: () => true,
     commands: [
-      'uv venv',
-      'source .venv/bin/activate',
       'uv pip install -U "sglang[all]" --torch-backend auto',
     ],
   },
@@ -53,8 +52,6 @@ const _RECIPES = [
     label: 'Any GGUF model',
     match: () => true,
     commands: [
-      'uv venv',
-      'source .venv/bin/activate',
       'CMAKE_ARGS="-DGGML_CUDA=on" uv pip install -U "llama-cpp-python[server]"',
     ],
   },

@@ -834,6 +834,17 @@ async function _fetchDependencies() {
         + recipePanel;
     };
 
+    // Prepend the configured venv's activate line (when one is set) so the
+    // user sees the full sequence they'd need to paste, while Run keeps
+    // using env_prefix to activate the same venv before the pip command.
+    function _recipeDisplayText(commands) {
+      const envPath = (_envState.envPath || '').replace(/\/+$/, '');
+      const activate = envPath
+        ? `source ${envPath}${envPath.endsWith('/bin/activate') ? '' : '/bin/activate'}`
+        : '# (activate your venv first)';
+      return [activate, ...commands].join('\n');
+    }
+
     // Per-backend recipe panel (model picker + commands + Copy/Run).
     // Lives directly below the row it expands and starts collapsed.
     // The model picker lists every downloaded model from _cachedModelIds
@@ -858,7 +869,7 @@ async function _fetchDependencies() {
             <span style="font-size:11px;opacity:0.75;flex-shrink:0;">Serving which model?</span>
             <select class="settings-select cookbook-dep-recipe-pick" data-dep-recipe-pick="${esc(backend)}" style="flex:1;font-size:11px;padding:3px 6px;">${opts}</select>
           </div>
-          <pre class="cookbook-dep-recipe-cmds" data-dep-recipe-cmds="${esc(backend)}" style="margin:0;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre;">${esc(initial.commands.join('\n'))}</pre>
+          <pre class="cookbook-dep-recipe-cmds" data-dep-recipe-cmds="${esc(backend)}" data-dep-recipe-install="${esc(initial.commands.join('\n'))}" style="margin:0;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre;">${esc(_recipeDisplayText(initial.commands))}</pre>
           <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
             <button type="button" class="cookbook-dep-tag cookbook-dep-recipe-copy" data-dep-recipe-copy="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</button>
             <button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-recipe-run" data-dep-recipe-run="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run</button>
@@ -988,13 +999,18 @@ async function _fetchDependencies() {
     });
     // Model select: pickRecipe matches the model id against the catalog
     // (e.g. minimax-m2.7 → MiniMax recipe; anything else → generic).
+    // Visible text gets the activate-line prefix; the actual install
+    // command stays on data-dep-recipe-install so Run knows what to send.
     list.querySelectorAll('[data-dep-recipe-pick]').forEach(sel => {
       sel.addEventListener('change', () => {
         const backend = sel.dataset.depRecipePick;
         const recipe = pickRecipe(backend, sel.value || '');
         if (!recipe) return;
         const pre = list.querySelector(`[data-dep-recipe-cmds="${CSS.escape(backend)}"]`);
-        if (pre) pre.textContent = recipe.commands.join('\n');
+        if (pre) {
+          pre.textContent = _recipeDisplayText(recipe.commands);
+          pre.dataset.depRecipeInstall = recipe.commands.join('\n');
+        }
       });
     });
     // Copy: drop the visible command block on the clipboard.
@@ -1015,23 +1031,38 @@ async function _fetchDependencies() {
         }
       });
     });
-    // Run: launch the joined `cmd1 && cmd2 && …` as a tmux task on the
-    // currently-selected deps server, same plumbing as Install.
+    // Run: launch the install command(s) as a tmux task on the currently-
+    // selected deps server. Activation comes from env_prefix (same plumbing
+    // the Install button uses) so the install lands in the configured venv
+    // instead of a fresh .venv in some random CWD.
     list.querySelectorAll('[data-dep-recipe-run]').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const backend = btn.dataset.depRecipeRun;
         const pre = list.querySelector(`[data-dep-recipe-cmds="${CSS.escape(backend)}"]`);
         if (!pre) return;
-        const cmd = pre.textContent.split('\n').map(s => s.trim()).filter(Boolean).join(' && ');
+        // Use the install-only command list (no activate line) — the
+        // displayed source line is for the user's reading; env_prefix
+        // handles it for the actual run.
+        const installRaw = pre.dataset.depRecipeInstall || pre.textContent;
+        const cmd = installRaw.split('\n').map(s => s.trim()).filter(Boolean).join(' && ');
         const depsSel = document.getElementById('hwfit-deps-server');
         if (depsSel) _applyServerSelection(depsSel.value);
         const targetHost = _envState.remoteHost || 'local';
+        // Build env_prefix from the configured envPath (matches _installDep).
+        let envPrefix = '';
+        if (_envState.env === 'venv' && _envState.envPath) {
+          const p = _envState.envPath;
+          envPrefix = 'source ' + _shellQuote(p.endsWith('/bin/activate') ? p : p + '/bin/activate');
+        } else if (_envState.env === 'conda' && _envState.envPath) {
+          envPrefix = 'eval "$(conda shell.bash hook)" && conda activate ' + _shellQuote(_envState.envPath);
+        }
         const reqBody = {
           repo_id: `${backend} setup`,
           cmd: cmd,
           remote_host: _envState.remoteHost || undefined,
           ssh_port: _getPort(_envState.remoteHost) || undefined,
+          env_prefix: envPrefix || undefined,
           platform: _envState.platform || undefined,
         };
         try {
