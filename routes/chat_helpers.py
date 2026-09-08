@@ -106,7 +106,6 @@ class ChatContext:
     rag_sources: list
     web_sources: list
     used_memories: list
-    rag_citations: list = field(default_factory=list)
     messages: list
     context_length: int
     was_compacted: bool
@@ -119,6 +118,8 @@ class ChatContext:
     context_messages_after_trim: int = 0
     context_tokens_before_trim: int = 0
     context_tokens_after_trim: int = 0
+    # Structured RAG/research citations attached to assistant-message metadata.
+    rag_citations: list = field(default_factory=list)
     # Documents auto-created server-side during preprocess (e.g. when an
     # attached fillable PDF gets rendered into a markdown editor doc).
     # The chat route emits a doc_update SSE event for each before streaming
