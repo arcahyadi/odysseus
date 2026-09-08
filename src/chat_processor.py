@@ -230,6 +230,7 @@ class ChatProcessor:
         """
         preface = []
         rag_sources = []
+        self._last_rag_citations = []  # populated when RAG hits clear the threshold
 
         # Add preset system prompt if specified
         if preset_system_prompt:
@@ -288,6 +289,44 @@ class ChatProcessor:
             # (skills index injection moved out — see below; only fires in
             # agent mode so chat mode and incognito stay clean.)
 
+        # Knowledge-graph context (Phase 2, Req 4.x): entity/relationship
+        # neighbourhood around the current message, when the store has data.
+        if owner:
+            try:
+                from services.memory.graph import graph_store
+                _graph_ctx = graph_store.get_2hop_context(owner, message)
+                if _graph_ctx:
+                    preface.append(untrusted_context_message(
+                        "knowledge graph context", _graph_ctx,
+                    ))
+            except Exception as _ge:
+                logger.debug("Graph context injection skipped: %s", _ge)
+
+        # Recent digest summaries (Phase 2, Req 7.x): compact context from the
+        # last day or two of auto-digests, when present.
+        if owner:
+            try:
+                from services.digest.digest_service import digest_service
+                from datetime import date as _date, timedelta as _td2
+                _digests = digest_service.list_digests(owner, limit=7) or []
+                _recent = [
+                    d for d in _digests
+                    if (d.get("date") or "") >= (_date.today() - _td2(days=2)).isoformat()
+                ]
+                _parts = []
+                for _d in _recent[:2]:
+                    _sum = (_d.get("summary") or "").strip()
+                    if not _sum:
+                        _sum = (_d.get("content") or {}).get("summary", "") if isinstance(_d.get("content"), dict) else ""
+                    if _sum:
+                        _parts.append(f"[{_d.get('date')}]\n{str(_sum)[:400]}")
+                if _parts:
+                    preface.append(untrusted_context_message(
+                        "recent digest summaries", "\n\n".join(_parts),
+                    ))
+            except Exception as _de:
+                logger.debug("Digest context injection skipped: %s", _de)
+
         # RAG: search if enabled and rag_manager available, inject only above threshold
         if use_rag:
             try:
@@ -306,6 +345,15 @@ class ChatProcessor:
                             }
                             for r in relevant
                         ]
+                        # Phase 2: structured citations from the raw RAG hits
+                        # (id/document/metadata/distance), surfaced in message
+                        # metadata for the CitationRenderer (Req 7.3).
+                        try:
+                            from services.citations.citation_service import citation_service
+                            self._last_rag_citations = citation_service.build_rag_citations(relevant)
+                        except Exception as _ce:
+                            logger.warning("Citation build failed: %s", _ce)
+                            self._last_rag_citations = []
                         rag_content = "Relevant documents:\n\n" + "\n\n---\n\n".join(
                             f"[{s['filename']}]\n{r['document']}" for s, r in zip(rag_sources, relevant)
                         )

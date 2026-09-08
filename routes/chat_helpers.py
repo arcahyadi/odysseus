@@ -21,6 +21,19 @@ from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
 from fastapi import HTTPException
 
+# NOTE: critique_service will be available after task 5.1 completes.
+# This import is intentionally placed here so routes can call maybe_apply_critique
+# without any changes to chat_routes.py.
+from services.critique.critique_service import critique_service  # noqa: E402
+
+# Phase 1: reasoning trace extraction (imported lazily to avoid circular imports)
+try:
+    from services.reasoning.trace_extractor import reasoning_aware_stream
+    from services.reasoning.trace_store import trace_store as _trace_store
+    _REASONING_AVAILABLE = True
+except ImportError:
+    _REASONING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 _CASUAL_OPENING_RE = re.compile(
@@ -93,6 +106,7 @@ class ChatContext:
     rag_sources: list
     web_sources: list
     used_memories: list
+    rag_citations: list = field(default_factory=list)
     messages: list
     context_length: int
     was_compacted: bool
@@ -737,6 +751,7 @@ async def build_chat_context(
 
     # Capture used memories immediately
     used_memories = getattr(chat_processor, '_last_used_memories', [])
+    rag_citations = list(getattr(chat_processor, '_last_rag_citations', []) or [])
 
     # Inject pre-fetched search context (compare mode)
     if search_context and allow_tool_preprocessing and not casual_low_signal:
@@ -795,6 +810,7 @@ async def build_chat_context(
         rag_sources=rag_sources,
         web_sources=web_sources,
         used_memories=used_memories,
+        rag_citations=rag_citations,
         messages=messages,
         context_length=context_length,
         was_compacted=was_compacted,
@@ -1017,6 +1033,7 @@ def save_assistant_response(
     character_name: str = None,
     web_sources: list = None,
     rag_sources: list = None,
+    rag_citations: list = None,
     research_sources: list = None,
     used_memories: list = None,
     do_research: bool = False,
@@ -1044,6 +1061,8 @@ def save_assistant_response(
         md["web_sources"] = web_sources
     if rag_sources:
         md["rag_sources"] = rag_sources
+    if rag_citations:
+        md["citations"] = rag_citations
     if research_sources:
         md["research_sources"] = research_sources
     if used_memories:
@@ -1230,6 +1249,35 @@ def run_post_response_tasks(
     if _extraction_jobs:
         _spawn_bg(_run_extraction_jobs_sequentially(session_id, _extraction_jobs))
 
+    # Knowledge-graph extraction (Phase 2, Req 3.x) — same cadence as memory
+    # extraction so background LLM calls stay bounded and sequential.
+    if (
+        allow_background_extraction
+        and not incognito
+        and not compare_mode
+        and _should_extract
+        and uprefs.get("auto_graph", True)
+    ):
+        try:
+            from services.memory.graph import graph_store
+            from src.task_endpoint import resolve_task_endpoint
+            g_url, g_model, g_headers = resolve_task_endpoint(
+                sess.endpoint_url, sess.model, sess.headers, owner=owner,
+            )
+            graph_text = (full_response or "")[:6000]
+            if graph_text.strip():
+                _spawn_bg(_run_extraction_jobs_sequentially(session_id, [(
+                    "graph",
+                    graph_store.extract_and_store(
+                        graph_text, owner, g_url, g_model, g_headers,
+                    ),
+                )]))
+        except Exception:
+            logger.warning(
+                "[bg-extract] graph extraction dispatch failed for session %s",
+                session_id, exc_info=True,
+            )
+
     # Token accumulation
     if last_metrics:
         accumulate_token_usage(session_id, last_metrics)
@@ -1244,3 +1292,119 @@ def run_post_response_tasks(
     # Auto-name
     if needs_auto_name(sess.name):
         _spawn_bg(auto_name_session(session_manager, sess))
+
+
+async def maybe_apply_critique(
+    session_id: str,
+    message_id: str,
+    user_question: str,
+    draft: str,
+    primary_model: str,
+    endpoint_url: str,
+    headers: dict,
+    owner: str,
+) -> str:
+    """
+    Apply the self-critique loop if enabled for this session.
+    Returns the (possibly revised) response, or the original draft on any error.
+
+    Requirements: 7.2, 13.2, 13.5
+    """
+    try:
+        if not critique_service.is_enabled_for_session(session_id):
+            return draft
+        return await critique_service.critique(
+            session_id=session_id,
+            message_id=message_id,
+            user_question=user_question,
+            draft=draft,
+            primary_model=primary_model,
+            endpoint_url=endpoint_url,
+            headers=headers,
+            owner=owner,
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "maybe_apply_critique failed for session=%s; returning original draft",
+            session_id,
+        )
+        return draft
+
+
+async def wrap_stream_with_reasoning(
+    base_generator,
+    session_id: str,
+    message_id: str,
+    owner: str,
+    model: str,
+    active_persona_id=None,
+) -> tuple:
+    """
+    Wrap a streaming generator with reasoning trace extraction.
+
+    If the session has an active persona OR the model emits <think> tags,
+    extracts thinking segments and persists them as a ReasoningTrace.
+
+    Returns (wrapped_generator, collected_segments_list).
+
+    The wrapped generator emits:
+      - {"type": "thinking_node", "index": N, "content": "..."} for think blocks
+      - {"type": "content", "token": "..."} for regular content
+      - all other chunk types unchanged
+
+    Call trace_store.persist() after the stream completes if segments is non-empty.
+
+    This is an additive, opt-in wrapper. If _REASONING_AVAILABLE is False or
+    an exception occurs, returns the base_generator unchanged with empty segments.
+
+    Requirements: 9.1, 9.2, 9.4, 9.5, 10.5, 13.2, 13.5
+    """
+    if not _REASONING_AVAILABLE:
+        return base_generator, []
+
+    collected_segments = []
+
+    async def _collecting_wrapper():
+        try:
+            async for chunk in reasoning_aware_stream(base_generator):
+                if isinstance(chunk, dict) and chunk.get("type") == "thinking_node":
+                    collected_segments.append(chunk.get("content", ""))
+                yield chunk
+        except Exception as _e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "reasoning_aware_stream error for session=%s: %s", session_id, _e
+            )
+            # Fall back: yield remaining chunks from base generator if possible
+            return
+
+    return _collecting_wrapper(), collected_segments
+
+
+async def persist_reasoning_trace_if_present(
+    session_id: str,
+    message_id: str,
+    owner: str,
+    model: str,
+    collected_segments: list,
+) -> None:
+    """
+    Persist a ReasoningTrace if any thinking segments were collected.
+    Call this after the streaming response is complete.
+
+    Requirements: 9.2, 9.5
+    """
+    if not _REASONING_AVAILABLE or not collected_segments:
+        return
+    try:
+        await asyncio.to_thread(
+            _trace_store.persist,
+            session_id, message_id, owner, model,
+            [s for s in collected_segments if s and s.strip()]
+        )
+    except Exception as _e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to persist reasoning trace for message=%s: %s", message_id, _e
+        )

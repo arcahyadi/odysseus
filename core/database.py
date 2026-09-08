@@ -3,7 +3,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, func, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -149,6 +149,11 @@ class Session(TimestampMixin, Base):
     total_output_tokens = Column(Integer, default=0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
+
+    # Phase 1: session forking + persona binding
+    forked_from_session_id = Column(String, nullable=True)
+    forked_from_message_id = Column(String, nullable=True)
+    active_persona_id      = Column(String, nullable=True)
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -705,6 +710,261 @@ class Memory(Base):
         Index('ix_memories_lookup', 'category', 'timestamp'),  # Composite for category-based queries
         Index('ix_memories_session', 'session_id', 'timestamp'),  # Composite for session-based queries
     )
+
+class AgentRun(TimestampMixin, Base):
+    """Multi-agent orchestration run record."""
+    __tablename__ = "agent_runs"
+
+    id               = Column(String, primary_key=True, index=True)
+    owner            = Column(String, nullable=True, index=True)
+    parent_run_id    = Column(String, ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=True, index=True)
+    persona_id       = Column(String, ForeignKey("personas.id", ondelete="SET NULL"), nullable=True)
+    session_id       = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    root_run_id      = Column(String, nullable=True, index=True)     # denormalised for fast subtree queries
+    depth            = Column(Integer, default=0, nullable=False)    # 0 = root orchestrator
+    task_description = Column(Text, nullable=False)
+    status           = Column(String, default="pending", nullable=False, index=True)
+    # status values: pending | running | completed | failed | paused | cancelled
+    result           = Column(Text, nullable=True)                   # JSON final output
+    error_detail     = Column(Text, nullable=True)
+    tool_calls_log   = Column(Text, nullable=True)                   # JSON array of tool call records
+    input_tokens     = Column(Integer, default=0)
+    output_tokens    = Column(Integer, default=0)
+    started_at       = Column(DateTime, nullable=True)
+    ended_at         = Column(DateTime, nullable=True)
+    checkpoint       = Column(Text, nullable=True)                   # JSON last message list for pause/resume
+
+    parent  = relationship("AgentRun", remote_side=[id], backref="children")
+    persona = relationship("Persona", foreign_keys=[persona_id])
+    session = relationship("Session", backref=backref("agent_runs", cascade="save-update, merge"))
+
+    __table_args__ = (
+        Index("ix_agent_runs_owner_status", "owner", "status"),
+        Index("ix_agent_runs_root", "root_run_id", "depth"),
+        Index("ix_agent_runs_retention", "owner", "created_at"),
+    )
+
+
+class Persona(TimestampMixin, Base):
+    """Agent persona / role definition."""
+    __tablename__ = "personas"
+
+    id            = Column(String, primary_key=True, index=True)
+    owner         = Column(String, nullable=True, index=True)        # NULL = built-in / global
+    name          = Column(String, nullable=False)                   # 1–64 chars, unique per owner
+    system_prompt = Column(Text, nullable=False)
+    allowed_tools = Column(Text, nullable=True)                      # JSON list of tool names; NULL = all
+    memory_scope  = Column(String, nullable=True)                    # e.g. "global", "persona:<id>", "session"
+    model_ref     = Column(String, nullable=True)                    # model name override
+    endpoint_url  = Column(String, nullable=True)                    # endpoint override
+    is_builtin    = Column(Boolean, default=False)
+    is_active     = Column(Boolean, default=True)                    # soft-delete
+    sort_order    = Column(Integer, default=0)
+
+    __table_args__ = (
+        Index("ix_personas_owner_name", "owner", "name", unique=True),
+        Index("ix_personas_active", "owner", "is_active"),
+    )
+
+
+class Plan(TimestampMixin, Base):
+    """Long-horizon plan created from a user goal."""
+    __tablename__ = "plans"
+
+    id                 = Column(String, primary_key=True, index=True)
+    owner              = Column(String, nullable=True, index=True)
+    title              = Column(String, nullable=False)
+    goal               = Column(Text, nullable=False)                # original user goal text
+    status             = Column(String, default="pending", nullable=False, index=True)
+    # status: pending | running | paused_on_failure | completed | cancelled
+    current_step_index = Column(Integer, default=0)
+    model              = Column(String, nullable=True)
+    endpoint_url       = Column(String, nullable=True)
+
+    steps = relationship("PlanStep", back_populates="plan",
+                         cascade="all, delete-orphan",
+                         order_by="PlanStep.order_index")
+
+    __table_args__ = (
+        Index("ix_plans_owner_status", "owner", "status"),
+    )
+
+
+class PlanStep(TimestampMixin, Base):
+    """A single ordered step within a Plan."""
+    __tablename__ = "plan_steps"
+
+    id           = Column(String, primary_key=True, index=True)
+    plan_id      = Column(String, ForeignKey("plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    order_index  = Column(Integer, nullable=False)
+    title        = Column(String(120), nullable=False)
+    description  = Column(Text, nullable=True)
+    status       = Column(String, default="pending", nullable=False)
+    # status: pending | running | done | failed | skipped
+    session_id   = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True)
+    output       = Column(Text, nullable=True)                       # result of step execution
+    error_detail = Column(Text, nullable=True)
+    retry_count  = Column(Integer, default=0)
+    started_at   = Column(DateTime, nullable=True)
+    ended_at     = Column(DateTime, nullable=True)
+
+    plan    = relationship("Plan", back_populates="steps")
+    session = relationship("Session", backref=backref("plan_steps"))
+
+    __table_args__ = (
+        Index("ix_plan_steps_plan_order", "plan_id", "order_index"),
+        Index("ix_plan_steps_status", "plan_id", "status"),
+    )
+
+
+class CritiquePassRecord(TimestampMixin, Base):
+    """Record of a self-critique evaluation pass on an LLM response."""
+    __tablename__ = "critique_pass_records"
+
+    id               = Column(String, primary_key=True, index=True)
+    session_id       = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    message_id       = Column(String, nullable=True)                 # DB id of the assistant message
+    owner            = Column(String, nullable=True, index=True)
+    primary_model    = Column(String, nullable=False)
+    critique_model   = Column(String, nullable=False)
+    was_revised      = Column(Boolean, default=False)
+    original_draft   = Column(Text, nullable=False)
+    revised_response = Column(Text, nullable=True)
+    original_tokens  = Column(Integer, default=0)
+    revised_tokens   = Column(Integer, default=0)
+    error_detail     = Column(Text, nullable=True)                   # set on fallback
+
+    __table_args__ = (
+        Index("ix_critique_session_msg", "session_id", "message_id"),
+    )
+
+
+class ReasoningTrace(TimestampMixin, Base):
+    """Full reasoning trace extracted from <think> blocks in an LLM response."""
+    __tablename__ = "reasoning_traces"
+
+    id         = Column(String, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    message_id = Column(String, nullable=False, index=True)          # DB id of the parent assistant message
+    owner      = Column(String, nullable=True, index=True)
+    model      = Column(String, nullable=True)
+    full_text  = Column(Text, nullable=False)                        # raw concatenated think content
+
+    nodes = relationship("ReasoningNode", back_populates="trace",
+                         cascade="all, delete-orphan",
+                         order_by="ReasoningNode.index")
+
+    __table_args__ = (
+        Index("ix_reasoning_session_msg", "session_id", "message_id"),
+    )
+
+
+class ReasoningNode(Base):
+    """An individual <think> segment within a ReasoningTrace."""
+    __tablename__ = "reasoning_nodes"
+
+    id       = Column(String, primary_key=True, index=True)
+    trace_id = Column(String, ForeignKey("reasoning_traces.id", ondelete="CASCADE"), nullable=False, index=True)
+    index    = Column(Integer, nullable=False)
+    content  = Column(Text, nullable=False)
+
+    trace = relationship("ReasoningTrace", back_populates="nodes")
+
+    __table_args__ = (
+        Index("ix_reasoning_nodes_trace_idx", "trace_id", "index"),
+    )
+
+
+# ── Phase 2: Knowledge & Memory models ───────────────────────────────────────
+
+class GraphEntity(Base):
+    """An entity (person, project, concept, tool, organisation) extracted from chat."""
+    __tablename__ = "graph_entities"
+
+    id            = Column(String, primary_key=True, index=True)
+    # NOTE: no index=True on owner — the explicit Index("ix_graph_entities_owner")
+    # below would collide with the auto-generated ix_graph_entities_owner on a
+    # fresh create_all (duplicate DDL name), breaking new-DB startup.
+    owner         = Column(String, nullable=False)
+    name          = Column(String, nullable=False)
+    name_norm     = Column(String, nullable=False)   # lower().strip() for dedup
+    type          = Column(String, nullable=False)   # person|project|concept|tool|organisation
+    mention_count = Column(Integer, nullable=False, default=1)
+    first_seen_at = Column(DateTime, nullable=False)
+    last_seen_at  = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("owner", "name_norm", "type"),
+        Index("ix_graph_entities_owner", "owner"),
+        Index("ix_graph_entities_search", "owner", "name_norm"),
+    )
+
+
+class GraphRelationship(Base):
+    """A directed relationship between two GraphEntity nodes."""
+    __tablename__ = "graph_relationships"
+
+    id         = Column(String, primary_key=True, index=True)
+    # NOTE: no index=True on these columns — explicit Index rows below would
+    # collide with the auto-generated ix_graph_rel_* names on fresh create_all.
+    owner      = Column(String, nullable=False)
+    source_id  = Column(String, ForeignKey("graph_entities.id", ondelete="CASCADE"), nullable=False)
+    target_id  = Column(String, ForeignKey("graph_entities.id", ondelete="CASCADE"), nullable=False)
+    type       = Column(String, nullable=False)   # works-on|related-to|mentioned-with|…
+    strength   = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("owner", "source_id", "target_id", "type"),
+        Index("ix_graph_rel_owner", "owner"),
+        Index("ix_graph_rel_source", "source_id"),
+        Index("ix_graph_rel_target", "target_id"),
+    )
+
+
+class Digest(Base):
+    """Auto-generated daily activity digest."""
+    __tablename__ = "digests"
+
+    id         = Column(String, primary_key=True, index=True)
+    owner      = Column(String, nullable=False, index=True)
+    date       = Column(String, nullable=False)          # "YYYY-MM-DD"
+    status     = Column(String, nullable=False, default="pending")  # pending|complete|failed
+    content    = Column(Text, nullable=True)             # structured JSON blob
+    summary    = Column(Text, nullable=True)             # tone_summary plain text
+    error      = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("owner", "date"),
+        Index("ix_digests_owner_date", "owner", "date"),
+    )
+
+
+def _migrate_add_phase1_session_columns():
+    """Add Phase 1 session fork + persona columns to sessions if missing.
+
+    Idempotent: each ADD COLUMN is skipped when the column already exists.
+    """
+    new_cols = {
+        "forked_from_session_id": "TEXT",
+        "forked_from_message_id": "TEXT",
+        "active_persona_id":      "TEXT",
+    }
+    try:
+        with engine.connect() as conn:
+            existing = {r[1] for r in conn.execute(text("PRAGMA table_info(sessions)"))}
+            for col_name, col_type in new_cols.items():
+                if col_name not in existing:
+                    conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}"))
+                    logging.getLogger(__name__).info(
+                        f"Phase 1 migration: added '{col_name}' column to sessions"
+                    )
+            conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Phase 1 session columns migration failed: {e}")
+
 
 def _migrate_add_last_message_at_column():
     """Add last_message_at to sessions + backfill from the latest message
@@ -1865,6 +2125,22 @@ def init_db():
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
+    _migrate_add_phase1_session_columns()
+    _run_phase2_migrations()
+
+
+def _run_phase2_migrations():
+    """Idempotent Phase 2 index creation for digests table."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_digests_owner_date "
+                "ON digests(owner, date DESC)"
+            ))
+            conn.commit()
+    except Exception as _e:
+        logging.getLogger(__name__).debug("Phase 2 digests index migration: %s", _e)
+
 
 
 def _migrate_backfill_task_folders():

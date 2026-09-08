@@ -3,6 +3,8 @@
 // ES6 module — entry point, no exports (wires all modules together)
 // ============================================
 import Storage from './js/storage.js';
+import { initPhase1 } from './js/phase1-init.js';
+import { initPhase2 } from './js/phase2-init.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
@@ -4386,4 +4388,21 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', startOdysseusApp, { once: true });
 } else {
   startOdysseusApp();
+}
+
+// Phase 1 — Intelligence & Reasoning modules (reasoning traces, persona
+// switcher, critique toggle, fork controls, agent graph, plan tracker).
+// Runs after the app shell is mounted.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => initPhase1(), { once: true });
+} else {
+  initPhase1();
+}
+
+// Phase 2 — Knowledge & Memory modules (digest panel, knowledge graph,
+// citation rendering). Runs after the Phase 1 mount.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => initPhase2(), { once: true });
+} else {
+  initPhase2();
 }

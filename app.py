@@ -66,7 +66,8 @@ from core.constants import (
     BASE_DIR, STATIC_DIR, SESSIONS_FILE,
     REQUEST_TIMEOUT, OPENAI_API_KEY, AUTH_FILE,
 )
-from core.database import SessionLocal, ApiToken
+from core.database import SessionLocal, ApiToken, engine
+from core.phase1_migrations import run_phase1_migrations
 from core.middleware import SecurityHeadersMiddleware, is_cors_preflight
 from core.auth import AuthManager, normalize_known_username
 from core.exceptions import (
@@ -857,6 +858,38 @@ app.include_router(setup_contacts_routes())
 from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
 
+# Agent runs (multi-agent orchestration)
+from routes.agent_routes import router as agent_router
+app.include_router(agent_router, prefix="/api/agents")
+
+# Personas
+from routes.persona_routes import router as persona_router
+app.include_router(persona_router)
+
+# Plans
+from routes.plan_routes import router as plan_router
+app.include_router(plan_router)
+
+# Critique
+from routes.critique_routes import router as critique_router
+app.include_router(critique_router)
+
+# Reasoning + Fork
+from routes.reasoning_routes import router as reasoning_router
+app.include_router(reasoning_router)
+
+# Voice session status
+from routes.voice_routes import router as voice_router
+app.include_router(voice_router)
+
+# Knowledge graph (phase 2)
+from routes.memory.graph_routes import router as graph_router
+app.include_router(graph_router)
+
+# Auto-digest / morning digest (phase 2)
+from routes.digest.digest_routes import router as digest_router
+app.include_router(digest_router)
+
 # ========= ROUTES (kept in app.py) =========
 
 @app.get("/")
@@ -1003,6 +1036,7 @@ app.router.lifespan_context = _lifespan
 async def _startup_event():
     global upload_cleanup_task
     logger.info("Application starting up...")
+    run_phase1_migrations(engine)
     webhook_manager.set_loop(asyncio.get_running_loop())
     # Wipe any leftover incognito sessions from previous process — they're
     # ephemeral by design and must not survive a restart.
@@ -1238,6 +1272,30 @@ async def _startup_event():
     # removes the feature.
     from src.cookbook_serve_lifecycle import cookbook_serve_lifecycle_loop
     _startup_tasks.append(asyncio.create_task(cookbook_serve_lifecycle_loop()))
+
+    # Seed built-in personas (idempotent — safe to call on every startup)
+    try:
+        from services.personas.persona_manager import persona_manager as _pm
+        _pm.seed_builtins()
+        logger.info("Built-in personas seeded")
+    except Exception as _e:
+        logger.warning("Failed to seed built-in personas: %s", _e)
+
+    # Nightly AgentRun retention pruning (cascades to child runs via FK)
+    async def _agent_run_prune_loop():
+        from datetime import timedelta
+        while True:
+            try:
+                await asyncio.sleep(86400)  # 24 hours
+                from services.orchestration.run_store import prune_expired_runs
+                retention_days = int(os.getenv("AGENT_RUN_RETENTION_DAYS", "90"))
+                count = prune_expired_runs(retention_days)
+                if count:
+                    logger.info("Pruned %d expired AgentRun tree(s)", count)
+            except Exception as _e:
+                logger.debug("AgentRun prune loop error: %s", _e)
+
+    _startup_tasks.append(asyncio.create_task(_agent_run_prune_loop()))
 
     logger.info("Application startup complete")
 

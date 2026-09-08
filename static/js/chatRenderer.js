@@ -10,6 +10,8 @@ import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
+import { buildCitationsBox } from './citations.js';
+export { buildCitationsBox };
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -2316,6 +2318,10 @@ export function addMessage(role, content, modelName, metadata) {
           if (isLastTextRound && metadata?.rag_sources?.length) {
             agentFindingsSuffix += buildRagSourcesBox(metadata.rag_sources);
           }
+          // Structured citations (RAG/research) — restored on the final text round.
+          if (isLastTextRound && metadata?.citations?.length) {
+            agentFindingsSuffix += buildCitationsBox(metadata.citations);
+          }
           body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(txt)) + agentFindingsSuffix;
           wrap.appendChild(body);
           wrap.dataset.raw = txt;
@@ -2511,6 +2517,10 @@ export function addMessage(role, content, modelName, metadata) {
     // RAG document sources — restored from metadata so they survive refresh.
     if (role === 'assistant' && metadata?.rag_sources?.length) {
       findingsSuffix += buildRagSourcesBox(metadata.rag_sources);
+    }
+    // Structured citations (RAG/research) — restored from metadata.
+    if (role === 'assistant' && metadata?.citations?.length) {
+      findingsSuffix += buildCitationsBox(metadata.citations);
     }
     // If thinking is stored in metadata (not in text), reconstruct the full display
     if (role === 'assistant' && metadata?.thinking) {

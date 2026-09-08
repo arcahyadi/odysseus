@@ -38,6 +38,9 @@ class MemoryAddRequest(BaseModel):
     category: str = Field(default="fact", description="Memory category")
     source: str = Field(default="user", description="Memory source")
     session_id: Optional[str] = Field(default=None, description="Associated session ID")
+    expires_at: Optional[str] = Field(default=None, description="Optional ISO-8601 UTC expiry (YYYY-MM-DDTHH:MM:SSZ)")
+    active_from: Optional[str] = Field(default=None, description="Optional ISO-8601 UTC activation time (YYYY-MM-DDTHH:MM:SSZ)")
+    crew_member_id: Optional[str] = Field(default=None, description="Optional persona/crew namespace tag")
 
     @field_validator('category')
     @classmethod
@@ -50,6 +53,8 @@ class MemoryAddRequest(BaseModel):
 class MemoryUpdateRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000, description="Updated memory text")
     category: Optional[str] = Field(default=None, pattern="^(fact|contact|task|preference|identity|project|goal)$", description="Memory category")
+    expires_at: Optional[str] = Field(default=None, description="Optional ISO-8601 UTC expiry (YYYY-MM-DDTHH:MM:SSZ)")
+    active_from: Optional[str] = Field(default=None, description="Optional ISO-8601 UTC activation time (YYYY-MM-DDTHH:MM:SSZ)")
 
 
 class PresetUpdateRequest(BaseModel):

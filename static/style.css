@@ -6545,6 +6545,206 @@ body.bg-pattern-sparkles {
         font-size: 12px;
       }
     }
+/* ── Voice Session ─────────────────────────────────────────────────────────
+   Styles for the hands-free STT→chat→TTS loop (voice-session.js).
+   States: idle | listening | thinking | speaking | disabled
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* ── Toolbar button ── */
+.voice-session-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s, border-color 0.18s, box-shadow 0.18s;
+  flex-shrink: 0;
+}
+
+.voice-session-btn:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border-color: color-mix(in srgb, var(--fg) 40%, transparent);
+}
+
+/* Active states — listening */
+.voice-session-btn.vs-state-listening {
+  background: color-mix(in srgb, var(--color-recording, #ff3b30) 18%, transparent);
+  border-color: var(--color-recording, #ff3b30);
+  color: var(--color-recording, #ff3b30);
+  animation: vs-btn-pulse 1.4s ease-in-out infinite;
+}
+
+/* Active states — thinking */
+.voice-session-btn.vs-state-thinking {
+  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+  border-color: var(--accent, var(--red));
+  color: var(--accent, var(--red));
+}
+
+/* Active states — speaking */
+.voice-session-btn.vs-state-speaking {
+  background: color-mix(in srgb, var(--color-success, #98c379) 16%, transparent);
+  border-color: var(--color-success, #98c379);
+  color: var(--color-success, #98c379);
+  animation: vs-btn-wave 1.6s ease-in-out infinite;
+}
+
+@keyframes vs-btn-pulse {
+  0%, 100% { box-shadow: 0 0 0 0   color-mix(in srgb, var(--color-recording, #ff3b30) 50%, transparent); }
+  50%       { box-shadow: 0 0 0 5px color-mix(in srgb, var(--color-recording, #ff3b30) 0%,  transparent); }
+}
+
+@keyframes vs-btn-wave {
+  0%, 100% { transform: scale(1);    }
+  50%       { transform: scale(1.08); }
+}
+
+/* ── Floating indicator pill ── */
+#voice-session-indicator {
+  position: fixed;
+  bottom: 88px;          /* sits just above the chat input bar */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 12px;
+  border-radius: 24px;
+  background: var(--panel, #1e1e2e);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.35);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: auto;
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+#voice-session-indicator.vs-hidden {
+  opacity: 0;
+  transform: translateX(-50%) translateY(6px);
+  pointer-events: none;
+}
+
+/* State-specific accent colours on the pill */
+#voice-session-indicator[data-vs-state="listening"] {
+  border-color: var(--color-recording, #ff3b30);
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--color-recording, #ff3b30) 25%, transparent);
+}
+
+#voice-session-indicator[data-vs-state="thinking"] {
+  border-color: var(--accent, var(--red));
+}
+
+#voice-session-indicator[data-vs-state="speaking"] {
+  border-color: var(--color-success, #98c379);
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--color-success, #98c379) 20%, transparent);
+}
+
+/* ── Label inside pill ── */
+.vs-label {
+  min-width: 72px;
+}
+
+/* ── Stop button inside pill ── */
+.vs-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.vs-stop-btn:hover {
+  background: color-mix(in srgb, var(--color-recording, #ff3b30) 85%, transparent);
+  color: #fff;
+}
+
+/* ── Animated waveform bars inside the pill ── */
+.vs-wave-wrap {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+}
+
+.vs-wave-bar {
+  stroke-width: 2.5;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* Idle pill state — bars all flat */
+#voice-session-indicator .vs-wave-1 { stroke: var(--color-recording, #ff3b30); }
+#voice-session-indicator .vs-wave-2 { stroke: var(--color-recording, #ff3b30); }
+#voice-session-indicator .vs-wave-3 { stroke: var(--color-recording, #ff3b30); }
+#voice-session-indicator .vs-wave-4 { stroke: var(--color-recording, #ff3b30); }
+#voice-session-indicator .vs-wave-5 { stroke: var(--color-recording, #ff3b30); }
+#voice-session-indicator .vs-wave-6 { stroke: var(--color-recording, #ff3b30); }
+
+/* Listening — animated equaliser */
+#voice-session-indicator[data-vs-state="listening"] .vs-wave-1 { animation: vs-eq 1.0s -0.5s  ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="listening"] .vs-wave-2 { animation: vs-eq 1.0s -0.35s ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="listening"] .vs-wave-3 { animation: vs-eq 1.0s -0.2s  ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="listening"] .vs-wave-4 { animation: vs-eq 1.0s -0.05s ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="listening"] .vs-wave-5 { animation: vs-eq 1.0s -0.3s  ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="listening"] .vs-wave-6 { animation: vs-eq 1.0s -0.15s ease-in-out infinite; }
+
+/* Thinking — slower, subtler pulse */
+#voice-session-indicator[data-vs-state="thinking"] .vs-wave-1,
+#voice-session-indicator[data-vs-state="thinking"] .vs-wave-2,
+#voice-session-indicator[data-vs-state="thinking"] .vs-wave-3,
+#voice-session-indicator[data-vs-state="thinking"] .vs-wave-4,
+#voice-session-indicator[data-vs-state="thinking"] .vs-wave-5,
+#voice-session-indicator[data-vs-state="thinking"] .vs-wave-6 {
+  stroke: var(--accent, var(--red));
+  animation: vs-eq-slow 2.0s ease-in-out infinite;
+}
+
+/* Speaking — fast ripple */
+#voice-session-indicator[data-vs-state="speaking"] .vs-wave-1 { stroke: var(--color-success, #98c379); animation: vs-eq 0.6s -0.4s  ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="speaking"] .vs-wave-2 { stroke: var(--color-success, #98c379); animation: vs-eq 0.6s -0.28s ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="speaking"] .vs-wave-3 { stroke: var(--color-success, #98c379); animation: vs-eq 0.6s -0.16s ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="speaking"] .vs-wave-4 { stroke: var(--color-success, #98c379); animation: vs-eq 0.6s -0.04s ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="speaking"] .vs-wave-5 { stroke: var(--color-success, #98c379); animation: vs-eq 0.6s -0.22s ease-in-out infinite; }
+#voice-session-indicator[data-vs-state="speaking"] .vs-wave-6 { stroke: var(--color-success, #98c379); animation: vs-eq 0.6s -0.10s ease-in-out infinite; }
+
+@keyframes vs-eq {
+  0%, 100% { stroke-width: 2.5; opacity: 0.6; }
+  50%       { stroke-width: 2.5; opacity: 1;   }
+}
+/* We animate opacity since animating y1/y2 on SVG <line> via CSS isn't
+   universally supported without SMIL; the bar height is set statically
+   per bar in the SVG, giving a natural equaliser silhouette. */
+
+@keyframes vs-eq-slow {
+  0%, 100% { opacity: 0.3; }
+  50%       { opacity: 0.8; }
+}
+
+/* ── Mobile: move pill to bottom-center above safe area ── */
+@media (max-width: 600px) {
+  #voice-session-indicator {
+    bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+    font-size: 12px;
+    padding: 7px 12px 7px 10px;
+  }
+}
+
 /* SYNTAX HIGHLIGHTING — uses theme vars from style.css, no hardcoded overrides */
 .hljs { color: var(--hl-fg, #9cdef2); background: none !important; }
 pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
@@ -40448,3 +40648,82 @@ body.theme-frosted .modal {
   .compare-grid[data-cols] { grid-template-columns: 1fr !important; overflow-y: auto; }
   .compare-pane { min-height: 60dvh; }
 }
+
+/* ── Phase 2: citations box ───────────────────────────────────────────────
+   Structured citations appended under RAG / research answers. */
+.citations-box {
+  margin-top: 8px;
+  border: 1px solid var(--border, #3e4451);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.85em;
+}
+.citations-box > summary {
+  cursor: pointer;
+  color: color-mix(in srgb, var(--fg, #abb2bf) 80%, transparent);
+  font-weight: 600;
+}
+.citation-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+}
+.citation-num {
+  flex: none;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent, #61afef) 25%, transparent);
+  color: var(--fg, #abb2bf);
+  font-size: 0.7em;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.citation-link { color: var(--accent, #61afef); text-decoration: none; }
+.citation-link:hover { text-decoration: underline; }
+.citation-confidence {
+  margin-left: auto;
+  color: color-mix(in srgb, var(--fg, #abb2bf) 55%, transparent);
+  font-size: 0.75em;
+}
+.citation-snippet {
+  color: color-mix(in srgb, var(--fg, #abb2bf) 65%, transparent);
+  font-size: 0.82em;
+  margin: 2px 0 0 22px;
+}
+
+/* ── Phase 2: header icon buttons (digest / knowledge graph) ───────────── */
+.p2-icon-btn { margin-left: 4px; }
+.p2-icon-btn svg { display: block; }
+
+/* ── Phase 2: digest + graph modal details ─────────────────────────────── */
+.p2-digest-modal .modal-content,
+.p2-graph-modal .modal-content {
+  max-width: min(92vw, 720px);
+}
+.p2-muted { color: color-mix(in srgb, var(--fg, #abb2bf) 55%, transparent); }
+.p2-digest-card { border-color: var(--border, #3e4451); }
+.p2-digest-card details > summary { cursor: pointer; }
+
+/* ── Phase 2: plans panel (doc-to-action host) ─────────────────────────── */
+.p2-plan-row { border-color: var(--border, #3e4451); }
+.p2-plan-status {
+  font-size: 0.72em;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--border, #3e4451) 60%, transparent);
+  color: color-mix(in srgb, var(--fg, #abb2bf) 80%, transparent);
+}
+.p2-plan-status:empty { display: none; }
+.plan-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8em;
+}
+.plan-progress progress { flex: 1; }
+.plan-progress__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.plan-progress__counts { color: color-mix(in srgb, var(--fg, #abb2bf) 60%, transparent); }
+.plan-progress__current { color: var(--accent, #61afef); }
+.plan-progress__status { text-transform: uppercase; font-size: 0.7em; }

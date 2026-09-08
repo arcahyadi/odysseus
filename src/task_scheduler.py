@@ -248,6 +248,10 @@ HOUSEKEEPING_DEFAULTS = {
     "classify_events":      {"name": "Calendar Classify Events", "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 6,18 * * *", "ship_paused": True, "legacy_names": ["Classify Calendar Events"]},
     "check_email_urgency":   {"name": "Email Tags",               "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 * * * *", "ship_paused": True, "old_cron_expressions": ["*/15 * * * *"], "legacy_names": ["Email Triage", "Urgent Email"]},
     "audit_skills":          {"name": "Skills Audit",             "trigger_type": "event", "trigger_event": "skill_added", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Audit Skills"]},
+    # Phase 2: morning digest (opt-in: LLM per owner daily) + temporal memory
+    # expiry housekeeping (cheap, runs by default).
+    "morning_digest":        {"name": "Morning Digest",           "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 2 * * *", "ship_paused": True, "legacy_names": ["Daily Briefing"]},
+    "run_memory_expiry":     {"name": "Memory Expiry Pass",       "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 * * * *", "legacy_names": ["Temporal Memory Expiry"]},
 }
 
 RETIRED_HOUSEKEEPING_ACTIONS = frozenset({
@@ -2072,13 +2076,25 @@ class TaskScheduler:
         try:
             RESEARCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
             findings = getattr(researcher, "findings", []) or []
+            sources = ResearchHandler._extract_sources(findings)
+            # Phase 2: structured citations + References section (Req 7.4)
+            report_out = report or ""
+            citations = []
+            try:
+                from services.citations.citation_service import citation_service
+                citations = citation_service.build_research_citations(sources)
+                if citations:
+                    report_out = citation_service.inject_references_section(report_out, citations)
+            except Exception as _ce:
+                logger.warning("Research citation build failed: %s", _ce)
             payload = {
                 "query": task.prompt or task.name or "Scheduled research",
                 "status": "done",
-                "result": report,
-                "raw_report": strip_thinking(report or ""),
-                "sources": ResearchHandler._extract_sources(findings),
+                "result": report_out,
+                "raw_report": strip_thinking(report_out or ""),
+                "sources": sources,
                 "raw_findings": ResearchHandler._extract_raw_findings(findings),
+                "citations": citations,
                 "stats": stats,
                 "category": "scheduled",
                 "started_at": started_ts,

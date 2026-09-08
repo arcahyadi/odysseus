@@ -2731,6 +2731,52 @@ async def action_cookbook_serve(
     return f"Launched {repo_id} (session {sid})", True
 
 
+async def action_morning_digest(owner: str, **kwargs) -> Tuple[str, bool]:
+    """LLM-synthesised morning briefing: calendar, unread email, todos.
+
+    Phase 2 auto-digest: delegates to MorningDigestService.generate(), which
+    collects the day's data, synthesises a spoken-style narrative, and persists
+    it to the ``digests`` table (content keys: narrative/calendar/email/todos/
+    focus). Never raises — failures degrade to the service's plain-text
+    fallback or a TaskNoop-style message.
+    """
+    try:
+        from services.digest.digest_service import morning_digest_service
+        result = await morning_digest_service.generate(owner)
+        content = (result or {}).get("content") or {}
+        if isinstance(content, dict):
+            narrative = str(content.get("narrative") or "").strip()
+        else:
+            narrative = str(content or "").strip()
+        date_str = (result or {}).get("date") or ""
+        if not narrative:
+            return (f"Morning digest {date_str}: generated with no narrative.", True)
+        return (f"Morning digest {date_str} ready: {narrative[:400]}", True)
+    except Exception as exc:
+        logger.warning("morning_digest action failed for owner=%s: %s", owner, exc)
+        return (f"Morning digest could not be generated: {exc}", False)
+
+
+async def action_run_memory_expiry(owner: str, **kwargs) -> Tuple[str, bool]:
+    """Archive expired temporal memories (Phase 2, Req 1.4/1.5).
+
+    Runs TemporalMemoryStore.run_expiry_pass() against the owner's memory
+    store; entries whose expires_at has passed are archived and dropped from
+    the vector index when available. No-op when the store has nothing to do.
+    """
+    try:
+        from src.memory import MemoryManager
+        from services.memory.temporal import TemporalMemoryStore
+        manager = MemoryManager(DATA_DIR)
+        archived = TemporalMemoryStore(manager).run_expiry_pass()
+        if archived:
+            return (f"Memory expiry pass: archived {archived} expired entr(y/ies).", True)
+        return ("Memory expiry pass: nothing to archive.", True)
+    except Exception as exc:
+        logger.warning("run_memory_expiry action failed: %s", exc)
+        return (f"Memory expiry pass failed: {exc}", False)
+
+
 BUILTIN_ACTIONS = {
     "tidy_sessions": action_tidy_sessions,
     "tidy_documents": action_tidy_documents,
@@ -2752,6 +2798,8 @@ BUILTIN_ACTIONS = {
     "audit_skills": action_audit_skills,
     "check_email_urgency": action_check_email_urgency,
     "cookbook_serve": action_cookbook_serve,
+    "morning_digest": action_morning_digest,
+    "run_memory_expiry": action_run_memory_expiry,
     # ping_notes removed from the registry — runs only inside `_note_pings_loop`.
 }
 
@@ -2773,4 +2821,6 @@ BUILTIN_ACTION_INFO = {
     "test_skills": "Run the per-skill Test on every skill: agent run + LLM judge → records verdict on the skill (pass/needs_work/fail/inconclusive). Advisory only — never rewrites or demotes anything.",
     "audit_skills": "Audit unaudited skills after enough new skills are added: test, narrow metadata, self-edit/retry, optional teacher rewrite, tag duplicates/trivial skills, and publish/draft using the auto-approve threshold.",
     "check_email_urgency": "Scan unread emails hourly, tag urgent/reply-soon/newsletter/marketing/spam, and send a reminder when a new email needs a fast reply.",
+    "morning_digest": "LLM-synthesised morning briefing: today's calendar, unread email highlights, and open todos delivered as a warm spoken-style narrative.",
+    "run_memory_expiry": "Archive temporal memories whose expiry time has passed.",
 }

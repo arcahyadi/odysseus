@@ -2434,6 +2434,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               } else if (json.type === 'rag_sources') {
                 if (_isBg) continue;
                 holder._ragSources = json.data;
+              } else if (json.type === 'citations') {
+                if (_isBg) continue;
+                holder._citations = json.data;
               } else if (json.type === 'memories_used') {
                 if (_isBg) continue;
                 holder._memoriesUsed = json.data;
@@ -3095,6 +3098,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             details.appendChild(item);
           });
           holder.querySelector('.body').appendChild(details);
+        }
+
+        // Render structured citations if the stream delivered them (phase 2).
+        if (holder._citations && holder._citations.length) {
+          const _bodyForCitations = holder.querySelector('.body') || holder;
+          if (!_bodyForCitations.querySelector('.citations-box')) {
+            _bodyForCitations.insertAdjacentHTML('beforeend', chatRenderer.buildCitationsBox(holder._citations));
+          }
         }
 
         // Hide first bubble if it has no visible text content (e.g. agent went straight to tools)
@@ -3855,6 +3866,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           } else if (json.type === 'tool_start' || json.type === 'tool_output' ||
                      json.type === 'tool_progress' || json.type === 'agent_step' ||
                      json.type === 'web_sources' || json.type === 'rag_sources' ||
+                     json.type === 'citations' ||
                      json.type === 'research_progress' || json.type === 'research_sources' ||
                      json.type === 'research_findings' || json.type === 'research_done') {
             rich = true;

@@ -95,7 +95,10 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 text=form.get("text"),
                 category=form.get("category", "fact"),
                 source=form.get("source", "user"),
-                session_id=form.get("session_id")
+                session_id=form.get("session_id"),
+                expires_at=form.get("expires_at"),
+                active_from=form.get("active_from"),
+                crew_member_id=form.get("crew_member_id")
             )
 
         user = _owner(request)
@@ -116,6 +119,26 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         new_entry = memory_manager.add_entry(text, memory_data.source, memory_data.category, owner=user)
         if memory_data.session_id:
             new_entry["session_id"] = memory_data.session_id
+
+        # ── Phase 2: temporal fields + persona namespace tagging (Req 2.x, 5.x) ──
+        expires_at = getattr(memory_data, "expires_at", None)
+        active_from = getattr(memory_data, "active_from", None)
+        crew_member_id = getattr(memory_data, "crew_member_id", None)
+        if expires_at or active_from or crew_member_id:
+            try:
+                from services.memory.temporal import TemporalMemoryStore
+                from services.memory.namespace import NamespaceResolver
+            except ImportError:
+                raise HTTPException(501, "Phase 2 memory services not available")
+            try:
+                if expires_at or active_from:
+                    TemporalMemoryStore(memory_manager, memory_vector).validate_temporal_fields(expires_at, active_from)
+                    new_entry = TemporalMemoryStore(memory_manager, memory_vector).set_temporal(new_entry, expires_at, active_from)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            if crew_member_id:
+                new_entry = NamespaceResolver(memory_manager).write_entry(new_entry, crew_member_id)
+
         all_mem = memory_manager.load_all()
         all_mem.append(new_entry)
         memory_manager.save(all_mem)
@@ -509,7 +532,8 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         raise HTTPException(404, "Memory not found")
 
     @router.put("/{memory_id}")
-    def update_memory(request: Request, memory_id: str, text: str = Form(...), category: str = Form(None)):
+    def update_memory(request: Request, memory_id: str, text: str = Form(...), category: str = Form(None),
+                      expires_at: str = Form(None), active_from: str = Form(None)):
         """Update an existing memory item with new text and optional category."""
         user = _owner(request)
         all_mem = memory_manager.load_all()
@@ -520,6 +544,18 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 if category:
                     all_mem[i]["category"] = category
                 all_mem[i]["timestamp"] = int(time.time())
+
+                # Phase 2: optional temporal field update (Req 2.x)
+                if expires_at or active_from:
+                    try:
+                        from services.memory.temporal import TemporalMemoryStore
+                    except ImportError:
+                        raise HTTPException(501, "Temporal memory not available")
+                    try:
+                        TemporalMemoryStore(memory_manager, memory_vector).validate_temporal_fields(expires_at, active_from)
+                        all_mem[i] = TemporalMemoryStore(memory_manager, memory_vector).set_temporal(all_mem[i], expires_at, active_from)
+                    except ValueError as e:
+                        raise HTTPException(422, str(e))
 
                 memory_manager.save(all_mem)
                 # Sync vector index (remove old, add updated)
@@ -548,5 +584,58 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if memory_vector and memory_vector.healthy:
             memory_vector.remove(memory_id)
         return {"ok": True, "message": "Memory deleted successfully"}
+
+    # ── Phase 2: Temporal time-range retrieval (Req 2.5, 2.6) ────────────────
+
+    @router.get("/time-range")
+    def memory_time_range(
+        request: Request,
+        from_dt: Optional[str] = None,
+        to_dt: Optional[str] = None,
+        include_archived: bool = False,
+    ):
+        """Return memory entries whose timestamp falls in [from_dt, to_dt]."""
+        try:
+            from services.memory.temporal import TemporalMemoryStore
+        except ImportError:
+            raise HTTPException(status_code=501, detail="Temporal memory not available")
+        user = get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        all_entries = memory_manager.load(user) if hasattr(memory_manager, "load") else []
+        t_store = TemporalMemoryStore(memory_manager, memory_vector)
+        results = t_store.time_range_query(
+            all_entries, from_dt=from_dt, to_dt=to_dt, include_archived=include_archived
+        )
+        return {"entries": results, "count": len(results)}
+
+    # ── Phase 2: Promote memory to global namespace (Req 5.4–5.6) ────────────
+
+    class _PromoteRequest(BaseModel if False else object):
+        pass
+
+    from pydantic import BaseModel as _BaseModel
+
+    class PromoteRequest(_BaseModel):
+        entry_id: str
+
+    @router.post("/promote")
+    def promote_memory(request: Request, body: PromoteRequest):
+        """Move a memory entry from persona namespace to global."""
+        try:
+            from services.memory.namespace import NamespaceResolver
+        except ImportError:
+            raise HTTPException(status_code=501, detail="Namespace resolver not available")
+        user = get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        ns_resolver = NamespaceResolver(memory_manager)
+        try:
+            entry = ns_resolver.promote_to_global(body.entry_id, user)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Memory entry not found")
+        except ValueError:
+            raise HTTPException(status_code=409, detail="Entry is already in global namespace")
+        return {"ok": True, "entry": entry}
 
     return router
