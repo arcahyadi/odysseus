@@ -14,8 +14,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 $('#server').addEventListener('change', persist);
 $('#token').addEventListener('change', persist);
-$('#type').addEventListener('change', persist);
+$('#type').addEventListener('change', onTypeChange);
 $('#mode').addEventListener('change', onModeChange);
+$('#session').addEventListener('change', persist);
+
+function onTypeChange() {
+  const isChat = $('#type').value === 'chat';
+  $('#session-label').hidden = !isChat;
+  $('#session').hidden = !isChat;
+  persist();
+}
 
 async function persist() {
   await chrome.storage.sync.set({
@@ -60,7 +68,7 @@ $('#send').addEventListener('click', async () => {
   }
   const payload = {
     kind: 'odysseus.clipper.send',
-    payload: { type: $('#type').value, title: '', text },
+    payload: { type: $('#type').value, title: '', text, sessionId: $('#session').value.trim() },
   };
   try {
     const resp = await chrome.runtime.sendMessage(payload);

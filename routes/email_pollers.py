@@ -462,6 +462,32 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 if att_text:
                     body_for_llm = (body or "") + "\n\n--- ATTACHMENTS ---\n\n" + att_text
 
+                # ── Email automation rules (phase 3) ───────────────────────
+                # Fire trigger rules on newly arrived, substantive emails only.
+                # Dedupe: skip messages already cached by any earlier pass so a
+                # summarize pass + reply pass don't fire the same rule twice.
+                try:
+                    if (
+                        message_id not in _sum_existing
+                        and message_id not in _reply_existing
+                        and message_id not in _cal_existing
+                        and message_id not in _urgent_existing
+                    ):
+                        from services.email_rules import (
+                            db_rules_loader, RuleEngine, execute_rule_actions,
+                        )
+                        _rule_owner = account_owner or ""
+                        _rule_engine = RuleEngine(rules_loader=db_rules_loader(_rule_owner))
+                        _rule_email = {
+                            "sender": sender, "subject": subject,
+                            "body": (body or "")[:6000], "folder": _folder,
+                        }
+                        _rule_actions = _rule_engine.matching_actions(_rule_owner, _rule_email)
+                        if _rule_actions:
+                            execute_rule_actions(_rule_owner, _rule_email, _rule_actions)
+                except Exception as _re:
+                    logger.warning(f"email rule evaluation failed uid={uid}: {_re}")
+
                 req_headers = {"Content-Type": "application/json"}
                 if headers:
                     req_headers.update(headers)

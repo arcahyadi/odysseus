@@ -9,7 +9,7 @@
  *   note     -> POST {origin}/api/notes     {title, content, note_type: "note"}
  *   memory   -> POST {origin}/api/memory    {text, source: "clipper"}
  *   document -> POST {origin}/api/document  {title, content}
- *   chat     -> POST {origin}/api/chat      {message}   (verify body on your build)
+ *   chat     -> POST {origin}/api/chat      {message, session}  (existing session id)
  */
 const TARGET_ENDPOINTS = {
   note: '/api/notes',
@@ -55,7 +55,7 @@ function pageTitle(tab) {
   return (tab && tab.title) || document.title || '';
 }
 
-async function sendToOdysseus({ type, title, text, pageUrl }) {
+async function sendToOdysseus({ type, title, text, pageUrl, sessionId }) {
   const { origin, token } = await getConfig();
   const endpoint = TARGET_ENDPOINTS[type];
   if (!endpoint) throw new Error('Unknown target type: ' + type);
@@ -70,7 +70,8 @@ async function sendToOdysseus({ type, title, text, pageUrl }) {
   } else if (type === 'document') {
     body = JSON.stringify({ title: title || 'Clipped page', content: text });
   } else {
-    body = JSON.stringify({ message: text });
+    // Chat requires an existing session id (chat_routes ChatRequest).
+    body = JSON.stringify({ message: text, session: sessionId || '' });
   }
 
   const res = await fetch(origin + endpoint, { method: 'POST', headers, body });

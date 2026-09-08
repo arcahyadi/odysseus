@@ -33,7 +33,7 @@ Odysseus server as a **note**, **document**, **memory**, or **chat message**.
 | Note | `POST {origin}/api/notes` `{title, content, note_type: "note"}` |
 | Memory | `POST {origin}/api/memory` `{text, source: "clipper"}` |
 | Document | `POST {origin}/api/document` `{title, content}` |
-| Chat | `POST {origin}/api/chat` `{message}` (verify body for your build) |
+| Chat | `POST {origin}/api/chat` `{message, session}` — requires an existing chat session id (the popup shows a *Session id* field when Chat is selected) |
 
 Auth: `Authorization: Bearer <ody_…>` (see `src/auth_helpers.py`). The LAN
 pairing flow in `companion/` is the alternative for token discovery: run the
