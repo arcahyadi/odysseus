@@ -5,6 +5,24 @@ Odysseus is on a voyage, but not home yet. It works great for me (lol), but this
 If you see weird CSS, strange layout behavior, or a suspiciously murky corner of
 the codebase, you are probably right to stay away.
 
+## In Progress — current build iteration (2026-09)
+
+Tracked in the project task board. Phase 1 (intelligence/reasoning) and Phase 2
+(knowledge/memory: digest, knowledge graph, citations, temporal memory) code is
+implemented with `tests/phase2` passing; the only open spec item is the final
+end-to-end checkpoint (`.kiro/specs/phase-2-knowledge-memory/tasks.md` L204).
+
+Being built now:
+- **Email automation rules (#6)**: trigger-based rules ("when an email matching X
+  arrives → summarize / create a task / draft a reply / add a calendar event")
+  over the existing email + task-scheduler plumbing.
+- **Browser extension / web clipper (#4)**: Manifest V3 extension in `extension/`
+  that sends selected text / pages to Odysseus (note / research / memory / chat),
+  using the existing companion pairing + token auth.
+
+Still open from the earlier gap analysis: shared real-time workspaces (#8),
+plugin/extension marketplace (#10), and the ROADMAP items below.
+
 ## High Priority
 
 - SQUASH BUGS

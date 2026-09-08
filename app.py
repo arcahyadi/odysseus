@@ -890,6 +890,10 @@ app.include_router(graph_router)
 from routes.digest.digest_routes import router as digest_router
 app.include_router(digest_router)
 
+# Email automation rules
+from routes.email_rules import router as email_rules_router
+app.include_router(email_rules_router)
+
 # ========= ROUTES (kept in app.py) =========
 
 @app.get("/")

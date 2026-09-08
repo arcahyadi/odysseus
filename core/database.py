@@ -942,6 +942,29 @@ class Digest(Base):
     )
 
 
+class EmailRule(Base):
+    """Trigger-based email automation rule (match → actions)."""
+
+    __tablename__ = "email_rules"
+
+    id          = Column(String, primary_key=True, index=True)
+    owner       = Column(String, nullable=False, index=True)
+    name        = Column(String, nullable=False, default="")
+    # Matchers stored as JSON: {"sender_contains": str, "subject_contains": str,
+    #                           "body_contains": str, "folder": str}
+    matchers    = Column(Text, nullable=False, default="{}")
+    # Actions stored as JSON array of strings from:
+    # summarize | create_task | draft_reply | add_event
+    actions     = Column(Text, nullable=False, default="[]")
+    enabled     = Column(Boolean, nullable=False, default=True)
+    created_at  = Column(DateTime, nullable=False)
+    updated_at  = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_email_rules_owner_enabled", "owner", "enabled"),
+    )
+
+
 def _migrate_add_phase1_session_columns():
     """Add Phase 1 session fork + persona columns to sessions if missing.
 
