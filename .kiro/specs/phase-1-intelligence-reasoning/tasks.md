@@ -29,7 +29,7 @@ Property-based tests use `pytest` + `hypothesis`. New files go in the locations 
     - Import and call `run_phase1_migrations(engine)` in the lifespan handler, before the existing `Base.metadata.create_all(engine)` call
     - _Requirements: 13.1, 13.4_
 
-  - [ ]* 1.4 Write integration test for migration idempotency
+  - [x]* 1.4 Write integration test for migration idempotency
     - In `tests/phase1/test_migrations.py`, call `run_phase1_migrations()` twice on an in-memory SQLite DB and assert no exception is raised and all columns exist after both calls
     - _Requirements: 13.1_
 
@@ -53,13 +53,13 @@ Property-based tests use `pytest` + `hypothesis`. New files go in the locations 
     - `cancel_run` sets flags and bulk-updates all tree records to `cancelled` synchronously
     - _Requirements: 2.3, 2.4, 2.5_
 
-  - [ ]* 2.4 Write property test for agent tree depth invariant
+  - [x]* 2.4 Write property test for agent tree depth invariant
     - In `tests/phase1/test_orchestrator.py`
     - **Property 1: Agent Tree Depth Invariant**
     - **Property 2: Agent Run Parent Linkage Invariant**
     - **Validates: Requirements 1.7, 1.8, 1.2**
 
-  - [ ]* 2.5 Write unit tests for orchestrator pause/cancel/error propagation
+  - [x]* 2.5 Write unit tests for orchestrator pause/cancel/error propagation
     - Test pause → resume state cycle; test cancel sets all tree nodes to `cancelled`; test sub-agent failure propagates `error_detail` to parent
     - _Requirements: 1.6, 2.3, 2.4, 2.5_
 
@@ -76,13 +76,13 @@ Property-based tests use `pytest` + `hypothesis`. New files go in the locations 
     - `effective_tools_for_session(session_id, base_policy)` — returns `base_policy.intersect(allowed_tools)` when persona is active
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 13.6_
 
-  - [ ]* 3.2 Write property tests for persona name validation
+  - [x]* 3.2 Write property tests for persona name validation
     - In `tests/phase1/test_persona_manager.py`
     - **Property 3: Persona Name Uniqueness and Length Invariant**
     - **Property 4: Persona Update Non-Interference**
     - **Validates: Requirements 3.5, 3.3**
 
-  - [ ]* 3.3 Write unit tests for persona CRUD and activation
+  - [x]* 3.3 Write unit tests for persona CRUD and activation
     - Test built-in seeding idempotency; test per-user limit enforcement; test activation stamps session column; test deactivation clears it; test built-in cannot be modified or deleted by user
     - _Requirements: 3.2, 3.4, 3.6, 3.7, 3.8, 4.1, 4.6_
 
@@ -100,14 +100,14 @@ Property-based tests use `pytest` + `hypothesis`. New files go in the locations 
     - Persist `Plan.current_step_index` and `PlanStep.status` after every step transition for crash-safe resumption
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7_
 
-  - [ ]* 4.3 Write property tests for plan step invariants
+  - [x]* 4.3 Write property tests for plan step invariants
     - In `tests/phase1/test_plan_executor.py`
     - **Property 5: Plan Step Count Bounds**
     - **Property 6: Plan Step Ordering Invariant**
     - **Property 7: Plan Resumption Skips Completed Steps**
     - **Validates: Requirements 5.3, 5.2, 6.4**
 
-  - [ ]* 4.4 Write unit tests for plan execution edge cases
+  - [x]* 4.4 Write unit tests for plan execution edge cases
     - Test resumption from mid-plan (some steps `done`); test retry exhaustion transitions plan to `paused_on_failure`; test manual `done`/`skipped` override; test cancel halts loop
     - _Requirements: 6.3, 6.4, 6.5, 6.7_
 
@@ -126,12 +126,12 @@ Property-based tests use `pytest` + `hypothesis`. New files go in the locations 
     - This is the ONLY modification to `chat_helpers.py`; `chat_routes.py` is not touched
     - _Requirements: 7.2, 13.2, 13.5_
 
-  - [ ]* 5.3 Write property test for critique fallback
+  - [x]* 5.3 Write property test for critique fallback
     - In `tests/phase1/test_critique_service.py`
     - **Property 8: Critique Fallback Preserves Draft**
     - **Validates: Requirements 7.9**
 
-  - [ ]* 5.4 Write unit tests for critique pipeline
+  - [x]* 5.4 Write unit tests for critique pipeline
     - Test full pipeline (was_revised=True); test no-revision passthrough (was_revised=False); test 30-second timeout falls back to draft; test `CritiquePassRecord` metadata fields are persisted in all paths
     - _Requirements: 7.3, 7.4, 7.8, 7.9, 8.6_
 
@@ -148,13 +148,13 @@ Property-based tests use `pytest` + `hypothesis`. New files go in the locations 
     - `TraceStore.list_for_session(session_id)` — returns all traces for a session without node content (list view)
     - _Requirements: 9.2, 9.3, 9.4, 9.5, 9.6_
 
-  - [ ]* 6.3 Write property tests for trace extraction and node indexing
+  - [x]* 6.3 Write property tests for trace extraction and node indexing
     - In `tests/phase1/test_trace_extractor.py`
     - **Property 9: Think Tag Extraction Round-Trip**
     - **Property 10: Reasoning Node Uniqueness and Sequential Indexing**
     - **Validates: Requirements 9.1, 9.2**
 
-  - [ ]* 6.4 Write unit tests for trace edge cases
+  - [x]* 6.4 Write unit tests for trace edge cases
     - Test multi-block extraction; test streaming partial `<think>` tag (no close tag yet); test empty input returns empty segments; test session delete cascades to traces and nodes
     - _Requirements: 9.1, 9.2, 9.6_
 
@@ -213,7 +213,7 @@ Property-based tests use `pytest` + `hypothesis`. New files go in the locations 
     - Register router in `app.py`
     - _Requirements: 9.4, 10.1, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7_
 
-  - [ ]* 8.6 Write unit tests for route auth boundaries
+  - [x]* 8.6 Write unit tests for route auth boundaries
     - In `tests/phase1/` — verify 403 is returned when a user requests another user's AgentRun, Plan, and Persona; verify 404 when resource doesn't exist; verify 401 when unauthenticated
     - _Requirements: 5.5, 12.6_
 
@@ -284,7 +284,7 @@ Property-based tests use `pytest` + `hypothesis`. New files go in the locations 
     - _Requirements: 3.7, 13.4_
 
 - [x] 12. Property-based tests for fork operations
-  - [ ]* 12.1 Write property tests for fork history and session naming
+  - [x]* 12.1 Write property tests for fork history and session naming
     - In `tests/phase1/test_trace_extractor.py` or a new `tests/phase1/test_fork.py`
     - **Property 11: Fork History Prefix** — for any session with N messages, forking at message k produces a session with exactly the first k messages
     - **Property 12: Fork Session Name Truncation** — for any source content string, the fork name equals `"[Fork] " + content[:50]`
