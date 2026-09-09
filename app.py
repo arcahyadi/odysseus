@@ -894,6 +894,12 @@ app.include_router(digest_router)
 from routes.email_rules import router as email_rules_router
 app.include_router(email_rules_router)
 
+# Shared real-time workspaces (feature #8)
+from routes.session_share import router as share_router
+from routes.session_share import public_router as share_public_router
+app.include_router(share_router)
+app.include_router(share_public_router)
+
 # ========= ROUTES (kept in app.py) =========
 
 @app.get("/")

@@ -1085,6 +1085,20 @@ def save_assistant_response(
         _content = full_response
     sess.add_message(ChatMessage("assistant", _content, metadata=md))
 
+    # Shared-workspaces broadcast (#8): relay the new assistant message to
+    # live SSE subscribers of this session. Defensive — never breaks chat.
+    try:
+        from datetime import datetime, timezone
+        from services.session_share import publish
+        publish(session_id, {
+            "type": "assistant",
+            "content": _content,
+            "model": actual_model or "",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        pass
+
     if not incognito:
         from core.database import update_session_last_accessed
         update_session_last_accessed(session_id)

@@ -2702,3 +2702,42 @@ def archive_session(session_id: str):
 
 
 init_db()
+
+
+# ── Feature #8: Shared real-time workspaces ──────────────────────────────────
+
+
+class SharedSession(Base):
+    """A share link granting read-only (viewer) access to one chat session.
+
+    The `token` is the bearer credential used by the public read endpoints
+    (/api/s/{token} and /api/s/{token}/stream). It is generated server-side
+    (secrets.token_urlsafe in services/session_share) and is meant to be
+    revealed only to people the owner wants to share with. Rows cascade away
+    automatically when the underlying chat `Session` row is deleted.
+    """
+
+    __tablename__ = "shared_sessions"
+
+    id = Column(String, primary_key=True, index=True)
+    # NOTE: no index=True on owner/session_id — the explicit Index entries
+    # below would collide with the auto-generated ix_shared_sessions_* names
+    # on a fresh create_all (duplicate DDL name), breaking new-DB startup.
+    owner      = Column(String, nullable=False)  # username; "" in single-user mode
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    token      = Column(String, nullable=False)  # url-safe bearer token
+    role       = Column(String, nullable=False, default="viewer")  # viewer for now; roles reserved for later
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_shared_sessions_token"),
+        Index("ix_shared_sessions_owner", "owner"),
+        Index("ix_shared_sessions_session_id", "session_id"),
+    )
+
+
+# init_db() ran just above — before SharedSession was defined — so on existing
+# installs the new table would not be created at startup. create_all is
+# idempotent (it only creates tables that are missing), so re-run it here to
+# auto-create shared_sessions without a migration file.
+Base.metadata.create_all(bind=engine)
