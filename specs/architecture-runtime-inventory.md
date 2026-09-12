@@ -263,16 +263,16 @@ Each PR: add `__init__.py` re-exporting old names, update `app.py` router import
 
 Per maintainer guidance in #4082 and #4071:
 
-- [ ] **One domain/slice per PR** — never mix multiple reorganizations
-- [ ] **No behavior changes** mixed with file moves — pure reorganization only
-- [ ] **Keep compatibility shims** — `__init__.py` re-exports for all existing import paths
-- [ ] **Add or identify focused tests** before risky splits
-- [ ] **Do not start with `core/database.py`** or broad route movement unless this inventory shows a safe boundary
-- [ ] **Prefer small, reviewable slices** over large restructures
-- [ ] **No packaging/runtime/tooling migration** mixed into file moves
-- [ ] **No frontend framework migration** inside this stabilization lane
-- [ ] **Validate with `python -m compileall`** — every PR must pass CI checks
-- [ ] **Validate with `pytest`** — run the full test suite before opening each PR
+- [x] **One domain/slice per PR** — never mix multiple reorganizations
+- [x] **No behavior changes** mixed with file moves — pure reorganization only
+- [x] **Keep compatibility shims** — `__init__.py` re-exports for all existing import paths
+- [x] **Add or identify focused tests** before risky splits
+- [x] **Do not start with `core/database.py`** or broad route movement unless this inventory shows a safe boundary
+- [x] **Prefer small, reviewable slices** over large restructures
+- [x] **No packaging/runtime/tooling migration** mixed into file moves
+- [x] **No frontend framework migration** inside this stabilization lane
+- [x] **Validate with `python -m compileall`** — every PR must pass CI checks
+- [x] **Validate with `pytest`** — run the full test suite before opening each PR
 
 ---
 
