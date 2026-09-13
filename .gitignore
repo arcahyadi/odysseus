@@ -126,3 +126,18 @@ build/
 # .gitignore, but pin them explicitly so a cache dir can never be staged.
 .hypothesis/
 .pytest_cache/
+
+# ── Agent memory — must never be committed ─────────────────────────────────
+# The assistant's memory lives OUTSIDE this repo, under %USERPROFILE%\.accio
+# (long-term MEMORY.md, dated diary notes, and workspace memory). These rules are
+# a backstop for the case where a memory file is ever written or copied into the
+# working tree: it still cannot be staged. Root-anchored where possible, so a real
+# project file elsewhere in the tree that happens to share a name is unaffected.
+/MEMORY.md
+/ACCIO.md
+/diary/
+/.accio/
+**/agent-core/
+
+# The app's own store (data/memory.json, data/app.db) is already covered by the
+# data/ rule above. A frozen build writes to %USERPROFILE%\.odysseus instead.
