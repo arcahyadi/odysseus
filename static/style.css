@@ -164,36 +164,43 @@ html {
 
 /* ── UI text-size scale (accessibility) ──
    Density only changes the root font-size, which can't move the many
-   hard-coded px sizes. `zoom` scales the whole UI uniformly (px text
-   included) while keeping layout intact, unlike `transform: scale`. */
-:root.ui-scale-125 { zoom: 1.25; }
+   hard-coded px sizes (~55% of all font-size declarations). `zoom` on the
+   root scales the whole UI uniformly (px text, code blocks, tables, modals
+   included) while keeping layout intact, unlike `transform: scale`.
+   JS drives the single `--ui-scale` variable (80/90/100/110/125/150% →
+   0.8…1.5) and toggles the generic `.ui-scaled` class. At 100% the class is
+   removed entirely, so none of the rules below apply and the default
+   rendering stays byte-for-byte what it was before the control existed. */
+:root { --ui-scale: 1; }
+:root.ui-scaled { zoom: var(--ui-scale); }
 /* `zoom` makes the 100dvh shell render taller than the real viewport, which
    pushes the bottom-pinned sidebar account/settings row below the fold (and
    body's overflow:hidden then clips it). Shrink the shell by the same factor
-   so it fits the viewport exactly. */
-:root.ui-scale-125 body { height: calc(100dvh / 1.25); }
-/* Modals/panels under the 1.25x scale: zoom renders a centred, viewport-sized
-   panel ~1.25x taller, pushing its draggable header + close button off-screen
+   so it fits the viewport exactly. The same math holds below 100% (zoom 0.8
+   needs a 125dvh shell to still render 100dvh). */
+:root.ui-scaled body { height: calc(100dvh / var(--ui-scale)); }
+/* Modals/panels under a scaled root: zoom renders a centred, viewport-sized
+   panel ~<scale>x taller, pushing its draggable header + close button off-screen
    (a catch-22 — you can't reach the control to turn the size back down). Divide
    each max-height by the same factor to keep the original on-screen footprint.
    Desktop only — the mobile `!important` full-sheet rules win on small screens
    and stay top-anchored, so their headers are already visible. */
-:root.ui-scale-125 .modal-content          { max-height: calc(85dvh / 1.25); }
-:root.ui-scale-125 .cal-modal-content      { max-height: calc(88dvh / 1.25); }
-:root.ui-scale-125 .settings-modal-content { max-height: calc(85dvh / 1.25); }
-:root.ui-scale-125 #theme-popup            { max-height: min(calc(85dvh / 1.25), 480px); }
+:root.ui-scaled .modal-content          { max-height: calc(85dvh / var(--ui-scale)); }
+:root.ui-scaled .cal-modal-content      { max-height: calc(88dvh / var(--ui-scale)); }
+:root.ui-scaled .settings-modal-content { max-height: calc(85dvh / var(--ui-scale)); }
+:root.ui-scaled #theme-popup            { max-height: min(calc(85dvh / var(--ui-scale)), 480px); }
 /* Cookbook is the one modal that set its height inline (94vh), which beat the
-   .modal-content compensation above and overflowed the viewport at 1.25x
+   .modal-content compensation above and overflowed the viewport when scaled
    (header + close button pushed off-screen). Own its height here so the same
    zoom compensation applies. */
 #cookbook-modal .modal-content             { height: 94vh; max-height: 94vh; }
-:root.ui-scale-125 #cookbook-modal .modal-content { height: calc(94dvh / 1.25); max-height: calc(94dvh / 1.25); }
+:root.ui-scaled #cookbook-modal .modal-content { height: calc(94dvh / var(--ui-scale)); max-height: calc(94dvh / var(--ui-scale)); }
 /* PDF export modal also set its height inline (86vh) at v1.0; that inline cap
    beat the .modal-content compensation above and shifted ~1vh at Default when
    removed. Own its height here so Default is byte-for-byte 86vh and the same
-   1.25x compensation applies. */
+   zoom compensation applies. */
 .pdf-export-overlay .modal-content { max-height: 86vh; }
-:root.ui-scale-125 .pdf-export-overlay .modal-content { max-height: calc(86dvh / 1.25); }
+:root.ui-scaled .pdf-export-overlay .modal-content { max-height: calc(86dvh / var(--ui-scale)); }
 
 /* ── Background Patterns ── */
 
@@ -7012,6 +7019,13 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       font-family: inherit; cursor: pointer;
     }
     .theme-fd-select:focus { outline: none; border-color: var(--red); }
+    /* A-/A+/Reset row in the Font & Layout card — steps the global UI scale
+       (the `:root.ui-scaled` zoom further up the file). Buttons reuse
+       .theme-io-btn for the popup's look; ends of the ladder disable. */
+    .ui-scale-btn-row { display: flex; gap: 6px; }
+    .ui-scale-btn { padding: 5px 0; }
+    .ui-scale-btn:disabled { opacity: 0.3; cursor: default; }
+    .ui-scale-btn:disabled:hover { border-color: var(--border); background: transparent; }
     .theme-fd-range {
       width: 100%;
       max-width: 100%;

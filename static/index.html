@@ -85,10 +85,16 @@
         document.documentElement.classList.add('density-' + t.density);
       }
       // Apply UI text-size scale early (global accessibility pref, independent
-      // of the active theme) so there's no flash on load.
+      // of the active theme) so there's no flash on load. Mirrors theme.js
+      // applyUiScale(): set --ui-scale and toggle .ui-scaled (which carries
+      // zoom + the dvh compensations). Only ladder values apply pre-paint;
+      // a legacy off-ladder value is normalised by theme.js on load.
       try {
-        var _us = localStorage.getItem('odysseus-ui-scale');
-        if (_us && _us !== '100') document.documentElement.classList.add('ui-scale-' + _us);
+        var _us = parseInt(localStorage.getItem('odysseus-ui-scale'), 10);
+        if ([80,90,100,110,125,150].indexOf(_us) !== -1 && _us !== 100) {
+          document.documentElement.style.setProperty('--ui-scale', String(_us / 100));
+          document.documentElement.classList.add('ui-scaled');
+        }
       } catch(e){}
       // Apply background pattern on body once available
       if (t && t.bgPattern && t.bgPattern !== 'none') {
@@ -601,9 +607,21 @@
           <div class="theme-fd-group">
             <label class="theme-fd-label">Text size</label>
             <select id="theme-text-size-select" class="theme-fd-select" aria-label="Text size">
+              <option value="80">Smallest (80%)</option>
+              <option value="90">Smaller (90%)</option>
               <option value="100">Default</option>
-              <option value="125">Larger</option>
+              <option value="110">Larger (110%)</option>
+              <option value="125">Even larger (125%)</option>
+              <option value="150">Largest (150%)</option>
             </select>
+          </div>
+          <div class="theme-fd-group">
+            <label class="theme-fd-label">Adjust</label>
+            <div class="ui-scale-btn-row">
+              <button type="button" id="theme-text-size-dec" class="theme-io-btn ui-scale-btn" title="Decrease text size (Ctrl+-)" aria-label="Decrease text size">A&minus;</button>
+              <button type="button" id="theme-text-size-inc" class="theme-io-btn ui-scale-btn" title="Increase text size (Ctrl+=)" aria-label="Increase text size">A+</button>
+              <button type="button" id="theme-text-size-reset" class="theme-io-btn ui-scale-btn" title="Reset text size to default (Ctrl+0)" aria-label="Reset text size to default">&#x21BA;</button>
+            </div>
           </div>
           <div class="theme-fd-group" id="theme-frosted-group">
             <label class="theme-fd-label" for="theme-frosted-toggle">Frosted</label>

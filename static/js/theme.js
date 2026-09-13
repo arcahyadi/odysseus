@@ -390,17 +390,97 @@ export function applyFontDensity(font, density) {
 
 // UI text-size scale (accessibility). Global and independent of the active
 // theme, so the chosen size persists across theme switches. Stored as a plain
-// percentage string ('100' | '110' | '125' | '150').
-const UI_SCALE_KEY = 'odysseus-ui-scale';
-const DEFAULT_UI_SCALE = '100';
+// percentage string ('80' … '150'). Drives `--ui-scale` + the generic
+// `.ui-scaled` class (see style.css) rather than the root font-size, because
+// ~55% of the app's font sizes are hard-coded px and would never follow a
+// rem-based change.
+const UI_SCALE_KEY = Storage.KEYS.UI_SCALE;
+const DEFAULT_UI_SCALE = 100;
+// Coarse, monotonic ladder shared by the select, the A-/A+ buttons and the
+// Ctrl+/- shortcuts. The ends clamp — stepping never wraps.
+const UI_SCALE_STEPS = [80, 90, 100, 110, 125, 150];
 
-export function applyUiScale(scale) {
-  const s = scale || DEFAULT_UI_SCALE;
-  // Only one non-default scale ('125'). Remove any legacy classes too so an
-  // older stored value can't leave a stale zoom applied.
-  document.documentElement.classList.remove('ui-scale-110', 'ui-scale-125', 'ui-scale-140');
-  if (s === '125') document.documentElement.classList.add('ui-scale-125');
+// Snap any stored/foreign value onto the ladder so the select, buttons and the
+// applied zoom can never disagree. Back-compat: a legacy stored '125' → 125.
+export function normalizeUiScale(scale) {
+  const n = Math.round(Number(scale));
+  if (!isFinite(n)) return DEFAULT_UI_SCALE;
+  let best = DEFAULT_UI_SCALE, bestD = Infinity;
+  for (const step of UI_SCALE_STEPS) {
+    const d = Math.abs(step - n);
+    if (d < bestD) { bestD = d; best = step; }
+  }
+  return best;
 }
+
+// DOM side effect only (no persist); returns the normalised percentage.
+export function applyUiScale(scale) {
+  const pct = normalizeUiScale(scale);
+  const root = document.documentElement;
+  root.style.setProperty('--ui-scale', String(pct / 100));
+  // 100% is the default, so drop the class entirely and let no zoom/compensation
+  // rule apply — default rendering stays byte-for-byte unchanged. Legacy
+  // ui-scale-* classes are cleared so an old stored value can't leave stale zoom.
+  root.classList.remove('ui-scale-110', 'ui-scale-125', 'ui-scale-140');
+  root.classList.toggle('ui-scaled', pct !== DEFAULT_UI_SCALE);
+  return pct;
+}
+
+export function getUiScale() {
+  return normalizeUiScale(Storage.get(UI_SCALE_KEY, String(DEFAULT_UI_SCALE)));
+}
+
+// Persist + apply + sync the popup controls. Everything funnels through here so
+// the select, buttons and keyboard shortcuts can't drift apart.
+export function setUiScale(scale) {
+  const pct = applyUiScale(scale);
+  Storage.set(UI_SCALE_KEY, String(pct));
+  _syncUiScaleControls(pct);
+  return pct;
+}
+
+// Step the ladder: sign selects the direction, magnitude the number of steps.
+// Clamped at both ends (no wrap). Used by A-/A+ and the global Ctrl+/- keys.
+export function bumpUiScale(delta) {
+  if (!delta) return getUiScale();
+  const dir = delta < 0 ? -1 : 1;
+  const n = Math.max(1, Math.abs(Math.round(delta)));
+  const i = UI_SCALE_STEPS.indexOf(getUiScale());
+  const next = UI_SCALE_STEPS[Math.max(0, Math.min(UI_SCALE_STEPS.length - 1, i + dir * n))];
+  return setUiScale(next);
+}
+
+// Reflect the active scale in the popup controls: select value + end-of-ladder
+// disabling on the A-/A+ buttons.
+function _syncUiScaleControls(pct) {
+  const sel = document.getElementById('theme-text-size-select');
+  if (sel) sel.value = String(pct);
+  const idx = UI_SCALE_STEPS.indexOf(pct);
+  const dec = document.getElementById('theme-text-size-dec');
+  if (dec) dec.disabled = idx <= 0;
+  const inc = document.getElementById('theme-text-size-inc');
+  if (inc) inc.disabled = idx >= UI_SCALE_STEPS.length - 1;
+}
+
+// Global shortcuts: Ctrl/Cmd +/= increase, Ctrl/Cmd - decrease, Ctrl/Cmd 0
+// reset. Skipped while an editable field has focus so we never clobber native
+// text editing or the browser's own zoom mid-typing.
+function _uiScaleEditable(el) {
+  if (!el) return false;
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  if (_uiScaleEditable(e.target) || _uiScaleEditable(document.activeElement)) return;
+  if (e.key === '=' || e.key === '+') { e.preventDefault(); bumpUiScale(1); }
+  else if (e.key === '-' || e.key === '_') { e.preventDefault(); bumpUiScale(-1); }
+  else if (e.key === '0') { e.preventDefault(); setUiScale(DEFAULT_UI_SCALE); }
+});
+
+// Cross-module API — other modules can drive the scale without importing it.
+window.setUiScale = setUiScale;
+window.bumpUiScale = bumpUiScale;
 
 const _BG_CLASSES = ['bg-pattern-dots',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
@@ -1151,14 +1231,24 @@ export function initThemeUI() {
   const textSizeSelect = document.getElementById('theme-text-size-select');
   if (textSizeSelect) {
     const nts = textSizeSelect.cloneNode(true); textSizeSelect.parentNode.replaceChild(nts, textSizeSelect);
-    let initScale = DEFAULT_UI_SCALE;
-    try { initScale = localStorage.getItem(UI_SCALE_KEY) || DEFAULT_UI_SCALE; } catch (e) {}
-    nts.value = initScale;
+    // Reflect the stored scale (normalised onto the ladder) and route every
+    // control through the shared setters so the select, A-/A+/Reset buttons and
+    // the global keyboard shortcuts always agree.
+    const initScale = getUiScale();
     applyUiScale(initScale);
-    nts.addEventListener('change', () => {
-      applyUiScale(nts.value);
-      try { localStorage.setItem(UI_SCALE_KEY, nts.value); } catch (e) {}
-    });
+    _syncUiScaleControls(initScale);
+    nts.addEventListener('change', () => setUiScale(nts.value));
+    // initThemeUI can run repeatedly, so clone each button (as the selects do)
+    // to keep listeners from stacking.
+    const wireScaleBtn = (id, fn) => {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      const nb = btn.cloneNode(true); btn.parentNode.replaceChild(nb, btn);
+      nb.addEventListener('click', fn);
+    };
+    wireScaleBtn('theme-text-size-dec', () => bumpUiScale(-1));
+    wireScaleBtn('theme-text-size-inc', () => bumpUiScale(1));
+    wireScaleBtn('theme-text-size-reset', () => setUiScale(DEFAULT_UI_SCALE));
   }
   if (patternSelect) {
     const np = patternSelect.cloneNode(true); patternSelect.parentNode.replaceChild(np, patternSelect);
