@@ -8,10 +8,19 @@ the codebase, you are probably right to stay away.
 ## In Progress — current build iteration (2026-09)
 
 Tracked in the project task board. Phase 1 (intelligence/reasoning) and Phase 2
-(knowledge/memory: digest, knowledge graph, citations, temporal memory) code is
-implemented with `tests/phase2` passing; the only open spec item is the final
-end-to-end checkpoint (`.kiro/specs/phase-2-knowledge-memory/tasks.md` L204).
+(knowledge/memory: digest, knowledge graph, citations, temporal memory) are
+complete: both spec boards are fully ticked and `tests/phase2` passes. The Phase 2
+end-to-end checkpoint (`.kiro/specs/phase-2-knowledge-memory/tasks.md` L204)
+passed on 2026-09-13, after fixing two defects it uncovered — an unreachable
+`GET /api/memory/time-range` (shadowed by the `/{memory_id}` wildcard) and a
+`POST /api/digest/generate` that resolved no default endpoint and so always
+persisted a failed digest.
 
+Built (2026-09): **#8 Shared workspaces MVP** — read-only session share tokens
+(`/api/share/sessions` CRUD, owner-scoped) + public replay/live SSE streams
+(`/api/s/{token}/stream`) with a live broadcast hook on assistant-message
+persist. **Local mobile app (replaces #10)** — Expo scaffold in `mobile/`
+(Pairing, Chat w/ SSE, Memory, Digest, Notes, Plans, Home) for LAN use.
 Built (2026-09): **Email automation rules (#6)** — rule engine, CRUD/evaluate/
 execute API (`/api/email-rules`), `create_task` → checklist Note, and a
 deduped trigger hook in the email poll pass (`routes/email_pollers.py`).
@@ -19,8 +28,8 @@ deduped trigger hook in the email poll pass (`routes/email_pollers.py`).
 sending selection/page to note / document / memory / chat (chat requires an
 existing session id) via Bearer `ody_…` tokens.
 
-Still open from the earlier gap analysis: shared real-time workspaces (#8),
-plugin/extension marketplace (#10), and the ROADMAP items below.
+Still open from the earlier gap analysis: the plugin marketplace idea was
+replaced by the local mobile app (see above); ROADMAP items below remain.
 
 ## High Priority
 

@@ -181,13 +181,22 @@ compatible.
 - [x] 9. Implement frontend ES modules
   - [x] 9.1 Create `static/js/citations.js` with `CitationRenderer` class
     - Export `CitationRenderer` class with `render(messageEl, citations)` method
-    - `render`: build a `chunk_id→index` map (1-based, first occurrence wins for same source), call `_insertSupscripts` then `_appendRefList`
-    - `_insertSupscripts`: use `TreeWalker` (SHOW_TEXT) to find `[N]` patterns; split text nodes and replace with `<sup class="citation-marker">` elements; add `citation-low-confidence` class when `confidence_score < 0.5`; attach click listener calling `_togglePanel`
-    - `_togglePanel`: on click expand an inline `.citation-panel` div showing source title (as `<a>` if `source_url` is non-null, else plain `<span>`), confidence percentage, and snippet `<blockquote>`; clicking again collapses it
-    - `_appendRefList`: append `<ol class="citation-refs">` with one `<li>` per citation using the same link/no-link logic
+    - `render`: build the citations box and append it once per message (short-circuits when the target already holds a `.citations-box`, so a re-render is a no-op)
+    - Renders a collapsible `<details class="citations-box">` whose `<summary>` reads `Citations (N)`; the body holds a numbered list of `.citation-item` rows, each with `.citation-num`, the source title (an `<a class="citation-link" target="_blank" rel="noopener noreferrer">` only when `source_url` matches `^https?://`, else a plain `<span>`), a `.citation-confidence` percentage, and a `.citation-snippet` truncated to 300 chars
+    - Expand/collapse is handled natively by `<details>`; no inline `<sup>` markers are spliced into the answer text
     - Export `restoreFromMetadata(messageEl, metadataJson)` method for session restore — parse JSON, call `render` if `citations` array is present and non-empty
-    - Use `escapeHtml` helper for all user-facing strings to prevent XSS
+    - Use the shared `esc` helper from `ui.js` for all user-facing strings to prevent XSS
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
+
+    > **Implementation note (2026-09-13).** The plan above originally specified inline
+    > `<sup class="citation-marker">` markers spliced into the answer via a
+    > `TreeWalker`, plus a separate `<ol class="citation-refs">` reference list (and
+    > `_insertSupscripts` / `_appendRefList` / `citation-low-confidence`). The shipped
+    > code takes a different approach: one collapsible citations box per message. The
+    > user-visible outcome is equivalent (citations are present, numbered and
+    > clickable for a RAG answer) and was verified in a real browser at 3 text-scale
+    > settings, so this entry has been amended to describe the code as built rather
+    > than the code as originally planned.
   - [x] 9.2 Create `static/js/memory-graph.js` with `MemoryGraphView` class
     - Export `MemoryGraphView` class; constructor accepts an `<svg>` element
     - `load(owner)` — `fetch("/api/memory/graph/export")`, parse JSON, call `_render(nodes, edges)`
@@ -201,12 +210,33 @@ compatible.
     - Handle 404 gracefully (show "No digest for this date" message); handle 400 on blank search (show validation hint)
     - _Requirements: 6.6, 6.7, 7.1, 7.2_
 
-- [ ] 10. Final checkpoint — end-to-end verification
+- [x] 10. Final checkpoint — end-to-end verification
   - Ensure all tests pass, ask the user if questions arise.
   - Verify temporal fields survive a write/read cycle via the API.
   - Verify graph entities appear after a chat message is sent.
   - Verify a digest can be generated on demand via `POST /api/digest/generate`.
   - Verify citation markers render in the UI for a RAG answer with retrieved chunks.
+
+  > **Verified 2026-09-12 → 2026-09-13. All four steps pass.** The first pass
+  > FAILED and surfaced two blocking defects, both now fixed:
+  > 1. `GET /api/memory/time-range` was unreachable — the Phase 2 routes were
+  >    registered *after* the `GET /{memory_id}` wildcard in
+  >    `routes/memory/memory_routes.py`, so the wildcard matched the literal id
+  >    `"time-range"` first and always 404'd. Routes reordered; regression test
+  >    added at `tests/test_memory_routes_ordering.py`.
+  > 2. `POST /api/digest/generate` forwarded an empty endpoint from the UI's `{}`
+  >    body (`DigestService.generate` uses `endpoint_url` verbatim and resolves no
+  >    default), so every digest was persisted `status="failed"` and the "Generate
+  >    now" button could never succeed. The route now resolves via
+  >    `resolve_task_endpoint`, raises 503 when nothing is configured instead of
+  >    writing a failed row, and returns a `digest_id` that matches the persisted
+  >    row.
+  >
+  > Evidence: temporal write/read 12/12; graph extraction 14/14 (real HTTP call to
+  > a local `/v1/chat/completions` stub, entities persisted and retrievable,
+  > idempotent, failures isolated); digest route 17/17 and service 23/23; citation
+  > service 20/20 plus a DOM run of the real `citations.js` 20/20. `tests/phase2`
+  > passes. Spec entry 9.1 was amended to describe the shipped citations box.
 
 ## Notes
 
