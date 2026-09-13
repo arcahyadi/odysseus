@@ -64,8 +64,19 @@ class DigestService:
         endpoint_url: str = "",
         model: str = "",
         headers: Optional[Dict] = None,
+        digest_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Generate and persist a digest. Requirements: 6.1–6.5, 6.9"""
+        """Generate and persist a digest. Requirements: 6.1–6.5, 6.9
+
+        endpoint_url/model are used verbatim - this method does NOT resolve a
+        default. Callers must supply one (digest_routes resolves via
+        resolve_task_endpoint) or the httpx call fails and the row is marked
+        status="failed".
+
+        digest_id lets a caller pre-allocate the row id, so an async 202
+        response can hand back an id that will actually match the persisted row.
+        Ignored when a row for (owner, date) already exists.
+        """
         if target_date is None:
             target_date = (datetime.now(timezone.utc) - timedelta(days=1)).date()
         date_str = target_date.isoformat()
@@ -79,7 +90,7 @@ class DigestService:
                 existing.status = "pending"
                 existing.updated_at = now
             else:
-                digest_id = str(uuid.uuid4())
+                digest_id = digest_id or str(uuid.uuid4())
                 existing = Digest(
                     id=digest_id, owner=owner, date=date_str,
                     status="pending", created_at=now, updated_at=now,
@@ -142,6 +153,24 @@ class DigestService:
             db3.close()
 
         return {"status": "complete", "date": date_str, "content": parsed}
+
+    def pending_id(self, owner: str, target_date: Optional[date] = None) -> str:
+        """Return the id generate() will use for (owner, target_date).
+
+        generate() upserts by (owner, date) and only mints a uuid when no row
+        exists yet. A route that returned its own fresh uuid would therefore name
+        a row that never appears and could not be polled. Ask this first, pass
+        the answer back as generate(digest_id=...), and the two agree.
+        """
+        if target_date is None:
+            target_date = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+        date_str = target_date.isoformat()
+        db = self._db()
+        try:
+            row = db.query(Digest).filter_by(owner=owner, date=date_str).first()
+            return row.id if row else str(uuid.uuid4())
+        finally:
+            db.close()
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
 

@@ -519,6 +519,61 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 return {"ok": True, "pinned": pinned}
         raise HTTPException(404, f"Memory item {memory_id} not found")
 
+    # ── Phase 2: Temporal time-range retrieval (Req 2.5, 2.6) ────────────────
+    # Must be registered BEFORE the /{memory_id} wildcard below. Otherwise the
+    # wildcard matches the literal id "time-range" first and this route 404s
+    # with "Memory not found".
+
+    @router.get("/time-range")
+    def memory_time_range(
+        request: Request,
+        from_dt: Optional[str] = None,
+        to_dt: Optional[str] = None,
+        include_archived: bool = False,
+    ):
+        """Return memory entries whose timestamp falls in [from_dt, to_dt]."""
+        try:
+            from services.memory.temporal import TemporalMemoryStore
+        except ImportError:
+            raise HTTPException(status_code=501, detail="Temporal memory not available")
+        user = get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        all_entries = memory_manager.load(user) if hasattr(memory_manager, "load") else []
+        t_store = TemporalMemoryStore(memory_manager, memory_vector)
+        results = t_store.time_range_query(
+            all_entries, from_dt=from_dt, to_dt=to_dt, include_archived=include_archived
+        )
+        return {"entries": results, "count": len(results)}
+
+    # ── Phase 2: Promote memory to global namespace (Req 5.4–5.6) ────────────
+    # Same ordering rule as /time-range: there is no POST wildcard today, but
+    # the non-wildcard routes stay together ahead of the wildcard block.
+
+    from pydantic import BaseModel
+
+    class PromoteRequest(BaseModel):
+        entry_id: str
+
+    @router.post("/promote")
+    def promote_memory(request: Request, body: PromoteRequest):
+        """Move a memory entry from persona namespace to global."""
+        try:
+            from services.memory.namespace import NamespaceResolver
+        except ImportError:
+            raise HTTPException(status_code=501, detail="Namespace resolver not available")
+        user = get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        ns_resolver = NamespaceResolver(memory_manager)
+        try:
+            entry = ns_resolver.promote_to_global(body.entry_id, user)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Memory entry not found")
+        except ValueError:
+            raise HTTPException(status_code=409, detail="Entry is already in global namespace")
+        return {"ok": True, "entry": entry}
+
     # Wildcard routes MUST come last — otherwise they swallow /import, /search, etc.
     @router.get("/{memory_id}")
     def get_memory_item(request: Request, memory_id: str):
@@ -584,58 +639,5 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if memory_vector and memory_vector.healthy:
             memory_vector.remove(memory_id)
         return {"ok": True, "message": "Memory deleted successfully"}
-
-    # ── Phase 2: Temporal time-range retrieval (Req 2.5, 2.6) ────────────────
-
-    @router.get("/time-range")
-    def memory_time_range(
-        request: Request,
-        from_dt: Optional[str] = None,
-        to_dt: Optional[str] = None,
-        include_archived: bool = False,
-    ):
-        """Return memory entries whose timestamp falls in [from_dt, to_dt]."""
-        try:
-            from services.memory.temporal import TemporalMemoryStore
-        except ImportError:
-            raise HTTPException(status_code=501, detail="Temporal memory not available")
-        user = get_current_user(request)
-        if not user:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        all_entries = memory_manager.load(user) if hasattr(memory_manager, "load") else []
-        t_store = TemporalMemoryStore(memory_manager, memory_vector)
-        results = t_store.time_range_query(
-            all_entries, from_dt=from_dt, to_dt=to_dt, include_archived=include_archived
-        )
-        return {"entries": results, "count": len(results)}
-
-    # ── Phase 2: Promote memory to global namespace (Req 5.4–5.6) ────────────
-
-    class _PromoteRequest(BaseModel if False else object):
-        pass
-
-    from pydantic import BaseModel as _BaseModel
-
-    class PromoteRequest(_BaseModel):
-        entry_id: str
-
-    @router.post("/promote")
-    def promote_memory(request: Request, body: PromoteRequest):
-        """Move a memory entry from persona namespace to global."""
-        try:
-            from services.memory.namespace import NamespaceResolver
-        except ImportError:
-            raise HTTPException(status_code=501, detail="Namespace resolver not available")
-        user = get_current_user(request)
-        if not user:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        ns_resolver = NamespaceResolver(memory_manager)
-        try:
-            entry = ns_resolver.promote_to_global(body.entry_id, user)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Memory entry not found")
-        except ValueError:
-            raise HTTPException(status_code=409, detail="Entry is already in global namespace")
-        return {"ok": True, "entry": entry}
 
     return router

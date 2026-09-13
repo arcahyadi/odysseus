@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from services.digest.digest_service import digest_service
 from src.auth_helpers import get_current_user
+from src.task_endpoint import resolve_task_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -54,14 +55,37 @@ async def generate_digest(request: Request, body: GenerateRequest = None):
         except ValueError:
             raise HTTPException(status_code=422, detail=f"Invalid date: {body.date!r}")
 
-    import uuid as _uuid
-    digest_id = str(_uuid.uuid4())
+    # Resolve an endpoint before scheduling. DigestService.generate uses
+    # endpoint_url/model verbatim and does not resolve defaults, so passing the
+    # UI's empty body straight through built the URL "/v1/chat/completions" and
+    # always persisted status="failed" - "Generate now" could never succeed.
+    # Caller-supplied values still win, as fallbacks.
+    try:
+        url, model, headers = resolve_task_endpoint(
+            body.endpoint_url, body.model, None, owner=user
+        )
+    except Exception as exc:
+        logger.warning("digest generate: endpoint resolution failed: %s", exc)
+        url, model, headers = body.endpoint_url, body.model, None
+
+    if not url or not model:
+        raise HTTPException(
+            status_code=503,
+            detail="No model endpoint available for digest generation. "
+                   "Set a default model in Settings.",
+        )
+
+    # Name the row generate() is about to create, so the id we hand back is
+    # pollable instead of a freshly-minted uuid that never matches.
+    digest_id = digest_service.pending_id(user, target_date)
 
     asyncio.create_task(digest_service.generate(
         owner=user,
         target_date=target_date,
-        endpoint_url=body.endpoint_url or "",
-        model=body.model or "",
+        endpoint_url=url,
+        model=model,
+        headers=headers,
+        digest_id=digest_id,
     ))
     return {"ok": True, "digest_id": digest_id, "status": "pending"}
 
