@@ -1334,6 +1334,23 @@ def _strip_think_blocks(text: str) -> str:
 
 
 _LOW_SIGNAL_RE = re.compile(r"^[\W_]*$", re.UNICODE)
+# Italian request verbs (2026-09-12 E2E, "dimmi tutti gli applicativi craftale"
+# class). The domain rules below are English-only, so a generic Italian
+# imperative/question matched ZERO domains, was classified low-signal, and went
+# to the naked-model direct path — no system prompt, no tools, no RAG — which
+# produced the hallucinated "logistica/WMS"/"flotte navali" answers. None of
+# these words exist in English, so the gate cannot flip an English message.
+# First-person and clitic variants ("cerco", "mostrami", "verificami") are
+# included because they are the natural spoken forms of the same request.
+_ITALIAN_REQUEST_RE = re.compile(
+    r"\b(?:dimmi|dimmelo|"
+    r"mostra|mostrami|"
+    r"elenc[oa]mi|elenc[oa]|"
+    r"cerca|cercami|cerco|"
+    r"crea|creami|creo|"
+    r"verifica|verificami|verifico)\b",
+    re.IGNORECASE,
+)
 _CASUAL_OPENING_RE = re.compile(
     r"^\s*(?:h+i+|hey+|hello+|yo+|sup+|what'?s up|wass?up|hiya|howdy|"
     r"lol|lmao|haha+|hehe+|thanks?|thank you|ty|idk|dunno|meh|bruh|bro)\b(?P<tail>.*)$",
@@ -1693,7 +1710,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("cookbook")
     if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
         domains.add("email")
-    if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
+    if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up|nota)\b"):
         domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
         domains.add("notes_calendar_tasks")
@@ -1704,11 +1721,11 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"ruby|php|swift|kotlin|bash|shell|html|css|sql)\b",
         r"\b(?:code|script|program|game|function|class|module|app)\b",
     )
-    if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file)\b"):
+    if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file|document[oi])\b"):
         domains.add("documents")
     if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
         domains.add("documents")
-    if has(r"\b(search|web|google|look up|latest|news|current|weather|forecast|stock price|price of|website|url|https?://|www\.)\b"):
+    if has(r"\b(search|web|google|look up|latest|news|current|weather|forecast|stock price|price of|website|url|https?://|www\.|cerca)\b"):
         domains.add("web")
     if has(
         r"\b(wyszukaj|wyszukać|wyszukac)\b.*\b(internet|internecie|online|web)\b",
@@ -1755,7 +1772,14 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
         domains.add("integrations")
 
-    low_signal = not continuation and not domains
+    # An Italian request verb marks a real request even when no domain rule
+    # matched: keep it out of the low-signal bucket so it reaches the standard
+    # path, where multilingual fastembed RAG can still select tools (see the
+    # "[tool-rag] Low-signal query; will run RAG retrieval" branch). The
+    # English counterparts ("tell me", "show", "list", "search", "create",
+    # "verify") seed no deterministic domain either; the verb gate mirrors that
+    # without forcing a wrong domain.
+    low_signal = not continuation and not domains and not _ITALIAN_REQUEST_RE.search(q)
     return {
         "low_signal": low_signal,
         "continuation": continuation,
@@ -2180,6 +2204,41 @@ def _looks_like_memory_identity_turn(text: str) -> bool:
         r")\b",
         q,
     ))
+
+
+# Structural guarantee for the direct low-signal path (2026-09-12 E2E class):
+# the path used to send generic (non-finetune) models a COMPLETELY naked
+# message list — [user] only, ~23-40 input tokens — so a model asked "dimmi
+# tutti gli applicativi craftale" knew nothing about Odysseus, had no tools,
+# and invented confident specifics. Odysseus finetunes already get
+# _minimal_odysseus_general_messages(); every other model now gets this short
+# base prompt. Tool-call instructions are deliberately omitted (this path
+# sends tools=None), as is any hint about data the model cannot see: the only
+# promise the prompt makes is identity, brevity, language mirroring, and "say
+# so instead of inventing".
+_DIRECT_LOW_SIGNAL_SYSTEM_PROMPT = (
+    "You are Odysseus, a personal AI assistant.\n"
+    "Reply directly and briefly, in the user's language.\n"
+    "This quick-reply mode has no access to the user's tools, files, or "
+    "account data: when asked about anything you cannot see, say so plainly "
+    "instead of inventing details.\n"
+    "Never fabricate facts about the user's systems, services, or organization."
+)
+
+
+def _direct_low_signal_messages(messages: List[Dict], last_user: str, qwen_finetune: bool) -> List[Dict]:
+    """Never send the direct low-signal path a fully naked request.
+
+    Odysseus finetunes keep their tuned minimal prompt; every other model gets
+    the short base identity prompt above so a casual turn can never read as a
+    stateless, identity-less completion request.
+    """
+    if qwen_finetune:
+        return _minimal_odysseus_general_messages(messages, include_memory=True)
+    return [
+        {"role": "system", "content": _DIRECT_LOW_SIGNAL_SYSTEM_PROMPT, "_agent_injected": "prompt"},
+        {"role": "user", "content": str(last_user or "")},
+    ]
 
 
 def _minimal_odysseus_general_messages(messages: List[Dict], include_memory: bool = False) -> List[Dict]:
@@ -3946,13 +4005,8 @@ async def stream_agent_loop(
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
     if _direct_low_signal:
         logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
-        direct_messages = (
-            _minimal_odysseus_general_messages(
-                messages,
-                include_memory=True,
-            )
-            if _ody_qwen_finetune_model
-            else [{"role": "user", "content": _last_user}]
+        direct_messages = _direct_low_signal_messages(
+            messages, _last_user, _ody_qwen_finetune_model
         )
         direct_response = ""
         direct_start = time.time()
@@ -3969,10 +4023,8 @@ async def stream_agent_loop(
 
         def _direct_candidate_request(_index, _url, candidate_model, _headers):
             candidate_is_qwen = _is_odysseus_qwen_model(candidate_model)
-            candidate_messages = (
-                _minimal_odysseus_general_messages(messages, include_memory=True)
-                if candidate_is_qwen
-                else [{"role": "user", "content": _last_user}]
+            candidate_messages = _direct_low_signal_messages(
+                messages, _last_user, candidate_is_qwen
             )
             direct_candidate_messages[_index] = candidate_messages
             return {

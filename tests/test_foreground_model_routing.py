@@ -2643,7 +2643,11 @@ def test_direct_low_signal_fallback_estimates_winning_route_prompt(
     )
 
     async def fake_stream(candidates, messages, **kwargs):
-        assert messages == [{"role": "user", "content": "hello"}]
+        # The direct path is never fully naked: a generic (non-finetune) model
+        # still receives the short base system prompt ahead of the user turn.
+        assert messages[-1] == {"role": "user", "content": "hello"}
+        assert messages[0]["role"] == "system"
+        assert messages[0].get("_agent_injected") == "prompt"
         request = kwargs["candidate_request_factory"](1, *backup)
         candidate_requests.append(request["messages"])
         fallback_event = {
