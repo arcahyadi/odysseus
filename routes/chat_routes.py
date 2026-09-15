@@ -35,6 +35,7 @@ from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_
 from src.foreground_model_routing import (
     build_foreground_model_candidates,
     build_foreground_route_descriptors,
+    foreground_fallback_notice_line,
     resolve_foreground_model_policy,
 )
 from src.session_search import search_session_messages
@@ -1957,6 +1958,7 @@ def setup_chat_routes(
             elif chat_mode == "chat":
                 _chat_start = time.time()
                 _answered_by = None  # set if the selected model failed and a fallback answered
+                _fallback_notice_emitted = False
                 _requested_model = sess.model
                 _actual_model = None
                 _requested_route = _foreground_route_descriptors[0]
@@ -2028,6 +2030,25 @@ def setup_chat_routes(
                                         yield f'data: {json.dumps({"type": "compacted", "context_length": _compacted_length})}\n\n'
                                     data["selected_model"] = data.get("selected_model") or _requested_model
                                     yield f'data: {json.dumps(data)}\n\n'
+                                    if not _fallback_notice_emitted:
+                                        # A foreground swap was silent in the
+                                        # rendered reply: only this event and
+                                        # post-hoc metadata recorded it. Emit
+                                        # exactly one unobtrusive line naming
+                                        # the answering model, before the
+                                        # model's first content delta.
+                                        _fallback_notice_emitted = True
+                                        _notice = (
+                                            foreground_fallback_notice_line(
+                                                _requested_model,
+                                                _answered_by,
+                                                data.get("answered_by_endpoint_label"),
+                                            )
+                                            + "\n"
+                                        )
+                                        full_response += _notice
+                                        _stream_set(session, partial=full_response)
+                                        yield f'data: {json.dumps({"delta": _notice})}\n\n'
                                 elif data.get("type") == "model_actual":
                                     if _commit_chat_compaction(_actual_candidate_index):
                                         _compacted_length = _chat_request_state["context_lengths"].get(
@@ -2299,6 +2320,7 @@ def setup_chat_routes(
                 _agent_rounds = 0
                 _agent_tool_calls = 0
                 _answered_by = None  # set if the selected model failed and a fallback answered
+                _fallback_notice_emitted = False
                 _requested_model = sess.model
                 _actual_model = None
                 _agent_requested_route = _foreground_route_descriptors[0]
@@ -2435,6 +2457,22 @@ def setup_chat_routes(
                                     _agent_round_endpoint_labels[_event_round] = _agent_actual_endpoint_label
                                     data["selected_model"] = data.get("selected_model") or _requested_model
                                     yield chunk
+                                    if not _fallback_notice_emitted:
+                                        # One unobtrusive line for the whole
+                                        # request, even if the agent loop
+                                        # reports the swap on several rounds.
+                                        _fallback_notice_emitted = True
+                                        _notice = (
+                                            foreground_fallback_notice_line(
+                                                _requested_model,
+                                                _answered_by,
+                                                data.get("answered_by_endpoint_label"),
+                                            )
+                                            + "\n"
+                                        )
+                                        full_response += _notice
+                                        _stream_set(session, partial=full_response)
+                                        yield f'data: {json.dumps({"delta": _notice})}\n\n'
                                 elif data.get("type") == "model_actual":
                                     _actual_model = data.get("model") or _actual_model
                                     if "endpoint_id" in data:

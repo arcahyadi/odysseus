@@ -884,7 +884,10 @@ async def test_chat_stream_persists_partial_terminal_error_with_route_provenance
     assert not any(chunk == "data: [DONE]\n\n" for chunk in emitted)
     assert len(captured["saved"]) == 1
     saved_args, _saved_kwargs = captured["saved"][0]
+    # The fallback notice is announced in-band (one line) and saved with the
+    # partial reply — a silent model swap must stay visible on reload too.
     assert saved_args[3] == (
+        "[Model fallback: selected-model unavailable; answered by backup-model.]\n"
         "visible partial\n\n"
         "[Response stopped: Model request failed (HTTP 503)]"
     )
@@ -901,7 +904,12 @@ async def test_chat_stream_persists_partial_terminal_error_with_route_provenance
     assert saved_args[4]["requested_endpoint_label"] == "Selected endpoint"
     assert saved_args[4]["endpoint_cost_tracked"] is True
     assert saved_args[4]["input_tokens"] == 10
-    assert saved_args[4]["output_tokens"] == len("visible partial") // 4
+    # Estimated from the streamed text at failure time (notice + partial),
+    # before the "[Response stopped: ...]" suffix is appended for the save.
+    _expected_notice = foreground_model_routing.foreground_fallback_notice_line(
+        "selected-model", "backup-model"
+    )
+    assert saved_args[4]["output_tokens"] == len(_expected_notice + "\nvisible partial") // 4
     assert saved_args[4]["usage_source"] == "estimated"
     assert captured["accumulated_usage"][0][0][1] == saved_args[4]
     chat_terminal = json.loads(next(
