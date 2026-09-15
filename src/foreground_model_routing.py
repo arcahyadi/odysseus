@@ -164,6 +164,43 @@ def resolve_foreground_fallback_candidates(owner: Optional[str] = None) -> list:
     return list(resolve_foreground_model_policy(owner).fallback_candidates)
 
 
+def foreground_fallback_notice_line(
+    selected_model: Optional[str],
+    answered_model: Optional[str],
+    answered_by_label: Optional[str] = None,
+) -> str:
+    """One unobtrusive line announcing that a fallback, not the selected
+    model, answered the request.
+
+    A foreground swap used to be silent in the rendered reply: only the
+    ``fallback`` SSE event and post-hoc metadata recorded it, so a paid
+    provider answering under a dead local model's name was invisible in the
+    chat transcript. Consumers emit this line exactly once per request, before
+    the answering model's first content delta.
+
+    Names the answering model; when the swap kept the SAME model on another
+    endpoint/account (the model names would read as a no-op), the endpoint
+    label carries the distinction instead. Contains no failure detail or
+    provider payload — just identities the user already knows.
+    """
+    selected = str(selected_model or "").strip()
+    answered = str(answered_model or "").strip()
+    label = str(answered_by_label or "").strip()
+    if answered and answered != selected:
+        who = answered
+    elif label:
+        who = label
+    elif answered:
+        # Same model, no endpoint label: repeating the model name would read
+        # as a no-op ("answered by <the very same model>").
+        who = "another endpoint"
+    else:
+        who = "a fallback route"
+    if selected:
+        return f"[Model fallback: {selected} unavailable; answered by {who}.]"
+    return f"[Model fallback: answered by {who}.]"
+
+
 def build_foreground_model_candidates(
     endpoint_url: str,
     model: str,

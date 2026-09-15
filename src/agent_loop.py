@@ -1334,6 +1334,37 @@ def _strip_think_blocks(text: str) -> str:
 
 
 _LOW_SIGNAL_RE = re.compile(r"^[\W_]*$", re.UNICODE)
+# Italian request verbs (2026-09-12 E2E, "dimmi tutti gli applicativi craftale"
+# class). The domain rules below are English-only, so a generic Italian
+# imperative/question matched ZERO domains, was classified low-signal, and went
+# to the naked-model direct path — no system prompt, no tools, no RAG — which
+# produced the hallucinated "logistica/WMS"/"flotte navali" answers. None of
+# these words exist in English, so the gate cannot flip an English message.
+# First-person and clitic variants ("cerco", "mostrami", "verificami") are
+# included because they are the natural spoken forms of the same request.
+# Note: crea/mostra/verifica/cerca are also Spanish/Portuguese cognates —
+# intentional: the gate direction is safe (full path = more capability, and
+# the direct path is never naked anyway, see _direct_low_signal_messages).
+_ITALIAN_REQUEST_RE = re.compile(
+    r"\b(?:dimmi|dimmelo|"
+    r"mostra|mostrami|"
+    r"elenc[oa]mi|elenc[oa]|"
+    r"cerca|cercami|cerco|"
+    r"crea|creami|creo|"
+    r"verifica|verificami|verifico)\b",
+    re.IGNORECASE,
+)
+# Italian interrogatives (review round: the tenant repro "quali sono gli
+# applicativi di craftale?" carries no request verb, only a question word).
+# "come" is deliberately EXCLUDED — it is the English verb "come" ("come here
+# and look at this") and must not flip an English message. Accent-tolerant
+# forms cover both the correct "perché"/"qual è" and the common typed
+# "perche"/"perchè"/"qual'è"/"qual'é".
+_ITALIAN_INTERROGATIVE_RE = re.compile(
+    r"\b(?:quali|quante|quanti|quanto|cosa|che\s+cosa|dove|quando|"
+    r"perch[eéè]|qual\s*'?\s*[eéè])\b",
+    re.IGNORECASE,
+)
 _CASUAL_OPENING_RE = re.compile(
     r"^\s*(?:h+i+|hey+|hello+|yo+|sup+|what'?s up|wass?up|hiya|howdy|"
     r"lol|lmao|haha+|hehe+|thanks?|thank you|ty|idk|dunno|meh|bruh|bro)\b(?P<tail>.*)$",
@@ -1436,6 +1467,34 @@ _TRAILING_INTENT_VERB_RE = re.compile(
     r"\b",
     re.IGNORECASE,
 )
+# Italian twin of the trailing-intent verb phrase (same silent-tool-drop class,
+# Italian narration: "Ora controllo i file.", "Sto creando la nota.",
+# "Verificherò gli endpoint."). Three shapes only — progressive (sto/stiamo +
+# gerund), discourse-marker + first-person present (ora/adesso + verb), and
+# bare future — because those are unambiguously ABOUT-TO-ACT forms; bare
+# present-tense verbs ("controllo" is also the noun "the check") are
+# deliberately excluded to keep false positives near zero.
+_ITALIAN_TRAILING_INTENT_RE = re.compile(
+    r"\b(?:sto|stiamo)\s+(?:ancora\s+)?"
+    r"(?:creando|controllando|verificando|cercando|salvando|aprendo|"
+    r"leggendo|scrivendo|eliminando|cancellando|aggiornando|aggiungendo|"
+    r"esaminando|analizzando|ispezionando|esplorando|revisionando|"
+    r"mappando|identificando|estraendo|confrontando|riassumendo|"
+    r"eseguendo|lanciando|avviando|fermando|riavviando|trovando|"
+    r"inviando|ricercando)\b"
+    r"|\b(?:ora|adesso|poi|quindi)\s+"
+    r"(?:creo|controllo|verifico|cerco|salvo|apro|leggo|scrivo|elimino|"
+    r"cancello|aggiorno|aggiungo|esamino|analizzo|ispeziono|esploro|"
+    r"revisiono|mappo|identifico|estraggo|confronto|riassumo|eseguo|"
+    r"lancio|avvio|fermo|riavvio|trovo|invio|ricerco)\b"
+    r"|\b(?:creer|controller|verificher|cercher|salver|aprir|"
+    r"legger|scriver|eliminer|canceller|aggiorner|aggiunger|"
+    r"esaminer|analizzer|ispezioner|esplorer|estrarr|confronter|"
+    r"riassumer|eseguir|lancer|avvier|fermer|riavvier|trover|"
+    r"invier|ricercher|mapper|mostrer)[oò]\b"
+    r"|\b(?:ti|vi)\s+(?:mostro|mostriamo)\b",
+    re.IGNORECASE,
+)
 
 # Tight browser-action vocabulary. Deliberately stricter than the route
 # layer's _explicit_browser_intent regex ("click"/"fill"/"submit" alone are
@@ -1472,7 +1531,9 @@ def _trailing_intent_retry_needed(
       (c) the final text reads as about-to-act intent: it ends with a
           dangling ':' OR its closing window matches an intent verb
           phrase ("Let me create", "I'll save", "going to add", "I am
-          diving into the code now", "I will analyze ...", ...);
+          diving into the code now", "I will analyze ...", ...) — English
+          or Italian ("Ora controllo i file.", "Sto creando la nota.",
+          "Verificherò gli endpoint.");
       (d) the retry has not been used yet this turn (hard cap 1 — the
           guard can never loop).
 
@@ -1507,7 +1568,10 @@ def _trailing_intent_retry_needed(
             # Don't start the window mid-word — a phrase straddling the
             # boundary would be silently lost.
             tail = tail[tail.find(" ") + 1:]
-    return bool(_TRAILING_INTENT_VERB_RE.search(tail))
+    return bool(
+        _TRAILING_INTENT_VERB_RE.search(tail)
+        or _ITALIAN_TRAILING_INTENT_RE.search(tail)
+    )
 
 
 def _cliff_continue_needed(
@@ -1693,7 +1757,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("cookbook")
     if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
         domains.add("email")
-    if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
+    if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up|nota)\b"):
         domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
         domains.add("notes_calendar_tasks")
@@ -1704,11 +1768,11 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"ruby|php|swift|kotlin|bash|shell|html|css|sql)\b",
         r"\b(?:code|script|program|game|function|class|module|app)\b",
     )
-    if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file)\b"):
+    if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file|document[oi])\b"):
         domains.add("documents")
     if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
         domains.add("documents")
-    if has(r"\b(search|web|google|look up|latest|news|current|weather|forecast|stock price|price of|website|url|https?://|www\.)\b"):
+    if has(r"\b(search|web|google|look up|latest|news|current|weather|forecast|stock price|price of|website|url|https?://|www\.|cerca)\b"):
         domains.add("web")
     if has(
         r"\b(wyszukaj|wyszukać|wyszukac)\b.*\b(internet|internecie|online|web)\b",
@@ -1755,7 +1819,20 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
         domains.add("integrations")
 
-    low_signal = not continuation and not domains
+    # An Italian request verb or interrogative marks a real request even when
+    # no domain rule matched: keep it out of the low-signal bucket so it
+    # reaches the standard path, where multilingual fastembed RAG can still
+    # select tools (see the "[tool-rag] Low-signal query; will run RAG
+    # retrieval" branch). The English counterparts ("tell me", "show", "list",
+    # "search", "create", "verify", "which/what/where/when/why") seed no
+    # deterministic domain either; the gates mirror that without forcing a
+    # wrong domain.
+    low_signal = (
+        not continuation
+        and not domains
+        and not _ITALIAN_REQUEST_RE.search(q)
+        and not _ITALIAN_INTERROGATIVE_RE.search(q)
+    )
     return {
         "low_signal": low_signal,
         "continuation": continuation,
@@ -2180,6 +2257,41 @@ def _looks_like_memory_identity_turn(text: str) -> bool:
         r")\b",
         q,
     ))
+
+
+# Structural guarantee for the direct low-signal path (2026-09-12 E2E class):
+# the path used to send generic (non-finetune) models a COMPLETELY naked
+# message list — [user] only, ~23-40 input tokens — so a model asked "dimmi
+# tutti gli applicativi craftale" knew nothing about Odysseus, had no tools,
+# and invented confident specifics. Odysseus finetunes already get
+# _minimal_odysseus_general_messages(); every other model now gets this short
+# base prompt. Tool-call instructions are deliberately omitted (this path
+# sends tools=None), as is any hint about data the model cannot see: the only
+# promise the prompt makes is identity, brevity, language mirroring, and "say
+# so instead of inventing".
+_DIRECT_LOW_SIGNAL_SYSTEM_PROMPT = (
+    "You are Odysseus, a personal AI assistant.\n"
+    "Reply directly and briefly, in the user's language.\n"
+    "This quick-reply mode has no access to the user's tools, files, or "
+    "account data: when asked about anything you cannot see, say so plainly "
+    "instead of inventing details.\n"
+    "Never fabricate facts about the user's systems, services, or organization."
+)
+
+
+def _direct_low_signal_messages(messages: List[Dict], last_user: str, qwen_finetune: bool) -> List[Dict]:
+    """Never send the direct low-signal path a fully naked request.
+
+    Odysseus finetunes keep their tuned minimal prompt; every other model gets
+    the short base identity prompt above so a casual turn can never read as a
+    stateless, identity-less completion request.
+    """
+    if qwen_finetune:
+        return _minimal_odysseus_general_messages(messages, include_memory=True)
+    return [
+        {"role": "system", "content": _DIRECT_LOW_SIGNAL_SYSTEM_PROMPT, "_agent_injected": "prompt"},
+        {"role": "user", "content": str(last_user or "")},
+    ]
 
 
 def _minimal_odysseus_general_messages(messages: List[Dict], include_memory: bool = False) -> List[Dict]:
@@ -3946,13 +4058,8 @@ async def stream_agent_loop(
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
     if _direct_low_signal:
         logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
-        direct_messages = (
-            _minimal_odysseus_general_messages(
-                messages,
-                include_memory=True,
-            )
-            if _ody_qwen_finetune_model
-            else [{"role": "user", "content": _last_user}]
+        direct_messages = _direct_low_signal_messages(
+            messages, _last_user, _ody_qwen_finetune_model
         )
         direct_response = ""
         direct_start = time.time()
@@ -3969,10 +4076,8 @@ async def stream_agent_loop(
 
         def _direct_candidate_request(_index, _url, candidate_model, _headers):
             candidate_is_qwen = _is_odysseus_qwen_model(candidate_model)
-            candidate_messages = (
-                _minimal_odysseus_general_messages(messages, include_memory=True)
-                if candidate_is_qwen
-                else [{"role": "user", "content": _last_user}]
+            candidate_messages = _direct_low_signal_messages(
+                messages, _last_user, candidate_is_qwen
             )
             direct_candidate_messages[_index] = candidate_messages
             return {
@@ -4234,8 +4339,12 @@ async def stream_agent_loop(
             logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
         else:
             # Don't short-circuit: fall through to RAG retrieval below.
-            # Non-English queries are flagged low_signal by the English-only
-            # intent classifier, but fastembed retrieval works across languages.
+            # The intent classifier is no longer strictly English-only — the
+            # Italian request-verb/interrogative gates (_ITALIAN_REQUEST_RE,
+            # _ITALIAN_INTERROGATIVE_RE) already keep real Italian requests
+            # out of the low-signal bucket — but whatever still lands here
+            # (other languages, terse Italian) is in good hands: fastembed
+            # retrieval works across languages.
             logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
     if not guide_only and not _relevant_tools:
         try:

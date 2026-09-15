@@ -884,7 +884,10 @@ async def test_chat_stream_persists_partial_terminal_error_with_route_provenance
     assert not any(chunk == "data: [DONE]\n\n" for chunk in emitted)
     assert len(captured["saved"]) == 1
     saved_args, _saved_kwargs = captured["saved"][0]
+    # The fallback notice is announced in-band (one line) and saved with the
+    # partial reply — a silent model swap must stay visible on reload too.
     assert saved_args[3] == (
+        "[Model fallback: selected-model unavailable; answered by backup-model.]\n"
         "visible partial\n\n"
         "[Response stopped: Model request failed (HTTP 503)]"
     )
@@ -901,7 +904,12 @@ async def test_chat_stream_persists_partial_terminal_error_with_route_provenance
     assert saved_args[4]["requested_endpoint_label"] == "Selected endpoint"
     assert saved_args[4]["endpoint_cost_tracked"] is True
     assert saved_args[4]["input_tokens"] == 10
-    assert saved_args[4]["output_tokens"] == len("visible partial") // 4
+    # Estimated from the streamed text at failure time (notice + partial),
+    # before the "[Response stopped: ...]" suffix is appended for the save.
+    _expected_notice = foreground_model_routing.foreground_fallback_notice_line(
+        "selected-model", "backup-model"
+    )
+    assert saved_args[4]["output_tokens"] == len(_expected_notice + "\nvisible partial") // 4
     assert saved_args[4]["usage_source"] == "estimated"
     assert captured["accumulated_usage"][0][0][1] == saved_args[4]
     chat_terminal = json.loads(next(
@@ -1266,7 +1274,9 @@ async def test_nonstream_chat_opt_in_advances_only_on_eligible_failure(monkeypat
 
     assert [call[1] for call in calls] == ["selected-model", "backup-model"]
     assert response == {
-        "response": "backup answer",
+        # The swap is announced at the reply start (same wording family as
+        # the streaming announcement).
+        "response": "[Model fallback: selected-model unavailable; answered by backup-model.]\nbackup answer",
         "requested_model": "selected-model",
         "model": "backup-model",
         "requested_endpoint_id": None,
@@ -1586,7 +1596,13 @@ async def test_nonstream_chat_real_parser_persists_provider_model_alias(
     expected_model = (
         "provider-backup-alias" if use_fallback else "provider-selected-alias"
     )
-    assert response["response"] == "provider answer"
+    expected_response = (
+        "[Model fallback: selected-model unavailable; answered by provider-backup-alias.]\n"
+        "provider answer"
+        if use_fallback
+        else "provider answer"
+    )
+    assert response["response"] == expected_response
     assert response["model"] == expected_model
     assert saved[-1].metadata["model"] == expected_model
     assert response["endpoint_id"] == ("backup" if use_fallback else None)
@@ -2643,7 +2659,11 @@ def test_direct_low_signal_fallback_estimates_winning_route_prompt(
     )
 
     async def fake_stream(candidates, messages, **kwargs):
-        assert messages == [{"role": "user", "content": "hello"}]
+        # The direct path is never fully naked: a generic (non-finetune) model
+        # still receives the short base system prompt ahead of the user turn.
+        assert messages[-1] == {"role": "user", "content": "hello"}
+        assert messages[0]["role"] == "system"
+        assert messages[0].get("_agent_injected") == "prompt"
         request = kwargs["candidate_request_factory"](1, *backup)
         candidate_requests.append(request["messages"])
         fallback_event = {

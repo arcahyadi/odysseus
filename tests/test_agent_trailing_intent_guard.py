@@ -425,3 +425,89 @@ def test_im_running_statement_is_bounded_tradeoff():
         tool_calls_this_turn=0,
         retry_used=False,
     )
+
+
+# ── Italian twin (2026-09-12 SPEC 1/3 companion) ─────────────────────────
+# The same silent-tool-drop class with Italian narration: qwen3.5 answering
+# in Italian ends the round on "Ora controllo i file." and the parser-dropped
+# tool call never runs. The English regex alone never matched these.
+
+def test_retry_needed_on_italian_discourse_marker_present():
+    assert al._trailing_intent_retry_needed(
+        round_text="Ora controllo i file del workspace.",
+        tools_sent_count=12,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
+    assert al._trailing_intent_retry_needed(
+        round_text="Adesso verifico gli endpoint configurati.",
+        tools_sent_count=8,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
+
+
+def test_retry_needed_on_italian_progressive():
+    assert al._trailing_intent_retry_needed(
+        round_text="Sto creando la nota che hai chiesto.",
+        tools_sent_count=5,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
+    assert al._trailing_intent_retry_needed(
+        round_text="Stiamo ancora esaminando i log.",
+        tools_sent_count=5,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
+
+
+def test_retry_needed_on_italian_future_tense():
+    assert al._trailing_intent_retry_needed(
+        round_text="Verificherò gli endpoint e ti farò sapere.",
+        tools_sent_count=9,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
+    # Accent-dropped model typo ("creero") must still match.
+    assert al._trailing_intent_retry_needed(
+        round_text="Creero il documento subito.",
+        tools_sent_count=9,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
+
+
+def test_italian_final_answers_do_not_fire():
+    # Bare present/noun forms ("il controllo" = the check) and completed
+    # statements stay quiet — the false-positive budget is the same as the
+    # English guard's.
+    assert not al._trailing_intent_retry_needed(
+        round_text="Ho finito: ecco il riepilogo completo della verifica.",
+        tools_sent_count=9,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
+
+
+def test_italian_long_narration_intent_tail_fires():
+    body = ("Riepilogo della situazione. " + "x" * 450
+            + " Poi controllo le configurazioni.")
+    assert al._trailing_intent_retry_needed(
+        round_text=body,
+        tools_sent_count=10,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
+
+
+def test_retry_needed_on_estrarre_future_spelled_correctly():
+    # Pins the "estrarr" stem (a first pass typo'd it to "estarr"): the
+    # correct future of estrarre is "estrarrò" — e-s-t-r-a-r-r-ò.
+    assert al._ITALIAN_TRAILING_INTENT_RE.search("estrarrò i dati")
+    assert al._trailing_intent_retry_needed(
+        round_text="Estrarrò il file dal documento.",
+        tools_sent_count=5,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
