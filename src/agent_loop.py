@@ -1453,6 +1453,34 @@ _TRAILING_INTENT_VERB_RE = re.compile(
     r"\b",
     re.IGNORECASE,
 )
+# Italian twin of the trailing-intent verb phrase (same silent-tool-drop class,
+# Italian narration: "Ora controllo i file.", "Sto creando la nota.",
+# "Verificherò gli endpoint."). Three shapes only — progressive (sto/stiamo +
+# gerund), discourse-marker + first-person present (ora/adesso + verb), and
+# bare future — because those are unambiguously ABOUT-TO-ACT forms; bare
+# present-tense verbs ("controllo" is also the noun "the check") are
+# deliberately excluded to keep false positives near zero.
+_ITALIAN_TRAILING_INTENT_RE = re.compile(
+    r"\b(?:sto|stiamo)\s+(?:ancora\s+)?"
+    r"(?:creando|controllando|verificando|cercando|salvando|aprendo|"
+    r"leggendo|scrivendo|eliminando|cancellando|aggiornando|aggiungendo|"
+    r"esaminando|analizzando|ispezionando|esplorando|revisionando|"
+    r"mappando|identificando|estraendo|confrontando|riassumendo|"
+    r"eseguendo|lanciando|avviando|fermando|riavviando|trovando|"
+    r"inviando|ricercando)\b"
+    r"|\b(?:ora|adesso|poi|quindi)\s+"
+    r"(?:creo|controllo|verifico|cerco|salvo|apro|leggo|scrivo|elimino|"
+    r"cancello|aggiorno|aggiungo|esamino|analizzo|ispeziono|esploro|"
+    r"revisiono|mappo|identifico|estraggo|confronto|riassumo|eseguo|"
+    r"lancio|avvio|fermo|riavvio|trovo|invio|ricerco)\b"
+    r"|\b(?:creer|controller|verificher|cercher|salver|aprir|"
+    r"legger|scriver|eliminer|canceller|aggiorner|aggiunger|"
+    r"esaminer|analizzer|ispezioner|esplorer|estarr|confronter|"
+    r"riassumer|eseguir|lancer|avvier|fermer|riavvier|trover|"
+    r"invier|ricercher|mapper|mostrer)[oò]\b"
+    r"|\b(?:ti|vi)\s+(?:mostro|mostriamo)\b",
+    re.IGNORECASE,
+)
 
 # Tight browser-action vocabulary. Deliberately stricter than the route
 # layer's _explicit_browser_intent regex ("click"/"fill"/"submit" alone are
@@ -1489,7 +1517,9 @@ def _trailing_intent_retry_needed(
       (c) the final text reads as about-to-act intent: it ends with a
           dangling ':' OR its closing window matches an intent verb
           phrase ("Let me create", "I'll save", "going to add", "I am
-          diving into the code now", "I will analyze ...", ...);
+          diving into the code now", "I will analyze ...", ...) — English
+          or Italian ("Ora controllo i file.", "Sto creando la nota.",
+          "Verificherò gli endpoint.");
       (d) the retry has not been used yet this turn (hard cap 1 — the
           guard can never loop).
 
@@ -1524,7 +1554,10 @@ def _trailing_intent_retry_needed(
             # Don't start the window mid-word — a phrase straddling the
             # boundary would be silently lost.
             tail = tail[tail.find(" ") + 1:]
-    return bool(_TRAILING_INTENT_VERB_RE.search(tail))
+    return bool(
+        _TRAILING_INTENT_VERB_RE.search(tail)
+        or _ITALIAN_TRAILING_INTENT_RE.search(tail)
+    )
 
 
 def _cliff_continue_needed(
