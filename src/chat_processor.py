@@ -12,6 +12,26 @@ from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_mess
 
 logger = logging.getLogger(__name__)
 
+# Throttle for the "RAG requested but manager unavailable" warning. Retrieval
+# is requested on most turns (use_rag defaults on for requests that don't
+# send the field), so an unthrottled warning would spam boxes without
+# ChromaDB — but total silence is how "zero RAG" sessions went
+# undiagnosed. Once a minute is loud enough to see, quiet enough to keep.
+_RAG_UNAVAILABLE_LOG_INTERVAL = 60.0
+_last_rag_unavailable_log = 0.0
+
+
+def _log_rag_unavailable_throttled() -> None:
+    global _last_rag_unavailable_log
+    now = time.monotonic()
+    if now - _last_rag_unavailable_log < _RAG_UNAVAILABLE_LOG_INTERVAL:
+        return
+    _last_rag_unavailable_log = now
+    logger.warning(
+        "RAG requested for chat context but rag_manager is unavailable "
+        "(ChromaDB not initialized) — skipping retrieval"
+    )
+
 
 def _clean_search_query(query: str, max_len: int = 200) -> str:
     """Strip fenced code blocks from a search query while preserving inline
@@ -366,8 +386,11 @@ class ChatProcessor:
                     results = rag_manager.search(message, k=5, owner=owner)
                     # Filter by similarity threshold
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]
+                    logger.info(
+                        "RAG: %d/%d results above threshold %s (query=%r)",
+                        len(relevant), len(results), self.RAG_SIMILARITY_THRESHOLD, message[:60],
+                    )
                     if relevant:
-                        logger.info(f"RAG: {len(relevant)}/{len(results)} results above threshold {self.RAG_SIMILARITY_THRESHOLD}")
                         rag_sources = [
                             {
                                 "filename": r["metadata"].get("filename", r["metadata"].get("source", "unknown")),
@@ -385,6 +408,8 @@ class ChatProcessor:
                             "retrieved documents",
                             rag_content,
                         ))
+                else:
+                    _log_rag_unavailable_throttled()
             except Exception as e:
                 logger.warning(f"RAG retrieval failed: {e}")
 

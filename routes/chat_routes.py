@@ -82,6 +82,14 @@ logger = logging.getLogger(__name__)
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
 
+# Sessions already announced by _resolve_use_rag's flag-override log. The
+# composer posts use_rag=false on every send, so an unbounded log would fire
+# once per turn of every rag=true session with zero information gain after
+# the first. Bounded: cleared wholesale once it exceeds the cap (a re-announce
+# after that is harmless — it means long-lived, very numerous rag sessions).
+_RAG_FLAG_ANNOUNCED_SESSIONS: set = set()
+_RAG_FLAG_ANNOUNCED_MAX = 1024
+
 
 def _stream_failure_status(chunk: str) -> Optional[int]:
     """Extract a provider status without retaining provider-supplied detail."""
@@ -410,6 +418,47 @@ def _resolve_workspace_from_message_path(request, message: str) -> tuple[str, st
             if workspace:
                 return workspace, ""
     return "", ""
+
+
+def _resolve_use_rag(
+    sess,
+    use_rag,
+    *,
+    image_generation_session: bool = False,
+):
+    """Resolve this turn's RAG setting from the request + persisted session flag.
+
+    The composer's global RAG toggle defaults to OFF and posts
+    ``use_rag=false`` on every send, so the per-session ``rag`` flag written
+    at session creation (POST /session) was never more than decoration: it is
+    persisted, returned by GET /sessions, and then ignored. A session built
+    on an indexed knowledge layer therefore got zero retrieval no matter what
+    the flag said. Consuming the flag here makes ``rag=true`` sessions always
+    retrieve.
+
+    The flag only ever *enables* retrieval. Image-generation turns (which
+    never reach a text model) stay hard-off, and the suppression gates
+    applied later inside ``build_chat_context`` (incognito, blocked tool
+    preprocessing, research spin-off sessions, low-signal greetings) still
+    win. Sessions without the flag keep the exact previous behavior.
+    """
+    if image_generation_session:
+        return "false"
+    if bool(getattr(sess, "rag", False)):
+        session_key = str(getattr(sess, "id", "?"))
+        if (
+            str(use_rag or "").lower() == "false"
+            and session_key not in _RAG_FLAG_ANNOUNCED_SESSIONS
+        ):
+            if len(_RAG_FLAG_ANNOUNCED_SESSIONS) >= _RAG_FLAG_ANNOUNCED_MAX:
+                _RAG_FLAG_ANNOUNCED_SESSIONS.clear()
+            _RAG_FLAG_ANNOUNCED_SESSIONS.add(session_key)
+            logger.info(
+                "[rag] session %s has rag=true — enabling retrieval despite the composer RAG toggle",
+                session_key,
+            )
+        return "true"
+    return use_rag
 
 
 def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
@@ -1342,8 +1391,13 @@ def setup_chat_routes(
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
         if image_generation_session:
             no_memory = True
-            use_rag = "false"
             search_context = None
+        # Consume the persisted session.rag flag: a session created with
+        # rag=true must retrieve from the indexed knowledge layer even though
+        # the composer's RAG toggle defaults to off (use_rag="false").
+        use_rag = _resolve_use_rag(
+            sess, use_rag, image_generation_session=image_generation_session,
+        )
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
         )

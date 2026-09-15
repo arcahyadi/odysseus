@@ -23,7 +23,9 @@ This spec covers file/document context, document storage, and vector retrieval i
 
 `app.py` registers upload, personal-doc/RAG, embedding, document, diagnostics, and Codex document routes. `src.app_initializer.initialize_managers()` creates `UploadHandler` and `PersonalDocsManager`, installs the upload handler on `SessionManager` and the shared tool helper, and startup attempts to initialize the RAG singleton. App route wiring passes that same handler to session/history, document, note, and calendar writers that can persist upload references.
 
-`src.rag_singleton.get_rag_manager()` returns the live `VectorRAG` instance when Chroma/embedding dependencies are reachable. Personal routes can retry the singleton and return explicit 503s when unavailable. Chat RAG uses the `PersonalDocsManager.rag_manager` captured during app initialization and can silently skip RAG if that manager is absent.
+`src.rag_singleton.get_rag_manager()` returns the live `VectorRAG` instance when Chroma/embedding dependencies are reachable. Personal routes can retry the singleton and return explicit 503s when unavailable. Chat RAG uses the `PersonalDocsManager.rag_manager` captured during app initialization and skips retrieval if that manager is absent, logging a throttled warning instead of failing silently.
+
+The chat stream consumes the persisted per-session `rag` flag via `routes.chat_routes._resolve_use_rag()`: a session created with `rag=true` retrieves on every turn even though the composer's global RAG toggle defaults to off (posting `use_rag=false`). The flag only enables retrieval — image-generation turns stay hard-off and the `build_chat_context` suppression gates (incognito, blocked tool preprocessing, research spin-off sessions, low-signal greetings) still win. Sessions without the flag keep the request-field behavior unchanged.
 
 ## Uploads And Attachments
 
