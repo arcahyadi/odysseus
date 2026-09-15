@@ -903,6 +903,23 @@ def setup_chat_routes(
             session_id=session,
         )
         actual_index = _candidate_index(foreground_candidates, actual_candidate)
+        if actual_index > 0:
+            # A foreground fallback candidate answered (same wording family as
+            # the streaming announcement). Keyed on the answering CANDIDATE,
+            # not on model-name inequality: a provider alias would otherwise
+            # announce a swap that never happened, and a same-model endpoint
+            # swap deserves its announcement too.
+            reply = (
+                foreground_fallback_notice_line(
+                    requested_model,
+                    actual_model,
+                    route_descriptors[actual_index].get("endpoint_label")
+                    if actual_index < len(route_descriptors)
+                    else None,
+                )
+                + "\n"
+                + reply
+            )
         apply_compaction_state(
             sess,
             candidate_request_state.get("compactions", {}).get(actual_index),

@@ -1342,6 +1342,9 @@ _LOW_SIGNAL_RE = re.compile(r"^[\W_]*$", re.UNICODE)
 # these words exist in English, so the gate cannot flip an English message.
 # First-person and clitic variants ("cerco", "mostrami", "verificami") are
 # included because they are the natural spoken forms of the same request.
+# Note: crea/mostra/verifica/cerca are also Spanish/Portuguese cognates —
+# intentional: the gate direction is safe (full path = more capability, and
+# the direct path is never naked anyway, see _direct_low_signal_messages).
 _ITALIAN_REQUEST_RE = re.compile(
     r"\b(?:dimmi|dimmelo|"
     r"mostra|mostrami|"
@@ -1349,6 +1352,17 @@ _ITALIAN_REQUEST_RE = re.compile(
     r"cerca|cercami|cerco|"
     r"crea|creami|creo|"
     r"verifica|verificami|verifico)\b",
+    re.IGNORECASE,
+)
+# Italian interrogatives (review round: the tenant repro "quali sono gli
+# applicativi di craftale?" carries no request verb, only a question word).
+# "come" is deliberately EXCLUDED — it is the English verb "come" ("come here
+# and look at this") and must not flip an English message. Accent-tolerant
+# forms cover both the correct "perché"/"qual è" and the common typed
+# "perche"/"perchè"/"qual'è"/"qual'é".
+_ITALIAN_INTERROGATIVE_RE = re.compile(
+    r"\b(?:quali|quante|quanti|quanto|cosa|che\s+cosa|dove|quando|"
+    r"perch[eéè]|qual\s*'?\s*[eéè])\b",
     re.IGNORECASE,
 )
 _CASUAL_OPENING_RE = re.compile(
@@ -1475,7 +1489,7 @@ _ITALIAN_TRAILING_INTENT_RE = re.compile(
     r"lancio|avvio|fermo|riavvio|trovo|invio|ricerco)\b"
     r"|\b(?:creer|controller|verificher|cercher|salver|aprir|"
     r"legger|scriver|eliminer|canceller|aggiorner|aggiunger|"
-    r"esaminer|analizzer|ispezioner|esplorer|estarr|confronter|"
+    r"esaminer|analizzer|ispezioner|esplorer|estrarr|confronter|"
     r"riassumer|eseguir|lancer|avvier|fermer|riavvier|trover|"
     r"invier|ricercher|mapper|mostrer)[oò]\b"
     r"|\b(?:ti|vi)\s+(?:mostro|mostriamo)\b",
@@ -1805,14 +1819,20 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
         domains.add("integrations")
 
-    # An Italian request verb marks a real request even when no domain rule
-    # matched: keep it out of the low-signal bucket so it reaches the standard
-    # path, where multilingual fastembed RAG can still select tools (see the
-    # "[tool-rag] Low-signal query; will run RAG retrieval" branch). The
-    # English counterparts ("tell me", "show", "list", "search", "create",
-    # "verify") seed no deterministic domain either; the verb gate mirrors that
-    # without forcing a wrong domain.
-    low_signal = not continuation and not domains and not _ITALIAN_REQUEST_RE.search(q)
+    # An Italian request verb or interrogative marks a real request even when
+    # no domain rule matched: keep it out of the low-signal bucket so it
+    # reaches the standard path, where multilingual fastembed RAG can still
+    # select tools (see the "[tool-rag] Low-signal query; will run RAG
+    # retrieval" branch). The English counterparts ("tell me", "show", "list",
+    # "search", "create", "verify", "which/what/where/when/why") seed no
+    # deterministic domain either; the gates mirror that without forcing a
+    # wrong domain.
+    low_signal = (
+        not continuation
+        and not domains
+        and not _ITALIAN_REQUEST_RE.search(q)
+        and not _ITALIAN_INTERROGATIVE_RE.search(q)
+    )
     return {
         "low_signal": low_signal,
         "continuation": continuation,
@@ -4319,8 +4339,12 @@ async def stream_agent_loop(
             logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
         else:
             # Don't short-circuit: fall through to RAG retrieval below.
-            # Non-English queries are flagged low_signal by the English-only
-            # intent classifier, but fastembed retrieval works across languages.
+            # The intent classifier is no longer strictly English-only — the
+            # Italian request-verb/interrogative gates (_ITALIAN_REQUEST_RE,
+            # _ITALIAN_INTERROGATIVE_RE) already keep real Italian requests
+            # out of the low-signal bucket — but whatever still lands here
+            # (other languages, terse Italian) is in good hands: fastembed
+            # retrieval works across languages.
             logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
     if not guide_only and not _relevant_tools:
         try:

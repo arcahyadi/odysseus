@@ -191,7 +191,9 @@ def foreground_fallback_notice_line(
     elif label:
         who = label
     elif answered:
-        who = answered
+        # Same model, no endpoint label: repeating the model name would read
+        # as a no-op ("answered by <the very same model>").
+        who = "another endpoint"
     else:
         who = "a fallback route"
     if selected:

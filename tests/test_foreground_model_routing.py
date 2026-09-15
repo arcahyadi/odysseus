@@ -1274,7 +1274,9 @@ async def test_nonstream_chat_opt_in_advances_only_on_eligible_failure(monkeypat
 
     assert [call[1] for call in calls] == ["selected-model", "backup-model"]
     assert response == {
-        "response": "backup answer",
+        # The swap is announced at the reply start (same wording family as
+        # the streaming announcement).
+        "response": "[Model fallback: selected-model unavailable; answered by backup-model.]\nbackup answer",
         "requested_model": "selected-model",
         "model": "backup-model",
         "requested_endpoint_id": None,
@@ -1594,7 +1596,13 @@ async def test_nonstream_chat_real_parser_persists_provider_model_alias(
     expected_model = (
         "provider-backup-alias" if use_fallback else "provider-selected-alias"
     )
-    assert response["response"] == "provider answer"
+    expected_response = (
+        "[Model fallback: selected-model unavailable; answered by provider-backup-alias.]\n"
+        "provider answer"
+        if use_fallback
+        else "provider answer"
+    )
+    assert response["response"] == expected_response
     assert response["model"] == expected_model
     assert saved[-1].metadata["model"] == expected_model
     assert response["endpoint_id"] == ("backup" if use_fallback else None)

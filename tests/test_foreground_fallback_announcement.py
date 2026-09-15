@@ -18,6 +18,7 @@ import asyncio
 import json
 
 import pytest
+from fastapi import HTTPException
 
 import src.foreground_model_routing as foreground_model_routing
 from src.foreground_model_routing import (
@@ -46,6 +47,82 @@ def test_notice_line_prefers_endpoint_label_for_same_model_swap():
 def test_notice_line_without_any_identity_still_names_a_route():
     line = foreground_fallback_notice_line(None, None)
     assert "answered by a fallback route" in line
+
+
+def test_notice_line_same_model_without_label_says_another_endpoint():
+    # Repeating the identical model name would read as a no-op.
+    assert foreground_fallback_notice_line("selected-model", "selected-model") == (
+        "[Model fallback: selected-model unavailable; answered by another endpoint.]"
+    )
+
+
+# ── non-stream /api/chat: announcement at reply start (W2) ───────────────
+
+@pytest.mark.asyncio
+async def test_nonstream_chat_announces_fallback_at_reply_start(monkeypatch):
+    import src.llm_core as llm_core
+    from src.request_models import ChatRequest
+    from tests.test_foreground_model_routing import _chat_endpoint
+
+    monkeypatch.setattr(foreground_model_routing, "_load_policy_preferences", lambda owner: {
+        "foreground_fallback_enabled": True,
+        "foreground_model_fallbacks": [
+            {"endpoint_id": "backup", "model": "backup-model"},
+        ],
+    })
+    monkeypatch.setattr(
+        foreground_model_routing,
+        "resolve_fallback_entries",
+        lambda *args, **kwargs: [("https://backup.example/v1", "backup-model", {})],
+    )
+
+    async def fake_call(url, model, messages, **kwargs):
+        if model == "selected-model":
+            raise HTTPException(503, "selected unavailable")
+        return "backup answer"
+
+    monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
+    endpoint, saved = _chat_endpoint(monkeypatch)
+
+    response = await endpoint(
+        _RouteRequest("chat"),
+        ChatRequest(message="hello", session="session-1"),
+    )
+
+    assert response["response"] == (
+        "[Model fallback: selected-model unavailable; answered by backup-model.]\n"
+        "backup answer"
+    )
+    assert saved[-1].content.startswith("[Model fallback:")
+    assert response["model"] == "backup-model"
+    assert response["requested_model"] == "selected-model"
+
+
+@pytest.mark.asyncio
+async def test_nonstream_chat_no_announcement_without_swap(monkeypatch):
+    import src.llm_core as llm_core
+    from src.request_models import ChatRequest
+    from tests.test_foreground_model_routing import _chat_endpoint
+
+    monkeypatch.setattr(
+        foreground_model_routing,
+        "_load_policy_preferences",
+        lambda owner: {},
+    )
+
+    async def fake_call(url, model, messages, **kwargs):
+        return "primary answer"
+
+    monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
+    endpoint, _saved = _chat_endpoint(monkeypatch)
+
+    response = await endpoint(
+        _RouteRequest("chat"),
+        ChatRequest(message="hello", session="session-1"),
+    )
+
+    assert response["response"] == "primary answer"
+    assert response["model"] == response["requested_model"] == "selected-model"
 
 
 # ── chat route: announcement on real eligibility-driven swaps ─────────────

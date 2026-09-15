@@ -204,3 +204,46 @@ def test_italian_request_bypasses_direct_path_entirely(monkeypatch):
     )[6:])["data"]
     # The direct path stamps direct_low_signal=True into its metrics.
     assert metrics.get("direct_low_signal") is not True
+
+
+# ── review round: Italian interrogatives (W1) ────────────────────────────
+
+def test_italian_interrogatives_keep_standard_path():
+    # The pinned tenant repro: no request verb, only a question word.
+    intent = al._classify_agent_request([], "quali sono gli applicativi di craftale?")
+    assert intent["low_signal"] is False
+    for text in (
+        "quanto costa il server?",
+        "dove sono i file?",
+        "quando è il meeting?",
+        "perché non funziona?",
+        "perche non funziona?",  # accent-dropped typing
+        "qual è il modello attivo?",
+        "qual'è il modello attivo?",  # common apostrophe typo
+        "cosa sono gli endpoint?",
+        "che cosa significa questo errore?",
+        "quante email ho oggi?",
+    ):
+        intent = al._classify_agent_request([], text)
+        assert intent["low_signal"] is False, text
+
+
+def test_english_come_sentence_still_low_signal():
+    # "come" is the English verb — the interrogative gate must exclude it.
+    intent = al._classify_agent_request([], "come here and look at this")
+    assert intent["low_signal"] is True
+
+
+def test_english_interrogative_words_do_not_flip_low_signal():
+    # The English question words are NOT in the Italian gate. (Sentences here
+    # deliberately avoid pre-existing English domain keywords like "start".)
+    for text in (
+        "what is the plan for today",
+        "which model is running",
+        "why does it fail",
+        "how much is it",
+        "what time is it",
+        "why is the sky blue",
+    ):
+        intent = al._classify_agent_request([], text)
+        assert intent["low_signal"] is True, text

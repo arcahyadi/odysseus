@@ -499,3 +499,15 @@ def test_italian_long_narration_intent_tail_fires():
         tool_calls_this_turn=0,
         retry_used=False,
     )
+
+
+def test_retry_needed_on_estrarre_future_spelled_correctly():
+    # Pins the "estrarr" stem (a first pass typo'd it to "estarr"): the
+    # correct future of estrarre is "estrarrò" — e-s-t-r-a-r-r-ò.
+    assert al._ITALIAN_TRAILING_INTENT_RE.search("estrarrò i dati")
+    assert al._trailing_intent_retry_needed(
+        round_text="Estrarrò il file dal documento.",
+        tools_sent_count=5,
+        tool_calls_this_turn=0,
+        retry_used=False,
+    )
