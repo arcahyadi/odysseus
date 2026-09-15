@@ -412,6 +412,40 @@ def _resolve_workspace_from_message_path(request, message: str) -> tuple[str, st
     return "", ""
 
 
+def _resolve_use_rag(
+    sess,
+    use_rag,
+    *,
+    image_generation_session: bool = False,
+):
+    """Resolve this turn's RAG setting from the request + persisted session flag.
+
+    The composer's global RAG toggle defaults to OFF and posts
+    ``use_rag=false`` on every send, so the per-session ``rag`` flag written
+    at session creation (POST /session) was never more than decoration: it is
+    persisted, returned by GET /sessions, and then ignored. A session built
+    on an indexed knowledge layer therefore got zero retrieval no matter what
+    the flag said. Consuming the flag here makes ``rag=true`` sessions always
+    retrieve.
+
+    The flag only ever *enables* retrieval. Image-generation turns (which
+    never reach a text model) stay hard-off, and the suppression gates
+    applied later inside ``build_chat_context`` (incognito, blocked tool
+    preprocessing, research spin-off sessions, low-signal greetings) still
+    win. Sessions without the flag keep the exact previous behavior.
+    """
+    if image_generation_session:
+        return "false"
+    if bool(getattr(sess, "rag", False)):
+        if str(use_rag or "").lower() == "false":
+            logger.info(
+                "[rag] session %s has rag=true — enabling retrieval despite the composer RAG toggle",
+                getattr(sess, "id", "?"),
+            )
+        return "true"
+    return use_rag
+
+
 def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
     if not session_url or not endpoint_base:
         return False
@@ -1342,8 +1376,13 @@ def setup_chat_routes(
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
         if image_generation_session:
             no_memory = True
-            use_rag = "false"
             search_context = None
+        # Consume the persisted session.rag flag: a session created with
+        # rag=true must retrieve from the indexed knowledge layer even though
+        # the composer's RAG toggle defaults to off (use_rag="false").
+        use_rag = _resolve_use_rag(
+            sess, use_rag, image_generation_session=image_generation_session,
+        )
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
         )
