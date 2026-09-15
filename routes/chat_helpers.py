@@ -741,7 +741,18 @@ async def build_chat_context(
         incognito=incognito,
         use_skills=skills_enabled,
     )
-    if use_rag is not None or is_research_spinoff or casual_low_signal:
+    # The gate-computed use_rag_val must reach the processor whenever ANY
+    # gate turned it off. build_context_preface defaults to use_rag=True, so
+    # omitting the kwarg when the request never sent the field (the composer
+    # only posts use_rag when the toggle is UNchecked) would let retrieval
+    # run in incognito turns or with tool preprocessing blocked.
+    if (
+        use_rag is not None
+        or incognito
+        or not allow_tool_preprocessing
+        or is_research_spinoff
+        or casual_low_signal
+    ):
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
 

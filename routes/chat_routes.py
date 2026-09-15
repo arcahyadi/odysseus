@@ -82,6 +82,14 @@ logger = logging.getLogger(__name__)
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
 
+# Sessions already announced by _resolve_use_rag's flag-override log. The
+# composer posts use_rag=false on every send, so an unbounded log would fire
+# once per turn of every rag=true session with zero information gain after
+# the first. Bounded: cleared wholesale once it exceeds the cap (a re-announce
+# after that is harmless — it means long-lived, very numerous rag sessions).
+_RAG_FLAG_ANNOUNCED_SESSIONS: set = set()
+_RAG_FLAG_ANNOUNCED_MAX = 1024
+
 
 def _stream_failure_status(chunk: str) -> Optional[int]:
     """Extract a provider status without retaining provider-supplied detail."""
@@ -437,10 +445,17 @@ def _resolve_use_rag(
     if image_generation_session:
         return "false"
     if bool(getattr(sess, "rag", False)):
-        if str(use_rag or "").lower() == "false":
+        session_key = str(getattr(sess, "id", "?"))
+        if (
+            str(use_rag or "").lower() == "false"
+            and session_key not in _RAG_FLAG_ANNOUNCED_SESSIONS
+        ):
+            if len(_RAG_FLAG_ANNOUNCED_SESSIONS) >= _RAG_FLAG_ANNOUNCED_MAX:
+                _RAG_FLAG_ANNOUNCED_SESSIONS.clear()
+            _RAG_FLAG_ANNOUNCED_SESSIONS.add(session_key)
             logger.info(
                 "[rag] session %s has rag=true — enabling retrieval despite the composer RAG toggle",
-                getattr(sess, "id", "?"),
+                session_key,
             )
         return "true"
     return use_rag
