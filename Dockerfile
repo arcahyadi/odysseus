@@ -113,6 +113,43 @@ RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
 RUN sed -i 's/from torchvision.transforms.functional_tensor import rgb_to_grayscale/from torchvision.transforms.functional import rgb_to_grayscale/' \
         /usr/local/lib/python3.14/site-packages/basicsr/data/degradations.py
 
+# ---- CUDA 13 runtime libs + onnxruntime-gpu (GPU embeddings) -------------
+# fastembed depends on the CPU-only `onnxruntime` wheel. On Python 3.14 the
+# onnxruntime-gpu builds published on PyPI (>= 1.24) are CUDA 13 builds —
+# libonnxruntime_providers_cuda.so links libcublasLt.so.13 / libcublas.so.13
+# / libcurand.so.10 / libcudart.so.13 (verified via readelf) — and the
+# Microsoft CUDA-12 index only publishes cp311-cp313 plus cp314t wheels, so
+# there is NO CUDA-12 onnxruntime-gpu for this image. The image therefore
+# ships the CUDA 13 runtime libraries itself; the driver side (libcuda.so.1)
+# is injected at runtime by the NVIDIA Container Toolkit (see
+# docker-compose.gpu-nvidia.yml, NVIDIA_DRIVER_CAPABILITIES=compute,utility).
+# Without these libs the CUDA EP fails to load ("libcublasLt.so.13: cannot
+# open shared object file") and fastembed silently falls back to
+# CPUExecutionProvider (live breakage on crafthost, first seen 2026-09-16).
+# CUDA 13.1 packages: the lowest 13.x driver requirement (>= 580) while still
+# satisfying the .so.13 SONAMEs; cuDNN 9 because some models request it at
+# session init even though ort does not hard-link it. Base is Debian 13
+# (python:3.14-slim = trixie), hence the debian13 repo.
+ARG CUDA_KEYRING_URL=https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb
+RUN curl -fsSL -o /tmp/cuda-keyring.deb "${CUDA_KEYRING_URL}" \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && rm -f /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        cuda-cudart-13-1 \
+        libcublas-13-1 \
+        libcurand-13-1 \
+        libcudnn9-cuda-13 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Swap fastembed's CPU onnxruntime for the CUDA build of the SAME version so
+# embeddings run on the GPU when the runtime exposes one. Same-version swap
+# avoids API drift with fastembed; on hosts without a GPU the CUDA EP is
+# simply unavailable and ORT falls back to CPU — behavior unchanged.
+ARG ORT_GPU_VERSION=1.30.0
+RUN pip uninstall -y onnxruntime \
+    && pip install --no-cache-dir "onnxruntime-gpu==${ORT_GPU_VERSION}"
+
 # Copy app code
 COPY . .
 
