@@ -109,6 +109,20 @@ for dir in /app/data /app/logs /app/.ssh /app/.local; do
     repair_bind_mount_ownership "$dir"
 done
 
+# Purge hot-installed user-site onnxruntime from the persistent odysseus-local
+# volume. `pip install --user` copies made from inside the running app SHADOW
+# the image's system-site onnxruntime-gpu (user site wins) and caused a live
+# breakage: the 2026-09 crafthost copy was onnxruntime-gpu 1.29.0 (CUDA-13
+# build) with no CUDA runtime libs in the image — the CUDA EP failed to load
+# (libcublasLt.so.13) and fastembed silently fell back to CPU. The image now
+# ships onnxruntime-gpu + CUDA 13 libs itself, so any user-site copy is a
+# stale shadow and gets dropped before the app starts. Unmatched globs are
+# passed through rm -rf harmlessly.
+for d in /app/.local/lib/python*/site-packages; do
+    [ -d "$d" ] || continue
+    rm -rf "$d/onnxruntime" "$d"/onnxruntime-*.dist-info "$d"/onnxruntime_gpu-*.dist-info
+done
+
 # Cookbook installs vllm/etc. via `pip install --user`, which pulls
 # nvidia-cuda-* wheels into /app/.local but does not set CUDA_HOME or
 # symlink /usr/local/cuda. vllm 0.22+ then crashes during engine init
