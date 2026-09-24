@@ -118,6 +118,9 @@ def test_docker_compose_binds_web_ui_to_loopback_by_default():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
     assert "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000" in compose
     assert '"${APP_PORT:-7000}:7000"' not in compose
+    override = Path("docker-compose.override.yml").read_text(encoding="utf-8")
+    assert "0.0.0.0:" not in override
+    assert "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000" in override
 
 
 def test_readme_native_quickstart_uses_loopback():

@@ -1,3 +1,6 @@
+# odysseus-searxng-settings: 2026-09-24-engines-v1
+# Bump the marker above whenever this file changes: the searxng entrypoint in
+# docker-compose.yml re-renders /etc/searxng/settings.yml when it differs.
 use_default_settings: true
 
 server:
@@ -7,3 +10,27 @@ search:
   formats:
     - html
     - json
+
+# Engine set verified from the minipc deployment (2026-09-24). The upstream
+# defaults brave / duckduckgo / startpage answer this egress IP with
+# rate-limit or CAPTCHA pages, which left default queries with ZERO results.
+# bing, yandex, seznam and mwmbl each returned relevant results for probe
+# queries. Re-probe per engine with
+#   curl -G localhost:8080/search --data-urlencode q=test \
+#     --data-urlencode engines=<name> --data-urlencode format=json
+# before changing this list.
+engines:
+  - name: bing
+    disabled: false
+  - name: yandex
+    disabled: false
+  - name: seznam
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: brave
+    disabled: true
+  - name: duckduckgo
+    disabled: true
+  - name: startpage
+    disabled: true

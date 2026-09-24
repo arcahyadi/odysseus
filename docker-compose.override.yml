@@ -1,8 +1,9 @@
 services:
   odysseus:
-    # WI: framework OOM 2026-08-23. The container can run repo test suites
-    # (npm ci / vitest) against /app/work, which is uncapped by default and
-    # can take the whole 125GiB box down alongside CI. Hard ceiling here.
+    # WI: host OOM 2026-08-23 (then on the Framework). The container can run
+    # repo test suites (npm ci / vitest) against /app/work, which is uncapped
+    # by default and can take the whole host down. Hard ceiling here; a host
+    # overlay (e.g. /srv/odysseus/docker-compose.minipc.yml) may cap lower.
     mem_limit: 24g
     memswap_limit: 24g
     # markitdown (.docx/.pptx/.xlsx extraction) lives in
@@ -14,22 +15,22 @@ services:
       context: .
       args:
         INSTALL_OPTIONAL: "true"
-    # POS-SEC-05 (2026-08-25). APP_BIND in .env is 0.0.0.0, which published
-    # BOTH the UI (7000) and the Dev Preview admin proxy (7100) to the whole
-    # LAN. One variable governs both ports, so they are pinned explicitly here.
+    # POS-SEC-05 (2026-08-25) / minipc move (2026-09-24). Both published
+    # ports are pinned explicitly here because one variable used to govern
+    # both and APP_BIND=0.0.0.0 exposed the Dev Preview admin proxy (7100) to
+    # the whole LAN.
     #
-    # 7100 -> loopback. It is admin-gated dev tooling, not a user surface, and
-    # tailscale serve already fronts it at framework.tail1bd33c.ts.net:8443
-    # proxying from 127.0.0.1, so the intended access path is unaffected.
+    # 7000 follows APP_BIND and defaults to loopback, matching .env.example.
+    # The live deployment (minipc, /srv/odysseus) is tailnet-only: tailscale
+    # serve fronts 127.0.0.1:7000 at tacticusanalytics-1.tail1bd33c.ts.net:8443.
+    # Set APP_BIND=0.0.0.0 in .env only if LAN clients genuinely need it --
+    # Odysseus authenticates (AUTH_ENABLED=true, LOCALHOST_BYPASS=false), but
+    # loopback is the default posture.
     #
-    # 7000 deliberately LEFT on the LAN. Family members use this UI and their
-    # access path is not established -- if their devices are not on the tailnet,
-    # loopback-binding it cuts them off with no warning. That is an announced-
-    # window change for Tim, not an agent's call. Odysseus does at least
-    # authenticate (AUTH_ENABLED=true, LOCALHOST_BYPASS=false), so the residual
-    # LAN exposure is an authenticated surface, unlike localworker was.
+    # 7100 -> always loopback. It is admin-gated dev tooling, not a user
+    # surface; tailscale serve fronts it (:8445 on the minipc).
     ports: !override
-      - "0.0.0.0:${APP_PORT:-7000}:7000"
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
       - "127.0.0.1:${DEV_PREVIEW_PROXY_PORT:-7100}:${DEV_PREVIEW_PROXY_PORT:-7100}"
     # POS-SEC-05 (2026-08-25): remount the SSH identity dir read-only. The
     # security track's key review keeps both keys (id_minipc_vault is pinned

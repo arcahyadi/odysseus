@@ -121,12 +121,24 @@ services:
       - -c
       - |
         set -eu
-        if [ ! -s /etc/searxng/settings.yml ] || grep -q 'odysseus-local-searxng-json-2026-05-30\|__SEARXNG_SECRET__' /etc/searxng/settings.yml; then
+        tmpl=/tmp/searxng-settings.yml.template
+        live=/etc/searxng/settings.yml
+        # Re-render when the template's version marker changes, so edits to
+        # config/searxng/settings.yml (e.g. the engine list) reach an existing
+        # named volume instead of being ignored after first boot. The existing
+        # secret_key is carried over so a re-render does not rotate it.
+        marker="$$(grep -m1 '^# odysseus-searxng-settings:' "$$tmpl" || true)"
+        if [ ! -s "$$live" ] \
+          || grep -q 'odysseus-local-searxng-json-2026-05-30\|__SEARXNG_SECRET__' "$$live" \
+          || { [ -n "$$marker" ] && ! grep -qxF "$$marker" "$$live"; }; then
           secret="$${SEARXNG_SECRET:-}"
+          if [ -z "$$secret" ] && [ -s "$$live" ]; then
+            secret="$$(sed -n 's/^  secret_key: "\([A-Za-z0-9_-]*\)"$$/\1/p' "$$live" | head -1)"
+          fi
           if [ -z "$$secret" ]; then
             secret="$$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
           fi
-          sed "s|__SEARXNG_SECRET__|$$secret|g" /tmp/searxng-settings.yml.template > /etc/searxng/settings.yml
+          sed "s|__SEARXNG_SECRET__|$$secret|g" "$$tmpl" > "$$live"
         fi
         exec /usr/local/searxng/entrypoint.sh
     ports:
