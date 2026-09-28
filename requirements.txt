@@ -37,7 +37,9 @@ python-dateutil
 caldav
 cryptography
 bcrypt
-mcp
+# Built-in MCP servers use the Python SDK v1 low-level decorators
+# (`Server.list_tools`, `Server.call_tool`). SDK v2 removed that API.
+mcp>=1.28,<2
 pyotp
 qrcode[pil]
 croniter
