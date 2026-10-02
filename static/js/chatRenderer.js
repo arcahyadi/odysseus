@@ -3,18 +3,22 @@
 
 import uiModule from './ui.js';
 import markdownModule from './markdown.js';
+import { svgifyEmoji } from './markdown.js';
 import { addAITTSButton } from './tts-ai.js';
 import { providerLogo, providerLabel } from './providers.js';
 import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
+import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
+import { getTools } from './appConfig.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
 const CHAT_ABOUT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 const COPY_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const CHECK_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+const PAPERCLIP_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
 
 /** Sanitize a URL for use in href — only allow http(s) and protocol-relative. */
 function _safeHref(url) {
@@ -80,7 +84,7 @@ function _formatSize(bytes) {
 // Build the `.attach-cards` element for a message's attachment list. Shared by
 // addMessage and updateMessageAttachments so a live (optimistic) user bubble
 // can be re-rendered with real upload ids once the upload resolves.
-function buildAttachCards(attachments) {
+export function buildAttachCards(attachments) {
   const attachWrap = document.createElement('div');
   attachWrap.className = 'attach-cards';
   for (const att of attachments) {
@@ -362,7 +366,7 @@ function _openVisionEditor(att, userMsgEl) {
       await _saveVisionText();
       _closeVisionEditor();
       if (userMsgEl && window.chatModule?.resendUserMessage) {
-        window.chatModule.resendUserMessage(userMsgEl);
+        window.chatModule.resendUserMessage(userMsgEl, { replaceFromHere: true });
       } else if (uiModule?.showToast) {
         uiModule.showToast('Saved');
       }
@@ -406,8 +410,68 @@ function _openVisionEditor(att, userMsgEl) {
 
 // Tool call syntax patterns to strip from displayed text
 const TOOL_CALL_RE = /\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/gi;
-// Only strip fenced tool-call blocks that look like structured invocations, not regular code examples
-const EXEC_FENCE_RE = /```(?:web_search|read_file|write_file|create_document|edit_document|update_document)\s*\n[\s\S]*?```/gi;
+// Strip fenced tool-call blocks that look like structured invocations, not
+// regular code examples. The tool tags are NOT hard-coded here — they are the
+// backend's authoritative TOOL_TAGS set, fetched once from GET /api/tools and
+// built into EXEC_FENCE_RE at load. TOOL_TAGS (src/agent_tools/__init__.py) is
+// thus the single source: the live-strip list can never drift from the backend
+// or miss a future tool (#3993). bash/python are carved out on purpose — they
+// are languages a user may legitimately have asked the model to show, not tool
+// invocations.
+//
+// Until the fetch resolves, EXEC_FENCE_RE stays null and exec fences aren't
+// stripped — normally a sub-second window before the first stream. If the fetch
+// fails it stays null for the rest of the session (logged below), so live exec
+// fences won't be stripped until reload. Either way the backend already strips
+// persisted history (src/tool_parsing.py builds the same regex from TOOL_TAGS),
+// so a reload always renders clean.
+let EXEC_FENCE_RE = null;
+const EXEC_FENCE_NON_TOOL = new Set(['bash', 'python']);
+
+function escapeRegex(source) {
+  return String(source).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripExecutedFence(match, tag, inline, body) {
+  const inlineArgs = (inline || '').trim();
+  if (!inlineArgs) return '';
+  const bodyText = (body || '').trim();
+  const content = bodyText ? `${inlineArgs}\n${bodyText}` : inlineArgs;
+  try {
+    JSON.parse(content);
+  } catch {
+    return match;
+  }
+  return '';
+}
+
+async function loadExecFenceRegex() {
+  try {
+    // Shared with admin.js, and — more to the point — with the other copies of
+    // this module: chatRenderer.js is imported under three different ?v= query
+    // strings, so it is instantiated three times per load and used to issue
+    // three identical /api/tools requests. appConfig.js is imported by one
+    // specifier from all of them, so they now share a single fetch.
+    const data = await getTools();
+    const tags = (data.tools || [])
+      .map((t) => t.id)
+      .filter((id) => id && !EXEC_FENCE_NON_TOOL.has(id));
+    if (tags.length) {
+      EXEC_FENCE_RE = new RegExp(
+        '```(' + tags.map(escapeRegex).join('|') + ')(?![\\w-])' +
+        '[ \\t]*([\\[{][^\\n]*?)?[ \\t]*(?=\\r?\\n|```)' +
+        '\\r?\\n?([\\s\\S]*?)```',
+        'gi'
+      );
+    }
+  } catch (err) {
+    // Surface the failure rather than swallowing it: EXEC_FENCE_RE stays null,
+    // so this session won't strip live exec fences until reload (persisted path
+    // stays clean regardless).
+    console.warn('chatRenderer: /api/tools fetch failed; live exec-fence stripping disabled until reload', err);
+  }
+}
+loadExecFenceRegex();
 // XML-style tool calls: <minimax:tool_call>, <tool_call>, <function_call>, bare <invoke>
 const XML_TOOL_CALL_RE = /<(?:[\w]+:)?(?:tool_call|function_call)>[\s\S]*?<\/(?:[\w]+:)?(?:tool_call|function_call)>/gi;
 const XML_INVOKE_RE = /<invoke\s+name=['"][^'"]*['"]>[\s\S]*?<\/invoke>/gi;
@@ -417,6 +481,13 @@ const XML_INVOKE_RE = /<invoke\s+name=['"][^'"]*['"]>[\s\S]*?<\/invoke>/gi;
 // (e.g. mid-stream before the closing tag arrives).
 const DSML_TOOL_RE = /<\s*[｜|]+\s*DSML\s*[｜|]+\s*tool_calls\s*>[\s\S]*?(?:<\s*\/\s*[｜|]+\s*DSML\s*[｜|]+\s*tool_calls\s*>|$)/gi;
 const DSML_STRAY_RE = /<\s*\/?\s*[｜|]+\s*DSML\s*[｜|]+[^>]*>/gi;
+const DSML_INVOKE_RE = /<\s*[｜|]+\s*DSML\s*[｜|]+\s*invoke\b[^>]*>[\s\S]*?(?:<\s*\/\s*[｜|]+\s*DSML\s*[｜|]+\s*invoke\s*>|$)/gi;
+const RAW_OPENAI_TOOL_JSON_RE = /(?:\[\s*)?\{\s*"function"\s*:\s*\{[\s\S]*?\}\s*,\s*"id"\s*:\s*"[^"]*"\s*,\s*"type"\s*:\s*"function"\s*\}\s*\]?/gi;
+const QWEN_ROLE_MARKER_RE = /<\/?\|(?:assistant|assistan|user|system|tool)\|>?|<\/\|end\|>?/gi;
+// Keep in sync with _QWEN_BARE_MARKER_RE in src/tool_parsing.py. At least one
+// pipe is required around `end`: with both optional (`\|?end\|?`) this also ate
+// a bare `end` on its own line, breaking Ruby/Lua/shell snippets (#5547).
+const QWEN_BARE_MARKER_RE = /(?:^|[\t\r\n ])(?:\/?\|end\||\|end|end\|)(?=[\t\r\n ]|$)|(?:^|[\r\n])[ \t]*assistan(?:t)?[ \t]*(?=[\r\n]|$)/gi;
 // Self-narration about tool results (model echoing stdout/exit_code)
 const TOOL_NARRATION_RE = /(?:The (?:result|output) shows?:?\s*)?-?\s*(?:stdout|stderr|exit_code):\s*.+/gi;
 
@@ -550,10 +621,36 @@ export function sameModelName(left, right) {
     || shortModel(a).toLowerCase() === shortModel(b).toLowerCase();
 }
 
-export function modelRouteLabel(requestedModel, actualModel) {
+function shortEndpointLabel(label) {
+  const value = modelValue(label);
+  if (!value) return '';
+  return value.length > 18 ? value.slice(0, 17) + '…' : value;
+}
+
+export function modelRouteLabel(
+  requestedModel,
+  actualModel,
+  requestedEndpointLabel = '',
+  actualEndpointLabel = '',
+  requestedEndpointId = '',
+  actualEndpointId = '',
+) {
   const requested = modelValue(requestedModel);
   const actual = modelValue(actualModel) || requested;
-  if (!requested || sameModelName(requested, actual)) return shortModel(actual || requested);
+  const requestedRoute = modelValue(requestedEndpointId || requestedEndpointLabel);
+  const actualRoute = modelValue(actualEndpointId || actualEndpointLabel);
+  const routeChanged = Boolean(
+    actualRoute
+    && requestedRoute
+    && actualRoute !== requestedRoute
+  );
+  if (!requested || sameModelName(requested, actual)) {
+    const model = shortModel(actual || requested);
+    if (!routeChanged) return model;
+    const from = shortEndpointLabel(requestedEndpointLabel || 'Selected route');
+    const to = shortEndpointLabel(actualEndpointLabel || actualEndpointId);
+    return model + ' (' + from + ' -> ' + to + ')';
+  }
   return shortModel(requested) + ' -> ' + shortModel(actual);
 }
 
@@ -564,10 +661,24 @@ export function replyModelPair(modelName, metadata) {
   if (actualFromMeta || requestedFromMeta) {
     const actual = actualFromMeta || requestedFromMeta || modelValue(modelName);
     const requested = requestedFromMeta || actual;
-    return { requestedModel: requested, actualModel: actual };
+    return {
+      requestedModel: requested,
+      actualModel: actual,
+      requestedEndpointId: meta.requested_endpoint_id || null,
+      requestedEndpointLabel: meta.requested_endpoint_label || 'Selected route',
+      actualEndpointId: meta.endpoint_id || null,
+      actualEndpointLabel: meta.endpoint_label || meta.requested_endpoint_label || 'Selected route',
+    };
   }
   const fallback = modelValue(modelName);
-  return { requestedModel: fallback, actualModel: fallback };
+  return {
+    requestedModel: fallback,
+    actualModel: fallback,
+    requestedEndpointId: null,
+    requestedEndpointLabel: 'Selected route',
+    actualEndpointId: null,
+    actualEndpointLabel: 'Selected route',
+  };
 }
 
 /**
@@ -635,8 +746,8 @@ export function applyModelColor(roleEl, modelName) {
       popup.className = 'ctx-popup';
       let html = '<div style="font-weight:600;margin-bottom:6px;color:var(--fg);display:flex;align-items:center;gap:6px;">';
       if (logoHtml) html += '<span class="role-provider-logo" style="opacity:0.7">' + logoHtml + '</span>';
-      html += short + '</div>';
-      html += '<div><span class="ctx-label">Model</span> ' + modelName.split('/').pop() + '</div>';
+      html += uiModule.esc(short) + '</div>';
+      html += '<div><span class="ctx-label">Model</span> ' + uiModule.esc(modelName.split('/').pop()) + '</div>';
       // Provider = the serving endpoint, distinct from the model vendor/logo
       // (e.g. the same model via OpenRouter vs Copilot vs Anthropic direct).
       const _epUrl = (window.sessionModule && window.sessionModule.getCurrentEndpointUrl)
@@ -759,10 +870,48 @@ export function isCostTrackedEndpoint(url) {
 }
 
 /** Cost for the current turn, returning null for non-billable endpoints. */
-function _billableCost(model, inputTokens, outputTokens) {
-  const url = _currentEndpointUrl();
-  if (!isCostTrackedEndpoint(url)) return null;
+function _billableCost(model, inputTokens, outputTokens, endpointCostTracked, selectedEndpointUrl) {
+  // Foreground fallback can answer on a different endpoint than the session's
+  // selected route. Prefer the backend's non-secret actual-route
+  // classification; retain the selected-endpoint check for older history.
+  if (endpointCostTracked === false) return null;
+  const selectedUrl = selectedEndpointUrl === undefined
+    ? _currentEndpointUrl()
+    : selectedEndpointUrl;
+  if (endpointCostTracked !== true && !isCostTrackedEndpoint(selectedUrl)) {
+    return null;
+  }
   return getModelCost(model, inputTokens, outputTokens);
+}
+
+/** Sum cost using the route/model that produced each Agent round. */
+function _metricsBillableCost(metrics, model, inputTokens, outputTokens, selectedEndpointUrl) {
+  const buckets = Array.isArray(metrics.usage_buckets) ? metrics.usage_buckets : [];
+  if (!buckets.length) {
+    return _billableCost(
+      model,
+      inputTokens,
+      outputTokens,
+      metrics.endpoint_cost_tracked,
+      selectedEndpointUrl,
+    );
+  }
+  let total = 0;
+  let hasPricedUsage = false;
+  for (const bucket of buckets) {
+    if (!bucket || typeof bucket !== 'object') continue;
+    const bucketCost = _billableCost(
+      bucket.model || model,
+      Number(bucket.input_tokens) || 0,
+      Number(bucket.output_tokens) || 0,
+      bucket.endpoint_cost_tracked,
+      selectedEndpointUrl,
+    );
+    if (bucketCost === null) continue;
+    total += bucketCost;
+    hasPricedUsage = true;
+  }
+  return hasPricedUsage ? total : null;
 }
 
 export function getImageCost(model, quality, size) {
@@ -779,6 +928,9 @@ export function getImageCost(model, quality, size) {
 
 /* ── Session cost helpers ─────────────────────────────────────────── */
 const _COST_KEY = 'ody-session-cost';
+const _COST_RUNS_KEY = 'ody-session-cost-runs';
+const _MAX_COST_RUNS_PER_SESSION = 256;
+const _COST_LEDGER_LOCK = 'odysseus-session-cost-ledger';
 
 /** Return the accumulated cost for the current (or given) session. */
 export function getSessionCost(sessionId) {
@@ -786,7 +938,14 @@ export function getSessionCost(sessionId) {
   if (!sid) return 0;
   try {
     const costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
-    return costs[sid] || 0;
+    const runCosts = JSON.parse(localStorage.getItem(_COST_RUNS_KEY) || '{}');
+    const recordedRuns = runCosts[sid] && typeof runCosts[sid] === 'object'
+      ? Object.values(runCosts[sid])
+      : [];
+    return (costs[sid] || 0) + recordedRuns.reduce(
+      (total, value) => total + (Number(value) || 0),
+      0,
+    );
   } catch (_e) { return 0; }
 }
 
@@ -798,6 +957,9 @@ export function resetSessionCost(sessionId) {
     const costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
     delete costs[sid];
     localStorage.setItem(_COST_KEY, JSON.stringify(costs));
+    const runCosts = JSON.parse(localStorage.getItem(_COST_RUNS_KEY) || '{}');
+    delete runCosts[sid];
+    localStorage.setItem(_COST_RUNS_KEY, JSON.stringify(runCosts));
   } catch (_e) { /* ignore */ }
   updateSessionCostUI();
 }
@@ -806,21 +968,8 @@ export function resetSessionCost(sessionId) {
 export function updateSessionCostUI() {
   const el = document.getElementById('session-cost-display');
   if (!el) return;
-  // Non-billable endpoint? Hide the badge and clear stale cost that a previous
-  // cloud-rate calculation may have left in localStorage for this session.
-  const _url = _currentEndpointUrl();
-  if (!isCostTrackedEndpoint(_url)) {
-    const sid = window.sessionModule && window.sessionModule.getCurrentSessionId();
-    if (sid && getSessionCost(sid) > 0) {
-      try {
-        const costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
-        delete costs[sid];
-        localStorage.setItem(_COST_KEY, JSON.stringify(costs));
-      } catch (_e) { /* ignore */ }
-    }
-    el.style.display = 'none';
-    return;
-  }
+  // The ledger records billable work already performed in this session. A
+  // selected local endpoint does not erase cost from a paid fallback route.
   const cost = getSessionCost();
   if (cost > 0) {
     el.textContent = '$' + (cost < 0.01 ? cost.toFixed(4) : cost < 1 ? cost.toFixed(3) : cost.toFixed(2));
@@ -828,6 +977,94 @@ export function updateSessionCostUI() {
   } else {
     el.style.display = 'none';
   }
+}
+
+/** Record one metrics payload in a session ledger at most once. */
+export function recordSessionMetricsCost(metrics, sessionId, selectedEndpointUrl) {
+  if (!metrics || typeof metrics !== 'object') return null;
+  const cost = _metricsBillableCost(
+    metrics,
+    metrics.model || 'Unknown',
+    metrics.input_tokens || 0,
+    metrics.output_tokens || 0,
+    selectedEndpointUrl,
+  );
+  if (metrics._fromHistory) return cost;
+  const sid = sessionId || (
+    window.sessionModule && window.sessionModule.getCurrentSessionId()
+  );
+  if (!sid || cost === null) return cost;
+  const runId = typeof metrics._costRecordId === 'string'
+    ? metrics._costRecordId.trim()
+    : '';
+  if ((metrics._costRecorded || metrics._costRecordPending) && !runId) return cost;
+  // Recorded is only set once the write actually runs; pending covers the
+  // window while the write waits on the cross-tab lock, so a replay in that
+  // window cannot double-add and a tab closed mid-queue never claims recorded.
+  metrics._costRecordPending = true;
+  const writeCost = () => {
+    if (runId) {
+      try {
+        const runCosts = JSON.parse(localStorage.getItem(_COST_RUNS_KEY) || '{}');
+        const sessionRuns = runCosts[sid] && typeof runCosts[sid] === 'object'
+          ? runCosts[sid]
+          : {};
+        // Assigning by detached-run identity is replay-idempotent even when a
+        // refresh produces a fresh metrics object. The Web Lock around this
+        // read/modify/write also keeps distinct runs from two tabs from
+        // overwriting one another's stale snapshot.
+        sessionRuns[runId] = cost;
+        const entries = Object.entries(sessionRuns);
+        if (entries.length > _MAX_COST_RUNS_PER_SESSION) {
+          const overflow = entries.slice(0, entries.length - _MAX_COST_RUNS_PER_SESSION);
+          const costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
+          costs[sid] = (costs[sid] || 0) + overflow.reduce(
+            (total, entry) => total + (Number(entry[1]) || 0),
+            0,
+          );
+          overflow.forEach(([oldRunId]) => delete sessionRuns[oldRunId]);
+          localStorage.setItem(_COST_KEY, JSON.stringify(costs));
+        }
+        runCosts[sid] = sessionRuns;
+        localStorage.setItem(_COST_RUNS_KEY, JSON.stringify(runCosts));
+      } catch (_e) { /* ignore */ }
+    } else {
+      try {
+        const costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
+        costs[sid] = (costs[sid] || 0) + cost;
+        localStorage.setItem(_COST_KEY, JSON.stringify(costs));
+      } catch (_e) { /* ignore */ }
+    }
+    metrics._costRecorded = true;
+    metrics._costRecordPending = false;
+    const currentSid = window.sessionModule && window.sessionModule.getCurrentSessionId();
+    if (currentSid === sid) updateSessionCostUI();
+  };
+
+  let writeStarted = false;
+  const guardedWrite = () => {
+    writeStarted = true;
+    writeCost();
+  };
+  try {
+    if (
+      typeof navigator !== 'undefined'
+      && navigator.locks
+      && typeof navigator.locks.request === 'function'
+    ) {
+      const pendingWrite = navigator.locks.request(_COST_LEDGER_LOCK, guardedWrite);
+      if (pendingWrite && typeof pendingWrite.catch === 'function') {
+        pendingWrite.catch(() => {
+          if (!writeStarted) guardedWrite();
+        });
+      }
+    } else {
+      guardedWrite();
+    }
+  } catch (_e) {
+    if (!writeStarted) guardedWrite();
+  }
+  return cost;
 }
 
 /** Create a timestamp span for role labels.
@@ -852,14 +1089,32 @@ export function roleTimestamp(when) {
  */
 export function stripToolBlocks(text) {
   let cleaned = text.replace(TOOL_CALL_RE, '');
-  cleaned = cleaned.replace(EXEC_FENCE_RE, '');
+  if (EXEC_FENCE_RE) cleaned = cleaned.replace(EXEC_FENCE_RE, stripExecutedFence);
   cleaned = cleaned.replace(DSML_TOOL_RE, '');
+  cleaned = cleaned.replace(DSML_INVOKE_RE, '');
   cleaned = cleaned.replace(DSML_STRAY_RE, '');
   cleaned = cleaned.replace(XML_TOOL_CALL_RE, '');
   cleaned = cleaned.replace(XML_INVOKE_RE, '');
+  cleaned = cleaned.replace(RAW_OPENAI_TOOL_JSON_RE, '');
+  cleaned = cleaned.replace(QWEN_ROLE_MARKER_RE, '');
+  cleaned = cleaned.replace(QWEN_BARE_MARKER_RE, ' ');
   cleaned = cleaned.replace(TOOL_NARRATION_RE, '');
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
   return cleaned.trim();
+}
+
+/**
+ * Plain-text payload for the message copy buttons: the reply as the renderer
+ * displays it — tool blocks and <think> reasoning stripped. dataset.raw keeps
+ * the full model output (chat.js even embeds the elapsed time into the
+ * <think> tag for reload persistence), so copying it verbatim leaks the
+ * thinking block (#3722). Falls back to the raw text when stripping leaves
+ * nothing (e.g. turns interrupted mid-thinking).
+ */
+export function copyMessageText(msgElement) {
+  const raw = msgElement.dataset.raw || msgElement.querySelector('.body')?.textContent || '';
+  const { content } = markdownModule.extractThinkingBlocks(stripToolBlocks(raw));
+  return content || raw;
 }
 
 /**
@@ -1054,6 +1309,17 @@ document.addEventListener('click', function(e) {
   }
 }, true);
 
+function resolveDocumentPlaceholderLinks(text, metadata) {
+  if (!text || !metadata || !Array.isArray(metadata.tool_events)) return text;
+  const docEvents = metadata.tool_events.filter(ev => ev && ev.doc_id);
+  if (!docEvents.length) return text;
+  return String(text).replace(/#document-(\d+)\b/g, (match, num) => {
+    const idx = Number(num) - 1;
+    const ev = Number.isInteger(idx) && idx >= 0 ? docEvents[idx] : null;
+    return ev && ev.doc_id ? `#document-${ev.doc_id}` : match;
+  });
+}
+
 // Jump-to-entity anchors — the agent emits links like
 //   [New Chat](#session-89effa28)
 //   [Notes](#document-abc123)
@@ -1070,20 +1336,44 @@ document.addEventListener('click', function(e) {
   while (_t && _t.nodeType === Node.TEXT_NODE) _t = _t.parentElement;
   const a = _t && _t.closest && _t.closest('a[href]');
   if (!a) return;
-  const href = a.getAttribute('href') || '';
+  const rawHref = a.getAttribute('href') || '';
+  let href = rawHref;
+  try {
+    const parsed = new URL(rawHref, window.location.origin);
+    if (parsed.origin === window.location.origin && parsed.pathname === window.location.pathname) {
+      href = parsed.hash || rawHref;
+    }
+  } catch (_) {}
   if (!href.startsWith('#')) return;
-  const m = href.match(/^#(session|document|note|image|email|event|task|skill|research)-(.+)$/);
+  let m = href.match(/^#(session|document|note|image|email|event|task|skill|research)-(.+)$/);
+  if (!m) {
+    const noteOpen = href.match(/^#open=notes&note=([^&]+)/);
+    if (noteOpen) m = ['note', 'note', decodeURIComponent(noteOpen[1])];
+  }
+  if (!m) {
+    const bareSession = href.match(/^#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+    if (bareSession) m = ['session', 'session', bareSession[1]];
+  }
   if (!m) return;
   e.preventDefault();
   e.stopPropagation();
   const [, kind, id] = m;
   if (kind === 'session') {
+    try {
+      a.classList.add('is-loading');
+      a.setAttribute('aria-busy', 'true');
+    } catch {}
     import('./sessions.js').then(mod => {
       const fn = mod.selectSession || (mod.default && mod.default.selectSession);
-      if (fn) fn(id);
+      if (fn) return fn(id, { showLoading: true, immediateLoading: true });
+    }).finally(() => {
+      try {
+        a.classList.remove('is-loading');
+        a.removeAttribute('aria-busy');
+      } catch {}
     });
   } else if (kind === 'document') {
-    import('./document.js').then(mod => {
+    import('./document.js?v=20260815approvalsave1').then(mod => {
       const open = mod.loadDocument
         || mod.openDocument
         || (mod.default && (mod.default.loadDocument || mod.default.openDocument));
@@ -1093,6 +1383,11 @@ document.addEventListener('click', function(e) {
     import('./notes.js').then(mod => {
       const open = mod.openNote || (mod.default && mod.default.openNote);
       if (open) open(id);
+      try {
+        if (/^#(?:note-|open=notes&note=)/.test(window.location.hash || '')) {
+          history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+      } catch (_) {}
     }).catch(() => {});
   } else if (kind === 'image') {
     import('./gallery.js').then(mod => {
@@ -1100,7 +1395,7 @@ document.addEventListener('click', function(e) {
       if (open) open(id);
     }).catch(() => {});
   } else if (kind === 'email') {
-    import('./emailLibrary.js').then(mod => {
+    import('./emailLibrary.js?v=20260815approvalsave1').then(mod => {
       const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
       if (open) open({ uid: id });
     }).catch(() => {});
@@ -1126,7 +1421,7 @@ document.addEventListener('click', function(e) {
       if (open) open(id);
     }).catch(() => {});
   }
-});
+}, true);
 
 /**
  * Build a generated-image bubble element.
@@ -1135,6 +1430,9 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   var esc = uiModule.esc;
   const wrap = document.createElement('div');
   wrap.className = 'msg msg-ai generated-image-wrap';
+  wrap.dataset.imageUrl = imageUrl || '';
+  wrap.dataset.imageKey = String(imageId || imageUrl || '');
+  if (imageId) wrap.dataset.imageId = imageId;
 
   const role = document.createElement('div');
   role.className = 'role';
@@ -1210,6 +1508,42 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   });
   actions.appendChild(dlBtn);
 
+  const reuseBtn = document.createElement('button');
+  reuseBtn.className = 'footer-copy-btn';
+  reuseBtn.type = 'button';
+  reuseBtn.title = 'Attach image to new prompt';
+  reuseBtn.innerHTML = PAPERCLIP_ICON;
+  reuseBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    reuseBtn.disabled = true;
+    try {
+      const resp = await fetch(safeImageUrl, { credentials: 'same-origin' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const ext = (blob.type || '').includes('jpeg') ? 'jpg'
+        : (blob.type || '').includes('webp') ? 'webp'
+        : (blob.type || '').includes('gif') ? 'gif'
+        : 'png';
+      const base = (prompt || 'generated-image').slice(0, 36).replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'generated-image';
+      const file = new File([blob], `${base}.${ext}`, { type: blob.type || 'image/png', lastModified: Date.now() });
+      const mod = await import('./fileHandler.js');
+      const addFiles = mod.addFiles || (mod.default && mod.default.addFiles);
+      if (!addFiles) throw new Error('attachment handler unavailable');
+      await addFiles([file], { skipCrop: true });
+      const input = document.getElementById('message');
+      if (input) input.focus();
+      reuseBtn.innerHTML = CHECK_ICON;
+      if (window.showToast) window.showToast('Image attached');
+      setTimeout(() => { reuseBtn.innerHTML = PAPERCLIP_ICON; reuseBtn.disabled = false; }, 1400);
+    } catch (err) {
+      console.warn('Attach generated image failed', err);
+      reuseBtn.textContent = '\u2717';
+      if (window.showToast) window.showToast('Could not attach image');
+      setTimeout(() => { reuseBtn.innerHTML = PAPERCLIP_ICON; reuseBtn.disabled = false; }, 1600);
+    }
+  });
+  actions.appendChild(reuseBtn);
+
   const editBtn = document.createElement('button');
   editBtn.className = 'footer-copy-btn';
   editBtn.type = 'button';
@@ -1220,7 +1554,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     try {
       const [galleryMod, editorMod] = await Promise.all([
         import('./gallery.js'),
-        import('./galleryEditor.js'),
+        loadPanel('editor'),
       ]);
       // Ensure the Gallery modal is open so the editor has a container
       // to render into; switch its tabs to the Edit tab.
@@ -1243,6 +1577,25 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     }
   });
   actions.appendChild(editBtn);
+
+  if (imageId) {
+    const galleryBtn = document.createElement('button');
+    galleryBtn.className = 'footer-copy-btn footer-open-gallery-btn';
+    galleryBtn.type = 'button';
+    galleryBtn.title = 'Open in gallery';
+    galleryBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg><span>Open in gallery</span>';
+    galleryBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        const mod = await import('./gallery.js');
+        const open = mod.openGalleryImage || (mod.default && mod.default.openGalleryImage);
+        if (open) open(imageId);
+      } catch (err) {
+        console.error('[chat] open in gallery failed', err);
+      }
+    });
+    actions.appendChild(galleryBtn);
+  }
 
   const delBtn = document.createElement('button');
   delBtn.className = 'footer-copy-btn footer-delete-btn';
@@ -1309,8 +1662,12 @@ export function hideWelcomeScreen() {
 export function showWelcomeScreen() {
   const ws = document.getElementById('welcome-screen');
   const cc = document.getElementById('chat-container');
+  const alreadyVisible = !!(ws && !ws.classList.contains('hidden'));
   if (ws) ws.classList.remove('hidden');
   if (cc) cc.classList.add('welcome-active');
+  if (alreadyVisible) {
+    return;
+  }
   // Entering the New Chat / welcome state: discard any stale draft left in the
   // composer from the previous session so the input starts empty (issue #1343).
   // Switching between existing sessions loads them directly and does NOT call
@@ -1372,7 +1729,7 @@ export function createMsgFooter(msgElement) {
     { id: 'copy', icon: COPY_ICON, title: 'Copy message', cls: 'footer-copy-btn', html: true, handler(e) {
       e.stopPropagation();
       const btn = e.currentTarget;
-      uiModule.copyToClipboard(msgElement.dataset.raw || msgElement.querySelector('.body')?.textContent || '');
+      uiModule.copyToClipboard(copyMessageText(msgElement));
       btn.innerHTML = CHECK_ICON;
       setTimeout(() => { btn.innerHTML = COPY_ICON; }, 1500);
     }},
@@ -1675,8 +2032,9 @@ export function createUserMsgFooter(msgElement) {
  * Display performance metrics for a message.
  */
 export function displayMetrics(messageElement, metrics) {
-  const existingMetrics = messageElement.querySelector('.response-metrics');
-  if (existingMetrics) existingMetrics.remove();
+  messageElement
+    .querySelectorAll('.response-metrics, .metrics-divider, .ctx-divider, .ctx-ring')
+    .forEach((el) => el.remove());
 
   const metricsContainer = document.createElement('span');
   metricsContainer.className = 'response-metrics';
@@ -1688,40 +2046,36 @@ export function displayMetrics(messageElement, metrics) {
   const isReal = metrics.usage_source === 'real';
   const ctxPct = metrics.context_percent;
   const model = metrics.model || 'Unknown';
-  const cost = _billableCost(model, inputTokens, outputTokens);
+  const cost = _metricsBillableCost(
+    metrics,
+    model,
+    inputTokens,
+    outputTokens,
+  );
 
   // Nothing useful to show — bail out (only if ALL metrics are missing)
-  if (!responseTime && !outputTokens && tps == null && !ctxPct) return;
+  if (!responseTime && !inputTokens && !outputTokens && tps == null && !ctxPct) return;
 
-  // Accumulate session cost (only on fresh metrics, not history reload)
-  if (!metrics._fromHistory) {
-    const _sid = window.sessionModule && window.sessionModule.getCurrentSessionId();
-    if (_sid && cost !== null) {
-      try {
-        const _costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
-        _costs[_sid] = (_costs[_sid] || 0) + cost;
-        localStorage.setItem(_COST_KEY, JSON.stringify(_costs));
-      } catch (_e) { /* ignore */ }
-      updateSessionCostUI();
-    }
-  }
+  // Rendering can occur when metrics arrive and again after [DONE]. The
+  // ledger mutation is idempotent for that shared payload.
+  recordSessionMetricsCost(metrics);
 
-  // Default: show tok/s if available, else fall back to other stats
+  // Keep token counts in the Message Stats popup; the footer should stay slim.
   const costStr0 = cost !== null ? `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}` : null;
-  const metricsLabel = tps != null && tps !== 'undefined'
+  const hasTps = tps != null && tps !== 'undefined';
+  const metricsLabel = hasTps
     ? `${tps} tok/s`
     : costStr0
-      ? `${outputTokens} tok · ${costStr0}`
-      : outputTokens
-        ? `${outputTokens} tok · ${responseTime != null ? responseTime + 's' : ''}`
-        : responseTime != null
-          ? `${responseTime}s`
-          : '';
+      ? costStr0
+      : responseTime != null
+        ? `${responseTime}s`
+        : '';
   if (!metricsLabel) return;
   metricsContainer.textContent = metricsLabel;
   metricsContainer.style.cursor = 'pointer';
   metricsContainer.title = 'Click for details';
   const metricsDivider = document.createElement('span');
+  metricsDivider.className = 'metrics-divider';
   metricsDivider.textContent = ' | ';
   metricsDivider.style.color = 'var(--color-muted-alt)';
   metricsDivider.style.pointerEvents = 'none';
@@ -1934,6 +2288,13 @@ export function displayMetrics(messageElement, metrics) {
   }
 
   let footer = messageElement.querySelector('.msg-footer');
+  if (!footer) {
+    footer = createMsgFooter(messageElement);
+    if (messageElement.classList?.contains('agent-thread')) {
+      footer.classList.add('agent-thread-footer');
+    }
+    messageElement.appendChild(footer);
+  }
   if (footer) {
     const actions = footer.querySelector('.msg-actions');
     if (actions) {
@@ -1960,6 +2321,240 @@ export function displayMetrics(messageElement, metrics) {
   if (uiModule) uiModule.scrollHistory();
 }
 
+/** Remove any unanswered multiple-choice cards currently in the chat. */
+export function removeAskUserCards(root) {
+  const scope = root || document.getElementById('chat-history') || document;
+  scope.querySelectorAll('.ask-user-card').forEach((node) => node.remove());
+}
+
+// While a choice card is visible, let plain 1–3 activate the corresponding
+// rendered option. Reuse the option's click path so the question keeps its
+// existing submission semantics. Tool approval cards are excluded: that card
+// exists to make consent deliberate after untrusted context influenced the
+// run, and its first option is the widest grant, so a stray digit must not
+// answer it.
+function _handleAskUserShortcut(event) {
+  if (
+    event.defaultPrevented
+    || event.repeat
+    || event.isComposing
+    || event.ctrlKey
+    || event.altKey
+    || event.metaKey
+    || event.shiftKey
+  ) return;
+  if (!/^[1-3]$/.test(event.key)) return;
+
+  const target = event.target;
+  if (target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+
+  const focusedCard = document.activeElement?.closest?.('.ask-user-card') || null;
+  const mainCard = document.querySelector('#chat-history .ask-user-card');
+  const compareCards = document.querySelectorAll('.compare-pane .ask-user-card');
+  const card = focusedCard || mainCard || (compareCards.length === 1 ? compareCards[0] : null);
+  if (!card) return;
+  if (card.dataset.askUserKind === 'tool_approval') return;
+  const option = card.querySelectorAll('.ask-user-option')[Number(event.key) - 1];
+  if (!option || option.disabled) return;
+
+  event.preventDefault();
+  option.click();
+}
+
+document.addEventListener('keydown', _handleAskUserShortcut);
+
+/**
+ * Render an ask_user payload as a durable choice card.
+ *
+ * This lives in the history renderer rather than the streaming loop so the
+ * same UI can be used both for a live SSE event and for a persisted tool event
+ * after a session reload.
+ */
+export function renderAskUserCard(payload, options) {
+  const aq = payload || {};
+  if (aq.resolved) return null;
+  const opts = Array.isArray(aq.options) ? aq.options : [];
+  const renderOptions = options || {};
+  const chatBox = renderOptions.root || document.getElementById('chat-history');
+  const onSubmit = typeof renderOptions.onSubmit === 'function'
+    ? renderOptions.onSubmit
+    : null;
+  if (!chatBox || !aq.question || opts.length < 2) return null;
+
+  removeAskUserCards(chatBox);
+
+  const card = document.createElement('div');
+  card.className = 'ask-user-card';
+  card.setAttribute('role', 'group');
+  card.tabIndex = -1;
+  const multi = !!aq.multi;
+  const isToolApproval = aq.kind === 'tool_approval' && !!aq.approval_id;
+  card.dataset.askUserKind = isToolApproval ? 'tool_approval' : 'question';
+  const emojiText = (value) => svgifyEmoji(uiModule.esc(String(value)));
+
+  const head = document.createElement('div');
+  head.className = 'ask-user-head';
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'modal-close ask-user-close';
+  closeBtn.setAttribute('aria-label', 'Dismiss question');
+  closeBtn.addEventListener('click', () => {
+    card.remove();
+    const input = uiModule.el('message');
+    if (input) input.focus();
+  });
+  head.appendChild(closeBtn);
+  card.appendChild(head);
+
+  const question = document.createElement('div');
+  question.className = 'ask-user-question';
+  question.id = `ask-user-q-${Date.now()}-${Math.floor(Math.random() * 1e4)}`;
+  question.innerHTML = emojiText(aq.question);
+  card.appendChild(question);
+  card.setAttribute('aria-labelledby', question.id);
+
+  if (isToolApproval && aq.action) {
+    const action = document.createElement('div');
+    action.className = 'ask-user-option-desc';
+    const effects = Array.isArray(aq.action.effects)
+      ? aq.action.effects.join(', ')
+      : '';
+    action.textContent = [
+      aq.action.tool || 'tool',
+      aq.action.content || '',
+      effects ? `Effects: ${effects}` : '',
+      aq.action.workspace ? `Workspace: ${aq.action.workspace}` : '',
+      aq.action.document_id ? `Document: ${aq.action.document_id}` : '',
+      aq.action.document_version != null
+        ? `Document version: ${aq.action.document_version}`
+        : '',
+      aq.action.digest ? `Approval fingerprint: ${aq.action.digest}` : '',
+    ].filter(Boolean).join('\n');
+    action.style.whiteSpace = 'pre-wrap';
+    card.appendChild(action);
+  }
+
+  const list = document.createElement('div');
+  list.className = 'ask-user-options';
+  card.appendChild(list);
+
+  const send = (text) => {
+    if (!text) return;
+    if (onSubmit) {
+      const accepted = onSubmit({
+        kind: 'answer',
+        text,
+        label: text,
+        payload: aq,
+        card,
+      });
+      if (accepted !== false) card.remove();
+      return;
+    }
+    card.remove();
+    const input = uiModule.el('message');
+    if (input) input.value = text;
+    const sendButton = document.querySelector('.send-btn');
+    if (sendButton) sendButton.click();
+  };
+
+  opts.forEach((opt) => {
+    const label = (opt && opt.label) ? String(opt.label) : String(opt || '');
+    if (!label) return;
+    const description = (opt && opt.description) ? String(opt.description) : '';
+    const row = document.createElement(multi ? 'label' : 'button');
+    row.className = 'ask-user-option';
+    if (multi) {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = label;
+      row.appendChild(checkbox);
+    }
+    const labelText = document.createElement('span');
+    labelText.className = 'ask-user-option-label';
+    labelText.innerHTML = emojiText(label);
+    row.appendChild(labelText);
+    if (description) {
+      const descriptionText = document.createElement('span');
+      descriptionText.className = 'ask-user-option-desc';
+      descriptionText.innerHTML = emojiText(description);
+      row.appendChild(descriptionText);
+    }
+    if (!multi) {
+      row.type = 'button';
+      row.addEventListener('click', () => {
+        if (isToolApproval) {
+          const detail = {
+            approval_id: aq.approval_id,
+            decision: String((opt && opt.value) || '').toLowerCase(),
+            label,
+            document_id: aq.action && aq.action.document_id
+              ? String(aq.action.document_id)
+              : '',
+          };
+          if (onSubmit) {
+            const accepted = onSubmit({
+              kind: 'tool_approval',
+              ...detail,
+              payload: aq,
+              card,
+            });
+            if (accepted !== false) card.remove();
+          } else {
+            card.remove();
+            document.dispatchEvent(new CustomEvent('odysseus:tool-approval', { detail }));
+          }
+        } else {
+          send(label);
+        }
+      });
+    }
+    list.appendChild(row);
+  });
+
+  const other = document.createElement('div');
+  other.className = 'ask-user-other';
+  const otherInput = document.createElement('input');
+  otherInput.type = 'text';
+  otherInput.className = 'styled-prompt-input ask-user-other-input';
+  otherInput.placeholder = multi ? 'Other (added to selection)…' : 'Other… (type your own answer)';
+  otherInput.setAttribute('aria-label', multi ? 'Add a custom option' : 'Type a custom answer');
+  const otherSend = document.createElement('button');
+  otherSend.type = 'button';
+  otherSend.className = 'confirm-btn confirm-btn-primary ask-user-other-send';
+  otherSend.setAttribute('aria-label', 'Send answer');
+  otherSend.textContent = multi ? 'Send selection' : 'Send';
+  const submit = () => {
+    const freeText = otherInput.value.trim();
+    if (multi) {
+      const picked = Array.from(card.querySelectorAll('.ask-user-option input:checked')).map((input) => input.value);
+      if (freeText) picked.push(freeText);
+      if (picked.length) send(picked.join(', '));
+    } else if (freeText) {
+      send(freeText);
+    }
+  };
+  otherSend.addEventListener('click', submit);
+  otherInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      submit();
+    }
+  });
+  other.appendChild(otherInput);
+  other.appendChild(otherSend);
+  if (!isToolApproval) card.appendChild(other);
+
+  chatBox.appendChild(card);
+  if (renderOptions.scroll !== false) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  if (renderOptions.focus !== false) {
+    try { card.focus(); } catch (_) {}
+  }
+  return card;
+}
+
 /**
  * Add a message to the chat history.
  */
@@ -1969,29 +2564,49 @@ export function addMessage(role, content, modelName, metadata) {
     const box = document.getElementById('chat-history');
     if (!box) { console.error('Chat history element not found'); return; }
 
+    // Loading a later user message means any earlier ask_user card was
+    // answered.  This also removes the live card as soon as a manual reply is
+    // appended, even when the user did not click one of its buttons.
+    if (role === 'user') removeAskUserCards(box);
+
     var esc = uiModule.esc;
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
 
     // --- Agent multi-bubble reconstruction from saved metadata ---
-    if (role === 'assistant' && metadata && metadata.tool_events && metadata.tool_events.length > 0) {
+    if (
+      role === 'assistant'
+      && metadata
+      && (
+        (Array.isArray(metadata.tool_events) && metadata.tool_events.length > 0)
+        || (Array.isArray(metadata.round_texts) && metadata.round_texts.length > 1)
+      )
+    ) {
       const roundTexts = metadata.round_texts || [];
-      const toolEvents = metadata.tool_events;
+      const roundModels = metadata.round_models || [];
+      const roundEndpointIds = metadata.round_endpoint_ids || [];
+      const roundEndpointLabels = metadata.round_endpoint_labels || [];
+      const toolEvents = metadata.tool_events || [];
+      let pendingAskUser = null;
       let lastWrap = null;
       let firstMsgAi = null;
       let lastMsgAi = null;
 
       const toolsByRound = {};
       for (const ev of toolEvents) {
-        const r = ev.round || 1;
+        const r = ev.round ?? 1;
         if (!toolsByRound[r]) toolsByRound[r] = [];
         toolsByRound[r].push(ev);
       }
 
-      const maxRound = Math.max(...Object.keys(toolsByRound).map(Number), roundTexts.length);
+      const toolRounds = Object.keys(toolsByRound).map(Number);
+      const maxRound = Math.max(toolRounds.length ? Math.max(...toolRounds) : 0, roundTexts.length);
 
-      for (let r = 0; r < maxRound; r++) {
-        const roundNum = r + 1;
-        const txt = (roundTexts[r] || '').trim();
+      const firstRound = (toolsByRound[0] || []).length ? 0 : 1;
+      for (let roundNum = firstRound; roundNum <= maxRound; roundNum++) {
+        const r = roundNum - 1;
+        const txt = r >= 0
+          ? resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata)
+          : '';
 
         if (txt) {
           const wrap = document.createElement('div');
@@ -1999,10 +2614,31 @@ export function addMessage(role, content, modelName, metadata) {
           const roleEl = document.createElement('div');
           roleEl.className = 'role';
           const pair = replyModelPair(modelName, metadata);
-          const contModel = pair.actualModel || pair.requestedModel;
-          roleEl.textContent = modelRouteLabel(pair.requestedModel, contModel);
-          if (pair.requestedModel && contModel && !sameModelName(pair.requestedModel, contModel)) {
-            roleEl.title = pair.requestedModel + ' -> ' + contModel;
+          const contModel = roundModels[r] || pair.actualModel || pair.requestedModel;
+          const contEndpointId = r < roundEndpointIds.length
+            ? roundEndpointIds[r]
+            : pair.actualEndpointId;
+          const contEndpointLabel = r < roundEndpointLabels.length
+            ? roundEndpointLabels[r]
+            : pair.actualEndpointLabel;
+          roleEl.textContent = modelRouteLabel(
+            pair.requestedModel,
+            contModel,
+            pair.requestedEndpointLabel,
+            contEndpointLabel,
+            pair.requestedEndpointId,
+            contEndpointId,
+          );
+          if (
+            pair.requestedModel
+            && contModel
+            && (
+              !sameModelName(pair.requestedModel, contModel)
+              || (pair.requestedEndpointId && contEndpointId && pair.requestedEndpointId !== contEndpointId)
+            )
+          ) {
+            roleEl.title = pair.requestedModel + ' -> ' + contModel
+              + ' (' + pair.requestedEndpointLabel + ' -> ' + contEndpointLabel + ')';
           }
           applyModelColor(roleEl, contModel);
           if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
@@ -2052,6 +2688,7 @@ export function addMessage(role, content, modelName, metadata) {
             box.appendChild(threadWrap);
           }
           for (const ev of roundTools) {
+            if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
             const ok = (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (ev.output && ev.output.trim()) {
@@ -2115,6 +2752,12 @@ export function addMessage(role, content, modelName, metadata) {
         box.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
       }
       if (markdownModule.renderMermaid) markdownModule.renderMermaid(box);
+      if (pendingAskUser) {
+        // Session history is rendered oldest-to-newest.  A later user message
+        // removes this card; if there is none, the pending choice survives a
+        // refresh.  Avoid stealing focus while the history is loading.
+        renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
+      }
       return lastWrap;
     }
 
@@ -2150,7 +2793,14 @@ export function addMessage(role, content, modelName, metadata) {
     const isCompacted = metadata?.compacted;
     const replyModels = replyModelPair(modelName, metadata);
     const resolvedModel = replyModels.actualModel || replyModels.requestedModel;
-    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? 'Odysseus' : modelRouteLabel(replyModels.requestedModel, resolvedModel);
+    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? 'Odysseus' : modelRouteLabel(
+      replyModels.requestedModel,
+      resolvedModel,
+      replyModels.requestedEndpointLabel,
+      replyModels.actualEndpointLabel,
+      replyModels.requestedEndpointId,
+      replyModels.actualEndpointId,
+    );
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';
     }
@@ -2161,8 +2811,14 @@ export function addMessage(role, content, modelName, metadata) {
     }
     r.textContent = _roleText;
     if (role !== 'user') {
-      if (!isSlash && !isCompacted && replyModels.requestedModel && resolvedModel && !sameModelName(replyModels.requestedModel, resolvedModel)) {
-        r.title = replyModels.requestedModel + ' -> ' + resolvedModel;
+      const endpointChanged = Boolean(
+        replyModels.requestedEndpointId
+        && replyModels.actualEndpointId
+        && replyModels.requestedEndpointId !== replyModels.actualEndpointId
+      );
+      if (!isSlash && !isCompacted && replyModels.requestedModel && resolvedModel && (!sameModelName(replyModels.requestedModel, resolvedModel) || endpointChanged)) {
+        r.title = replyModels.requestedModel + ' -> ' + resolvedModel
+          + ' (' + replyModels.requestedEndpointLabel + ' -> ' + replyModels.actualEndpointLabel + ')';
       }
       if (!isSlash && !isCompacted) applyModelColor(r, resolvedModel);
       r.appendChild(roleTimestamp(metadata?.timestamp));
@@ -2172,6 +2828,9 @@ export function addMessage(role, content, modelName, metadata) {
     b.className = 'body';
 
     let text = markdownModule.squashOutsideCode(stripToolBlocks(textRaw || ''));
+    if (role === 'assistant') {
+      text = resolveDocumentPlaceholderLinks(text, metadata);
+    }
 
     // For user messages, pull out vision-model image descriptions ([Image: name]\n
     // <multi-line desc>) into a collapsible "image description" section. Done for
@@ -2197,8 +2856,8 @@ export function addMessage(role, content, modelName, metadata) {
         .trim();
     }
 
-    wrap.dataset.raw = text;
-    if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
+	    wrap.dataset.raw = text;
+	    if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
     // Prepend sources box if saved in metadata
     var sourcesPrefix = '';
     var findingsSuffix = '';
@@ -2221,9 +2880,10 @@ export function addMessage(role, content, modelName, metadata) {
         '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + metadata.thinking + '</think>\n\n' + text
       );
       b.innerHTML = sourcesPrefix + thinkHtml + findingsSuffix;
-    } else {
-      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
-    }
+	    } else {
+	      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
+	    }
+	    b.dataset.raw = text;
 
     // The vision/OCR caption is stripped from the displayed text above (so the
     // bubble doesn't show the raw model output) but no longer rendered as an
@@ -2442,10 +3102,14 @@ const chatRenderer = {
   getSessionCost,
   resetSessionCost,
   updateSessionCostUI,
+  recordSessionMetricsCost,
   roleTimestamp,
   stripToolBlocks,
+  copyMessageText,
   safeToolScreenshotSrc,
   safeDisplayImageSrc,
+  removeAskUserCards,
+  renderAskUserCard,
   buildSourcesBox,
   buildFindingsBox,
   appendReportButton,
@@ -2455,6 +3119,7 @@ const chatRenderer = {
   createMsgFooter,
   displayMetrics,
   addMessage,
+  buildAttachCards,
   updateMessageAttachments,
 };
 

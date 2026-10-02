@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 # Least privilege: none of the jobs write to the repo.
@@ -15,14 +15,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  focused-test-guidance:
+    name: Focused test guidance (report-only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Report changed test paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          report_file="$RUNNER_TEMP/focused-test-guidance.md"
+          publish_report() {
+            cat "$report_file"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              cat "$report_file" >> "$GITHUB_STEP_SUMMARY" || true
+            fi
+            return 0
+          }
+
+          report_unavailable() {
+            {
+              printf '%s\n\n' '## Focused test guidance unavailable (report-only)'
+              printf '%s\n\n' "$1"
+              printf '%s\n' 'Existing blocking CI remains the source of truth.'
+            } > "$report_file"
+            publish_report
+            exit 0
+          }
+
+          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+            report_unavailable "Pull request base/head metadata is missing."
+          fi
+
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            report_unavailable "The pull request base commit is unavailable locally."
+          fi
+
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            report_unavailable "The pull request head commit is unavailable locally."
+          fi
+
+          if ! python3 .github/scripts/focused_test_guidance.py \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" > "$report_file"; then
+            report_unavailable "The focused test guidance helper could not produce a report."
+          fi
+
+          publish_report
+
   python-syntax:
     name: Python syntax (compileall)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.11"
       # Byte-compile sources — catches syntax errors without installing deps.
@@ -32,10 +86,10 @@ jobs:
     name: JS syntax (node --check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: "20"
       # Syntax-check our own JS (skip vendored libs in static/lib).
@@ -49,17 +103,14 @@ jobs:
   python-tests:
     name: Python tests (pytest)
     runs-on: ubuntu-latest
-    # Informational for now: the suite has known flaky / environment-dependent
-    # failures (test isolation + embedding-model assertions). Tracked under the
-    # ROADMAP "fresh install smoke tests" item; make this required once green.
-    continue-on-error: true
+    # Make Python test validation authoritative for the configured scope.
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # Detect whether this PR only touches documentation files.
+      # Detect whether this PR only touches repository prose outside the Pages site.
       # If so, skip the expensive pytest run while still reporting a passing check.
       - name: Check for docs-only changes
         id: docs-check
@@ -71,9 +122,10 @@ jobs:
             BASE="${{ github.event.before }}"
             HEAD="${{ github.sha }}"
           fi
-          # List all changed files; if every file matches docs/markdown patterns, skip pytest.
+          # Keep website/ and assets/branding/ out of this bypass: pytest owns
+          # regression guards for their published-file and orphan-asset contracts.
           changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
-          non_docs=$(echo "$changed" | grep -Ev '^(docs/|.*\.md$|\.github/[^/]+\.md$)' || true)
+          non_docs=$(echo "$changed" | grep -Ev '^(docs/|[^/]+\.md$|\.github/[^/]+\.md$)' || true)
           if [ -z "$non_docs" ]; then
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
             echo "Docs-only change detected — skipping pytest."
@@ -81,7 +133,7 @@ jobs:
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         if: steps.docs-check.outputs.docs_only != 'true'
         with:
           python-version: "3.11"

@@ -3,8 +3,9 @@ uvicorn
 python-multipart
 python-dotenv
 httpx
-pydantic>=2.0
-pydantic-settings>=2.0
+httpcore>=1.0,<2.0
+pydantic>=2.13.4
+pydantic-settings>=2.14.1
 SQLAlchemy
 pypdf
 beautifulsoup4
@@ -37,9 +38,21 @@ python-dateutil
 caldav
 cryptography
 bcrypt
-mcp
+# Built-in servers use the v1 low-level Server decorator API. MCP SDK v2 is a
+# breaking rewrite, so keep fresh installs on the maintained v1 line until the
+# servers are migrated together.
+mcp<2
 pyotp
 qrcode[pil]
 croniter
 pytest
 pytest-asyncio
+# starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every
+# TestClient import when only classic httpx is present. Runtime code keeps
+# using `httpx` above; this is test-client only.
+httpx2
+# DATABASE_URL defaults to sqlite (core/database.py), but when pointed at an
+# external Postgres, SQLAlchemy's postgresql dialect imports psycopg2 inside
+# create_engine() and raises ModuleNotFoundError if missing. -binary avoids
+# needing libpq-dev/pg_config on the host/image to compile it.
+psycopg2-binary

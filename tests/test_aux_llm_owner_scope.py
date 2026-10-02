@@ -16,7 +16,7 @@ def test_registered_manual_compaction_uses_session_owner_for_utility_endpoint():
 
 
 def test_task_name_generation_uses_owner_scoped_session_endpoint():
-    src = _src("routes/task_routes.py")
+    src = _src("routes/task/task_routes.py")
 
     assert "async def _generate_task_name(prompt: str, owner: Optional[str] = None)" in src
     assert "q = q.filter(DbSession.owner == owner)" in src
@@ -43,7 +43,8 @@ def test_background_session_sort_uses_owner_task_endpoint():
 def test_scheduler_fallbacks_and_research_headers_are_owner_scoped():
     src = _src("src/task_scheduler.py")
 
-    assert "resolve_utility_fallback_candidates(owner=task.owner or None)" in src
+    assert "resolve_task_candidates(" in src
+    assert "owner=task.owner or None" in src
     assert 'resolve_endpoint(\n                    "research",' in src
     assert "owner=task.owner or None" in src
     assert "headers_from_resolver = False" in src
@@ -53,7 +54,7 @@ def test_scheduler_fallbacks_and_research_headers_are_owner_scoped():
 
 
 def test_research_routes_fallbacks_are_owner_scoped():
-    src = _src("routes/research_routes.py")
+    src = _src("routes/research/research_routes.py")
 
     assert 'resolve_endpoint("research", owner=user)' in src
     assert 'resolve_endpoint("utility", owner=user)' in src

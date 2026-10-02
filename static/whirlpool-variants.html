@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Odysseus Whirlpool Variants</title>
+  <style>
+    :root {
+      --bg: #101216;
+      --panel: #171a20;
+      --fg: #e8edf2;
+      --muted: #8c949e;
+      --accent: #9cdef2;
+      --border: #303946;
+      --red: #e78284;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    .wrap {
+      width: min(980px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 22px 0 34px;
+    }
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    .hint {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    input[type="range"] { width: 96px; accent-color: var(--accent); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .card {
+      border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+      background: color-mix(in srgb, var(--panel) 92%, transparent);
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 172px;
+    }
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 14px;
+      font-size: 12px;
+    }
+    .name { font-weight: 650; }
+    .desc { color: var(--muted); }
+    .stage {
+      display: grid;
+      grid-template-columns: 58px 1fr;
+      align-items: center;
+      gap: 14px;
+      min-height: 86px;
+    }
+    canvas {
+      width: var(--size);
+      height: var(--size);
+      display: block;
+      image-rendering: auto;
+    }
+    .sample-lines {
+      display: grid;
+      gap: 10px;
+      font-size: 12px;
+      color: color-mix(in srgb, var(--fg) 80%, transparent);
+    }
+    .line {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 24px;
+    }
+    .mini {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+    }
+    .footer {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    @media (max-width: 720px) {
+      .grid { grid-template-columns: 1fr; }
+      header { align-items: flex-start; flex-direction: column; }
+      .controls { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <div>
+        <h1>Whirlpool Loop Variants</h1>
+        <p class="hint">Tune the loading whirlpool before replacing the app spinner.</p>
+      </div>
+      <div class="controls">
+        <label>Size <input id="size" type="range" min="14" max="42" value="24"></label>
+        <label>Speed <input id="speed" type="range" min="650" max="1700" value="1180"></label>
+        <label>Turns <input id="turns" type="range" min="18" max="38" value="27"></label>
+      </div>
+    </header>
+    <section class="grid" id="grid"></section>
+    <div class="footer">Pick a letter. A is current-ish; B/C/D are smoother loop candidates.</div>
+  </main>
+
+  <script>
+    const variants = [
+      { id: 'A', name: 'Current', desc: 'fixed spiral rotation, visible head loop', mode: 'current' },
+      { id: 'B', name: 'Soft Tail', desc: 'same spiral, head fades through loop', mode: 'softTail' },
+      { id: 'C', name: 'Breathing', desc: 'subtle radius pulse hides reset', mode: 'breathing' },
+      { id: 'D', name: 'Continuous Flow', desc: 'moving dash window, no fixed head snap', mode: 'flow' },
+    ];
+    const grid = document.getElementById('grid');
+    const sizeInput = document.getElementById('size');
+    const speedInput = document.getElementById('speed');
+    const turnsInput = document.getElementById('turns');
+    const canvases = [];
+
+    function card(v) {
+      const el = document.createElement('article');
+      el.className = 'card';
+      el.innerHTML = `
+        <div class="card-head">
+          <div><span class="name">${v.id}. ${v.name}</span></div>
+          <div class="desc">${v.desc}</div>
+        </div>
+        <div class="stage">
+          <canvas width="56" height="56" data-mode="${v.mode}"></canvas>
+          <div class="sample-lines">
+            <div class="line"><span class="mini">Loading inbox</span></div>
+            <div class="line"><span class="mini">Scanning recent INBOX</span></div>
+            <div class="line"><span class="mini">Unsubscribing 3/8</span></div>
+          </div>
+        </div>`;
+      return el;
+    }
+
+    for (const v of variants) {
+      const node = card(v);
+      grid.appendChild(node);
+      canvases.push(node.querySelector('canvas'));
+    }
+
+    let started = performance.now();
+    function getCss(name, fallback) {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return v || fallback;
+    }
+    function spiralPoint(frac, opts) {
+      const eased = Math.pow(frac, opts.ease);
+      const r = opts.maxR * eased * opts.pulse;
+      const angle = frac * opts.turns * Math.PI * 2 + opts.rot;
+      return { x: opts.cx + Math.cos(angle) * r, y: opts.cy + Math.sin(angle) * r };
+    }
+    function draw(canvas, mode, time) {
+      const cssSize = Number(sizeInput.value);
+      canvas.style.setProperty('--size', cssSize + 'px');
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const px = Math.round(cssSize * dpr);
+      if (canvas.width !== px || canvas.height !== px) {
+        canvas.width = px;
+        canvas.height = px;
+      }
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width;
+      const H = canvas.height;
+      const cx = W / 2;
+      const cy = H / 2;
+      const maxR = Math.min(W, H) / 2 - 2 * dpr;
+      const lw = Math.max(1.35 * dpr, cssSize > 30 ? 2.6 * dpr : 1.8 * dpr);
+      const loopMs = Number(speedInput.value);
+      const loop = ((time - started) % loopMs) / loopMs;
+      const rot = loop * Math.PI * 2;
+      const turns = Number(turnsInput.value) / 10;
+      const fg = getCss('--accent', '#9cdef2');
+      const track = getCss('--border', '#303946');
+
+      ctx.clearRect(0, 0, W, H);
+      ctx.beginPath();
+      ctx.arc(cx, cy, maxR - lw / 2, 0, Math.PI * 2);
+      ctx.strokeStyle = track;
+      ctx.globalAlpha = 0.28;
+      ctx.lineWidth = lw;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      const steps = 110;
+      const pulse = mode === 'breathing' ? 0.94 + 0.06 * Math.sin(loop * Math.PI * 2) : 1;
+      const opts = { cx, cy, maxR, turns, rot, pulse, ease: mode === 'flow' ? 0.76 : 0.82 };
+
+      for (let i = 1; i <= steps; i++) {
+        const a = (i - 1) / steps;
+        const b = i / steps;
+        let alpha;
+        let widthMul;
+        if (mode === 'flow') {
+          const phase = (b + loop) % 1;
+          alpha = 0.1 + Math.pow(1 - Math.abs(phase - 0.72) / 0.72, 2.2) * 0.74;
+          widthMul = 0.58 + alpha * 0.38;
+        } else if (mode === 'softTail') {
+          const headFade = 0.62 + 0.38 * Math.sin(loop * Math.PI * 2 - Math.PI / 2) ** 2;
+          alpha = (0.1 + Math.pow(b, 1.85) * 0.72) * (b > 0.88 ? headFade : 1);
+          widthMul = 0.52 + b * 0.34;
+        } else {
+          alpha = 0.12 + Math.pow(b, 1.8) * 0.72;
+          widthMul = 0.52 + b * 0.32;
+        }
+        const p0 = spiralPoint(a, opts);
+        const p1 = spiralPoint(b, opts);
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.strokeStyle = fg;
+        ctx.lineWidth = lw * widthMul;
+        ctx.globalAlpha = Math.max(0.04, Math.min(0.9, alpha));
+        ctx.stroke();
+      }
+
+      if (mode !== 'flow') {
+        const head = spiralPoint(1, opts);
+        const headAlpha = mode === 'softTail'
+          ? 0.55 + 0.35 * Math.sin(loop * Math.PI * 2 - Math.PI / 2) ** 2
+          : 0.9;
+        ctx.beginPath();
+        ctx.arc(head.x, head.y, Math.max(1.2 * dpr, lw * 0.48), 0, Math.PI * 2);
+        ctx.fillStyle = fg;
+        ctx.globalAlpha = headAlpha;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function tick(now) {
+      for (const canvas of canvases) draw(canvas, canvas.dataset.mode, now);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

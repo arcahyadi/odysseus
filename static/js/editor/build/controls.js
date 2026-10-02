@@ -102,6 +102,35 @@ export function controlsHTML({ color, brushSize, wandTolerance }) {
       </div>
       <p style="font-size:9px;opacity:0.4;margin:4px 0 0;">Click a region to select similar pixels. Shift+click to add, Alt+click to subtract. Esc to clear.</p>
     </div>
+    <div class="ge-sam-section" id="ge-sam-section" style="display:none;">
+      <div class="ge-section-title ge-section-title-with-help"><span>SAM</span><span class="ge-section-help" tabindex="0" role="img" aria-label="SAM selection help" title="Click an object for visual SAM selection, or type a neutral object label and use Find. The text is only used to locate a region before SAM creates the mask.">?</span></div>
+      <div class="ge-control-row" style="display:flex;gap:4px;margin-bottom:4px;" title="How the next SAM selection combines with the current selection. Shift / Alt held during a click override this for one click.">
+        <button type="button" class="ge-btn ge-btn-sm ge-wand-mode-btn active" data-wand-mode="replace" title="Replace selection">New</button>
+        <button type="button" class="ge-btn ge-btn-sm ge-wand-mode-btn" data-wand-mode="add" title="Add to selection">+ Add</button>
+        <button type="button" class="ge-btn ge-btn-sm ge-wand-mode-btn" data-wand-mode="subtract" title="Subtract from selection">− Subtract</button>
+      </div>
+      <div class="ge-control-row" style="display:flex;gap:6px;align-items:center;min-width:0;">
+        <input type="text" class="ge-inpaint-prompt" id="ge-sam-query" placeholder="Object to select..." style="flex:1 1 auto;min-width:0;" />
+        <button class="ge-btn ge-btn-sm ge-btn-ai" id="ge-sam-find" style="height:28px;display:inline-flex;align-items:center;gap:5px;" title="Find object and create a SAM mask">
+          <span class="ge-btn-ai-mark" aria-hidden="true">✦</span>
+          Find
+        </button>
+      </div>
+      <div class="ge-control-row ge-actions" style="margin-top:4px;flex-wrap:wrap;">
+        <button class="ge-btn ge-btn-sm ge-mask-vis-btn visible" id="ge-sam-vis" title="Hide selection overlay" aria-label="Toggle selection overlay">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        <button class="ge-btn ge-btn-sm ge-btn-iconlabel" id="ge-sam-clear" title="Clear the selection">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+          Clear
+        </button>
+        <button class="ge-btn ge-btn-sm ge-btn-iconlabel" id="ge-sam-mask" title="Add selection to the inpaint mask">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.06 11.9l8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"/><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z"/></svg>
+          To Mask
+        </button>
+      </div>
+      <p style="font-size:9px;opacity:0.4;margin:4px 0 0;">Click an object, or type a neutral object label. Shift adds, Alt subtracts.</p>
+    </div>
     <div class="ge-inpaint-section" id="ge-inpaint-section" style="display:none;">
       <div class="ge-inpaint-popover-head" data-inpaint-drag>
         <div class="ge-section-title ge-section-title-with-help ge-inpaint-popover-title"><span>INPAINT</span><span class="ge-section-help" tabindex="0" role="img" aria-label="How inpaint works" title="Brush the area you want the AI to redraw — the red preview marks the mask region. Use Paint to add, Erase to subtract (or hold Ctrl+Alt to flip for one stroke). Generate fills with what your prompt describes; Remove fills with the surrounding background.">?</span></div>
@@ -188,6 +217,12 @@ export function controlsHTML({ color, brushSize, wandTolerance }) {
         <span class="ge-eraser-preview" id="ge-edgestroke-preview" aria-hidden="true"></span>
         <label>Edge stroke <span id="ge-edgestroke-label">0px</span></label>
         <input type="range" id="ge-edgestroke-slider" min="-80" max="80" value="0" title="Expand (+) or contract (−) the inpaint layer's edge before feathering. Uses the AI buffer generated around your brush." />
+      </div>
+      <div class="ge-control-row ge-actions" id="ge-inpaint-automatch-row" style="display:none;margin-top:6px;">
+        <button class="ge-btn ge-btn-sm ge-btn-iconlabel ge-btn-ai" id="ge-inpaint-automatch" style="width:100%;justify-content:center;" title="Match the latest inpaint result to the surrounding colour and lighting using an adjustment layer.">
+          <span class="ge-btn-ai-mark" aria-hidden="true">✦</span>
+          Auto match color
+        </button>
       </div>
     </div>
     <div class="ge-eraser-section" id="ge-clone-section" style="display:none;">

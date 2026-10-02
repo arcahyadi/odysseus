@@ -6,8 +6,15 @@ Verifies two critical cases:
   2. api.deepseek.com must still be treated as tool-capable via the host
      allow-list (_API_HOSTS), so cloud deepseek users keep working.
 """
+from types import SimpleNamespace
+
 import pytest
-from src.agent_loop import _API_HOSTS, _endpoint_lookup_keys, _is_ollama_openai_compat_url
+from src.agent_loop import (
+    _API_HOSTS,
+    _agent_route_tool_mode,
+    _endpoint_lookup_keys,
+    _is_ollama_openai_compat_url,
+)
 from src.llm_core import _is_ollama_native_url
 
 
@@ -18,13 +25,14 @@ def _compute_is_api_model(model: str, endpoint_url: str, endpoint_supports=None)
     model_supports_tools = any(kw in model_lc for kw in (
         "gpt-4", "gpt-5", "gpt-o", "claude", "gemini", "gemma",
         "qwen3", "qwen2.5", "mixtral", "mistral", "llama-3.1", "llama-3.2",
-        "llama-3.3", "llama-4",
+        "llama-3.3", "llama-4", "llama3.1", "llama3.2", "llama3.3", "llama4",
         "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
         "glm-4", "internlm", "hermes",
         "deepseek-v", "deepseek-chat",
     ))
     model_no_tools = any(kw in model_lc for kw in (
         "deepseek-r1",
+        "gpt-oss",
     ))
 
     if endpoint_supports is True:
@@ -72,6 +80,11 @@ class TestDeepSeekToolSupport:
             "gemma4:e4b", "http://host.docker.internal:11434/v1"
         ) is False
 
+    def test_gpt_oss_local_openai_compat_defaults_to_fenced_tools(self):
+        assert _compute_is_api_model(
+            "gpt-oss-20b", "http://localhost:8000/v1"
+        ) is False
+
     def test_qwen_native_ollama_defaults_to_fenced_tools(self):
         assert _compute_is_api_model(
             "qwen3.5:4b", "http://localhost:11434/api/chat"
@@ -117,6 +130,12 @@ class TestDeepSeekToolSupport:
         )
         assert result is True
 
+    def test_endpoint_supports_true_overrides_gpt_oss_default(self):
+        result = _compute_is_api_model(
+            "gpt-oss-20b", "http://localhost:8000/v1", endpoint_supports=True
+        )
+        assert result is True
+
     def test_endpoint_supports_false_overrides_cloud(self):
         """supports_tools=False on an endpoint gates even cloud APIs."""
         result = _compute_is_api_model(
@@ -152,3 +171,57 @@ class TestEndpointLookupKeys:
         keys = _endpoint_lookup_keys("http://host.docker.internal:11434/api/chat")
 
         assert "http://host.docker.internal:11434/api" in keys
+
+
+def test_route_tool_mode_matches_credential_distinct_endpoint(monkeypatch):
+    from core import database
+    from src import endpoint_resolver
+
+    rows = [
+        SimpleNamespace(
+            id="one",
+            base_url="https://same.example/v1",
+            api_key="key-one",
+            provider_auth_id=None,
+            supports_tools=True,
+        ),
+        SimpleNamespace(
+            id="two",
+            base_url="https://same.example/v1",
+            api_key="key-two",
+            provider_auth_id=None,
+            supports_tools=False,
+        ),
+    ]
+
+    class Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return rows
+
+    class Db:
+        def query(self, *args, **kwargs):
+            return Query()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(database, "SessionLocal", lambda: Db())
+    monkeypatch.setattr(
+        endpoint_resolver,
+        "resolve_endpoint_runtime",
+        lambda endpoint, owner=None: (endpoint.base_url, endpoint.api_key),
+    )
+
+    assert _agent_route_tool_mode(
+        "https://same.example/v1",
+        "custom-model",
+        headers={"Authorization": "Bearer key-one"},
+    )[0] is True
+    assert _agent_route_tool_mode(
+        "https://same.example/v1",
+        "custom-model",
+        headers={"Authorization": "Bearer key-two"},
+    )[0] is False

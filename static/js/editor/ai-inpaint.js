@@ -136,6 +136,10 @@ export function wireInpaintButtons({
       const dilatedMask = dilateMask(mergedMask, padPx);
       const imageB64 = flatCanvas.toDataURL('image/png').split(',')[1];
       const maskB64 = dilatedMask.toDataURL('image/png').split(',')[1];
+      const baseSnap = document.createElement('canvas');
+      baseSnap.width = state.imgWidth;
+      baseSnap.height = state.imgHeight;
+      baseSnap.getContext('2d').drawImage(flatCanvas, 0, 0);
       const res = await fetch('/api/image/inpaint', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
@@ -180,7 +184,7 @@ export function wireInpaintButtons({
           maskSnap.width = state.maskCanvas.width;
           maskSnap.height = state.maskCanvas.height;
           maskSnap.getContext('2d').drawImage(state.maskCanvas, 0, 0);
-          resultLayer.inpaintSource = { ai: aiSnap, mask: maskSnap, padPx };
+          resultLayer.inpaintSource = { ai: aiSnap, mask: maskSnap, base: baseSnap, padPx };
           // Apply initial alpha = hard mask (no feather, no edge shift).
           applyInpaintFeather(resultLayer, 0, 0);
           state.layers.push(resultLayer);
@@ -216,7 +220,9 @@ export function wireInpaintButtons({
           const eRow = document.getElementById('ge-inpaint-edgestroke-row');
           const eSlider = document.getElementById('ge-edgestroke-slider');
           const eLabel = document.getElementById('ge-edgestroke-label');
+          const autoRow = document.getElementById('ge-inpaint-automatch-row');
           if (eRow) eRow.style.display = '';
+          if (autoRow) autoRow.style.display = '';
           if (eSlider) {
             eSlider.max = String(padPx);
             eSlider.min = String(-padPx);

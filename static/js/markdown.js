@@ -10,6 +10,127 @@ import { replaceEmojiShortcodes, hasEmojiShortcode } from './emojiShortcodes.js'
 
 var escapeHtml = uiModule.esc;
 
+// Mermaid and KaTeX are vendored under /static/lib and fetched on first use.
+// Loading them from <head> cost every session ~985 KB on the wire even though
+// most chats never contain a diagram or a formula. Both loaders memoise the
+// *promise* rather than the resolved library, so concurrent callers share one
+// fetch and a double trigger cannot start two loads. A failed load clears the
+// memo so the next diagram/formula retries instead of being poisoned forever.
+const MERMAID_SRC = '/static/lib/mermaid.min.js';
+const KATEX_SRC = '/static/lib/katex/katex.min.js';
+const KATEX_CSS = '/static/lib/katex/katex.min.css';
+// Marks math emitted before KaTeX finished loading; renderMath() swaps these
+// for typeset output. The source stays as readable text inside the span, so a
+// load that never completes degrades to plain text rather than to nothing.
+const MATH_PENDING_CLASS = 'ody-math-pending';
+
+// KaTeX has no entity syntax: it reads a bare "&" as an alignment marker and
+// errors out on anything that is not a valid column break, so "a &lt; b" comes
+// back as a red .katex-error instead of a formula. mdToHtml escapes the whole
+// string before the math pass, which leaves two spellings of the same
+// character at the delimiters — a typed "<" arrives as "&lt;", while a typed
+// "&lt;" arrives as "&amp;lt;" — and both have to reach KaTeX as "<".
+//
+// One alternation, longest form first, so nothing this writes is scanned
+// again. Chained .replace() calls cannot do it: unescaping "&amp;" first lets
+// the next pass eat the "&lt;" it just produced (the double-unescape CodeQL
+// flags), and unescaping it last leaves the entity spelling intact and breaks
+// the render. The code-block pass upstream keeps its chained order on purpose
+// — Markdown does not decode entities inside code, so "&lt;" there is meant to
+// stay visible.
+const MATH_SOURCE_ENTITY_RE = /&amp;(?:lt|gt|amp|quot|#39);|&lt;|&gt;|&amp;/g;
+const MATH_SOURCE_ENTITIES = {
+  '&amp;lt;': '<',
+  '&amp;gt;': '>',
+  '&amp;amp;': '&',
+  '&amp;quot;': '"',
+  '&amp;#39;': "'",
+  '&lt;': '<',
+  '&gt;': '>',
+  '&amp;': '&',
+};
+
+function decodeMathSource(text) {
+  return String(text).replace(MATH_SOURCE_ENTITY_RE, (entity) => MATH_SOURCE_ENTITIES[entity]);
+}
+
+let _mermaidPromise = null;
+let _katexPromise = null;
+let _mathFlushScheduled = false;
+
+function _loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.addEventListener('load', () => resolve(), { once: true });
+    script.addEventListener('error', () => reject(new Error('Failed to load ' + src)), { once: true });
+    document.head.appendChild(script);
+  });
+}
+
+function _loadStylesheet(href) {
+  // Resolves either way: without the stylesheet KaTeX still produces correct
+  // markup, just unstyled, which beats failing the whole math render.
+  return new Promise((resolve) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.addEventListener('load', () => resolve(), { once: true });
+    link.addEventListener('error', () => resolve(), { once: true });
+    document.head.appendChild(link);
+  });
+}
+
+/**
+ * Load Mermaid on first use and initialize it once.
+ */
+export function ensureMermaid() {
+  return (_mermaidPromise ??= _loadScript(MERMAID_SRC)
+    .then(() => {
+      if (!window.mermaid) throw new Error('mermaid global missing after load');
+      window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+      return window.mermaid;
+    })
+    .catch((err) => {
+      _mermaidPromise = null;
+      throw err;
+    }));
+}
+
+/**
+ * Load KaTeX (script + stylesheet) on first use.
+ */
+export function ensureKatex() {
+  return (_katexPromise ??= Promise.all([_loadScript(KATEX_SRC), _loadStylesheet(KATEX_CSS)])
+    .then(() => {
+      if (!window.katex) throw new Error('katex global missing after load');
+      return window.katex;
+    })
+    .catch((err) => {
+      _katexPromise = null;
+      throw err;
+    }));
+}
+
+// mdToHtml() is synchronous and its callers insert the returned string into the
+// DOM themselves, so the placeholders are usually not attached yet when this
+// fires. Loading first and scanning afterwards covers that gap: by the time
+// KaTeX is in, the caller's innerHTML assignment has long since happened.
+//
+// setTimeout, not requestAnimationFrame: this has nothing to do with paint, and
+// rAF is throttled to a stop in a background tab (and never fires at all in a
+// headless browser), which would leave math untypeset until the tab is focused.
+function _scheduleMathFlush() {
+  if (_mathFlushScheduled) return;
+  _mathFlushScheduled = true;
+  setTimeout(() => {
+    _mathFlushScheduled = false;
+    ensureKatex()
+      .then(() => renderMath(document))
+      .catch((e) => console.warn('KaTeX load error:', e));
+  }, 0);
+}
+
 function safeLinkUrl(rawUrl) {
   const url = String(rawUrl || '').trim();
   if (url.startsWith('#')) {
@@ -34,6 +155,14 @@ function linkHtml(text, url) {
     return `<a href="${safeUrl}" class="chat-link">${safeText}</a>`;
   }
   return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${safeText}</a>`;
+}
+
+function imageHtml(alt, url, title) {
+  const safeUrl = safeLinkUrl(url);
+  if (!safeUrl || safeUrl.startsWith('#')) return escapeHtml(alt || '');
+  const safeAlt = escapeHtml(alt || '');
+  const safeTitle = title ? ` title="${escapeHtml(title)}"` : '';
+  return `<img src="${escapeHtml(safeUrl)}" alt="${safeAlt}"${safeTitle} loading="lazy" decoding="async">`;
 }
 
 function _isModelEndpointUrl(rawUrl) {
@@ -125,7 +254,7 @@ function _cleanAllowedHtmlOnce(htmlString) {
   return tpl.innerHTML;
 }
 
-function sanitizeAllowedHtml(html) {
+export function sanitizeAllowedHtml(html) {
   const raw = String(html == null ? '' : html);
   // Non-browser context (e.g. a future SSR/Node import): fail closed by
   // escaping rather than trusting the markup.
@@ -146,7 +275,7 @@ function sanitizeAllowedHtml(html) {
  * Check if text has unclosed think tag
  */
 export function hasUnclosedThinkTag(text) {
-  text = text || '';
+  text = normalizeThinkingMarkup(text || '');
   const openCount =
     (text.match(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi) || []).length
     + (text.match(/<\|channel>thought/gi) || []).length;
@@ -157,12 +286,16 @@ export function hasUnclosedThinkTag(text) {
 }
 
 export function startsWithReasoningPrefix(text) {
-  return /^\s*(?:thinking(?:\s+process)?\s*:|the user |i need |i should |i will |they are |the question |i can )/i.test(text || '');
+  return /^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |i need |i should |i will |i'll |i am going |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|they are |the question |i can )/i.test(text || '');
 }
 
 export function normalizeThinkingMarkup(text) {
   if (!text) return text;
   let normalized = text;
+  // MiniMax M-series can emit namespaced reasoning tags like
+  // <mm:think>...</mm:think>. Normalize them into the shared thinking parser.
+  normalized = normalized.replace(/<mm:think(\s+[^>]*)?>/gi, (_m, attrs = '') => `<think${attrs || ''}>`);
+  normalized = normalized.replace(/<\/mm:think>/gi, '</think>');
   normalized = normalized.replace(/<thought(\s+[^>]*)?>/gi, (_m, attrs = '') => `<think${attrs || ''}>`);
   normalized = normalized.replace(/<\/thought>/gi, '</think>');
   normalized = normalized.replace(/<\|channel>thought\s*\n?([\s\S]*?)<channel\|>\s*/gi, (_m, content = '') => {
@@ -222,6 +355,11 @@ function normalizePlainThinking(text) {
       const reply = withoutPrefix.slice(match.index + 1).trim();
       if (thinkBlock && reply) return `<think>${thinkBlock}</think>\n${reply}`;
     }
+  }
+
+  if (/^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|i need to |i should |i will |i'll |i am going )/i.test(trimmed)) {
+    const thinkBlock = withoutPrefix.trim();
+    if (thinkBlock) return `<think>${thinkBlock}</think>`;
   }
 
   return text;
@@ -471,6 +609,7 @@ export function processWithThinking(text) {
 export function mdToHtml(src, opts) {
   const allowedHtmlBlocks = [];
   const codeBlocks = [];
+  const inlineCodeBlocks = [];
   const mermaidBlocks = [];
   let s = (src ?? '');
 
@@ -509,6 +648,19 @@ export function mdToHtml(src, opts) {
     return placeholder;
   });
 
+  // Extract inline code spans before the link/autolink/HTML passes, mirroring
+  // the fenced-block handling above. A URL inside `inline code` (e.g.
+  // `irm http://127.0.0.1:3000/x`) is preceded by a space, so the bare-URL
+  // autolink matches it, wraps it in an <a> tag, and swaps that for an
+  // ___ALLOWED_HTML_ placeholder — corrupting the command. The old inline-code
+  // pass ran after those passes, too late to protect it.
+  s = s.replace(/`([^`]+?)`/g, (match, code) => {
+    if (code.startsWith('___CODE_BLOCK_') || code.startsWith('___MERMAID_BLOCK_')) return match;
+    const placeholder = `___INLINE_CODE_${inlineCodeBlocks.length}___`;
+    inlineCodeBlocks.push(`<code>${escapeHtml(code)}</code>`);
+    return placeholder;
+  });
+
   // Repair common ways the agent mangles the entity-anchor convention
   // (`[Name](#kind-<id>)`). Models reliably get the single-link case
   // right but slip into other formats when listing many in a table.
@@ -534,6 +686,18 @@ export function mdToHtml(src, opts) {
     new RegExp(`(^|[^\\[(])#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\b`, 'g'),
     '$1[#$2](#$2)',
   );
+  // Legacy search_chats output used bare session hashes (`#<uuid>`). Upgrade
+  // those too so old answers and model summaries remain clickable.
+  s = s.replace(
+    /(^|[^\[(])#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi,
+    '$1[#session-$2](#session-$2)',
+  );
+
+  // Convert markdown images before links so ![alt](url) does not become
+  // literal "!" plus a normal link.
+  s = s.replace(/!\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (match, alt, url, title) => {
+    return imageHtml(alt, url, title);
+  });
 
   // Convert markdown links [text](url) to clickable links
   // Internal #hash links navigate in-page; external links open in new tab
@@ -573,8 +737,9 @@ export function mdToHtml(src, opts) {
     return placeholder;
   });
 
-  // ALSO preserve <a> tags the same way (they're now in the HTML from markdown conversion)
-  s = s.replace(/<a\s+[^>]*>.*?<\/a>/gi, (match) => {
+  // ALSO preserve <a>/<img> tags the same way (they're now in the HTML from
+  // markdown conversion)
+  s = s.replace(/<(?:a\s+[^>]*>.*?<\/a|img\s+[^>]*?)>/gi, (match) => {
     const placeholder = `___ALLOWED_HTML_${allowedHtmlBlocks.length}___`;
     allowedHtmlBlocks.push(sanitizeAllowedHtml(match));
     return placeholder;
@@ -587,46 +752,45 @@ export function mdToHtml(src, opts) {
 
   // KaTeX math rendering (after code blocks are extracted, so math in code is safe)
   const mathBlocks = [];
-  if (window.katex) {
-    // Display math: \[ ... \]  — GPT-style delimiter (gpt-5.x, Claude, etc.).
-    // Handle before $$/$ so all common delimiters render.
-    s = s.replace(/\\\[([\s\S]*?)\\\]/g, (match, math) => {
-      try {
-        const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: true, throwOnError: false }));
-        return placeholder;
-      } catch (e) { return match; }
-    });
-    // Inline math: \( ... \)  — GPT-style inline delimiter. Single-line only
-    // ([^\n]) so a stray escaped paren in prose can't swallow across lines.
-    s = s.replace(/\\\(([^\n]*?)\\\)/g, (match, math) => {
-      try {
-        const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: false, throwOnError: false }));
-        return placeholder;
-      } catch (e) { return match; }
-    });
-    // Display math: $$...$$
-    s = s.replace(/\$\$([\s\S]*?)\$\$/g, (match, math) => {
-      try {
-        const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: true, throwOnError: false }));
-        return placeholder;
-      } catch (e) { return match; }
-    });
-    // Inline math: $...$  (not preceded/followed by $ or digit, not spanning multiple lines)
-    s = s.replace(/(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)/g, (match, math) => {
-      try {
-        const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: false, throwOnError: false }));
-        return placeholder;
-      } catch (e) { return match; }
-    });
-  }
+  let sawPendingMath = false;
+
+  // Typeset straight away when KaTeX is already in, otherwise bank the source in
+  // an inert placeholder for renderMath() to swap once the library lands.
+  const pushMath = (math, displayMode) => {
+    const raw = decodeMathSource(math).trim();
+    const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
+    if (window.katex) {
+      mathBlocks.push(katex.renderToString(raw, { displayMode, throwOnError: false }));
+    } else {
+      sawPendingMath = true;
+      mathBlocks.push(`<span class="${MATH_PENDING_CLASS}" data-display="${displayMode}">${escapeHtml(raw)}</span>`);
+    }
+    return placeholder;
+  };
+
+  // Display math: \[ ... \]  — GPT-style delimiter (gpt-5.x, Claude, etc.).
+  // Handle before $$/$ so all common delimiters render.
+  s = s.replace(/\\\[([\s\S]*?)\\\]/g, (match, math) => {
+    try { return pushMath(math, true); } catch (e) { return match; }
+  });
+  // Inline math: \( ... \)  — GPT-style inline delimiter. Single-line only
+  // ([^\n]) so a stray escaped paren in prose can't swallow across lines.
+  s = s.replace(/\\\(([^\n]*?)\\\)/g, (match, math) => {
+    try { return pushMath(math, false); } catch (e) { return match; }
+  });
+  // Display math: $$...$$
+  s = s.replace(/\$\$([\s\S]*?)\$\$/g, (match, math) => {
+    try { return pushMath(math, true); } catch (e) { return match; }
+  });
+  // Inline math: $...$ — single line only, and Pandoc-style delimiter rules so
+  // currency doesn't render as math ("$5 to $10"): the opening $ must be
+  // immediately followed by a non-space, the closing $ must be immediately
+  // preceded by a non-space and not followed by a digit.
+  s = s.replace(/(?<![\$\d])\$(?!\$)(?=\S)([^\$\n]+?)(?<=\S)\$(?!\$|\d)/g, (match, math) => {
+    try { return pushMath(math, false); } catch (e) { return match; }
+  });
+
+  if (sawPendingMath) _scheduleMathFlush();
 
   // Handle pipe tables
   s = s.replace(/(?:^|\n)([^\n]*\|[^\n]*\|[^\n]*)(?:\n([^\n]*\|[^\n]*\|[^\n]*))*/g, (table) => {
@@ -657,12 +821,6 @@ export function mdToHtml(src, opts) {
 
     html += '</tbody></table>';
     return html;
-  });
-
-  // Inline code (but not placeholders)
-  s = s.replace(/`([^`]+?)`/g, (match, code) => {
-    if (code.startsWith('___CODE_BLOCK_') || code.startsWith('___ALLOWED_HTML_')) return match;
-    return `<code>${code}</code>`;
   });
 
   // Horizontal rules (must come before bold/italic to avoid * conflicts)
@@ -717,24 +875,38 @@ export function mdToHtml(src, opts) {
   // Remove empty paragraphs
   s = s.replace(/<p><\/p>/g, '');
 
+  // Every restore below passes a function replacer rather than the block string
+  // itself. With a string replacement, `String.replace` reads `$&`, `` $` ``,
+  // `$'` and `$$` in the *replacement* as substitution patterns, so a restored
+  // block containing them is corrupted: `$&` re-inserts the placeholder, `` $` ``
+  // and `$'` splice in the surrounding document, and `$$` collapses to `$`. Those
+  // sequences are ordinary content in fenced code (`perl -pe 's/x/$& y/'`,
+  // `echo "$$USD"`). A function replacer inserts its return value verbatim.
+
   // CRITICAL: Restore allowed HTML blocks first
   allowedHtmlBlocks.forEach((block, index) => {
-    s = s.replace(`___ALLOWED_HTML_${index}___`, block);
+    s = s.replace(`___ALLOWED_HTML_${index}___`, () => block);
   });
 
   // Restore math blocks
   mathBlocks.forEach((block, index) => {
-    s = s.replace(`___MATH_BLOCK_${index}___`, block);
+    s = s.replace(`___MATH_BLOCK_${index}___`, () => block);
   });
 
   // Restore mermaid diagram blocks
   mermaidBlocks.forEach((block, index) => {
-    s = s.replace(`___MERMAID_BLOCK_${index}___`, block);
+    s = s.replace(`___MERMAID_BLOCK_${index}___`, () => block);
   });
 
   // CRITICAL: Restore code blocks at the end
   codeBlocks.forEach((block, index) => {
-    s = s.replace(`___CODE_BLOCK_${index}___`, block);
+    s = s.replace(`___CODE_BLOCK_${index}___`, () => block);
+  });
+
+  // Restore inline code spans last, so placeholders carried inside restored
+  // <a>/allowed-HTML blocks are resolved too.
+  inlineCodeBlocks.forEach((block, index) => {
+    s = s.replace(`___INLINE_CODE_${index}___`, () => block);
   });
 
   return _useSvgEmoji() ? svgifyEmoji(s, opts) : s;
@@ -771,24 +943,53 @@ export function renderContent(content) {
 }
 
 /**
- * Initialize any unprocessed Mermaid diagrams in a container (or whole document)
+ * Initialize any unprocessed Mermaid diagrams in a container (or whole document).
+ * Returns a promise so callers can await the (lazy) library load if they need to.
  */
 export function renderMermaid(container) {
-  if (!window.mermaid) return;
-  initMermaid();
   const target = container || document;
-  const pending = target.querySelectorAll('pre.mermaid:not([data-processed])');
-  if (pending.length === 0) return;
-  try {
-    window.mermaid.run({ nodes: pending });
-  } catch (e) {
-    console.warn('Mermaid render error:', e);
-  }
+  if (!target || typeof target.querySelectorAll !== 'function') return Promise.resolve();
+  // Cheap pre-check: no fence on the page means Mermaid is never fetched.
+  if (target.querySelectorAll('pre.mermaid:not([data-processed])').length === 0) return Promise.resolve();
+  return ensureMermaid()
+    .then((mermaid) => {
+      // Re-query after the load: during streaming the renderer replaces the
+      // message body repeatedly, so the nodes seen before the fetch are stale.
+      const nodes = [...target.querySelectorAll('pre.mermaid:not([data-processed])')]
+        .filter((node) => node.isConnected);
+      if (nodes.length === 0) return;
+      return mermaid.run({ nodes });
+    })
+    .catch((e) => { console.warn('Mermaid render error:', e); });
+}
+
+/**
+ * Typeset any math that mdToHtml() had to defer because KaTeX was not loaded
+ * yet. Once KaTeX is in, mdToHtml() renders inline and this finds nothing.
+ */
+export function renderMath(container) {
+  const target = container || document;
+  if (!target || typeof target.querySelectorAll !== 'function') return Promise.resolve();
+  if (target.querySelectorAll('.' + MATH_PENDING_CLASS).length === 0) return Promise.resolve();
+  return ensureKatex()
+    .then((katex) => {
+      target.querySelectorAll('.' + MATH_PENDING_CLASS).forEach((el) => {
+        const displayMode = el.getAttribute('data-display') === 'true';
+        try {
+          el.outerHTML = katex.renderToString(el.textContent || '', { displayMode, throwOnError: false });
+        } catch (e) {
+          // Leave the source visible — readable, just not typeset.
+          el.classList.remove(MATH_PENDING_CLASS);
+        }
+      });
+    })
+    .catch((e) => { console.warn('KaTeX render error:', e); });
 }
 
 const markdownModule = {
   escapeHtml,
   mdToHtml,
+  sanitizeAllowedHtml,
   squashOutsideCode,
   renderContent,
   processWithThinking,
@@ -797,19 +998,13 @@ const markdownModule = {
   extractThinkingBlocks,
   normalizeThinkingMarkup,
   startsWithReasoningPrefix,
-  renderMermaid
+  renderMermaid,
+  renderMath,
+  ensureMermaid,
+  ensureKatex
 };
 
 export default markdownModule;
-
-// Mermaid is loaded async so it cannot delay the app shell.
-function initMermaid() {
-  if (!window.mermaid || window.__odysseusMermaidReady) return;
-  window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
-  window.__odysseusMermaidReady = true;
-}
-window.odysseusInitMermaid = initMermaid;
-initMermaid();
 
 // Persist which thinking sections were expanded across page refreshes.
 // IDs are render-generated (Date.now-based) so we key by a stable hash of

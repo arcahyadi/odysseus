@@ -4,6 +4,7 @@
  * Extracted from document.js to reduce file size.
  */
 
+import { topPortalZ } from './toolWindowZOrder.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
 import spinnerModule from './spinner.js';
@@ -18,6 +19,7 @@ let _esc;          // HTML-escape function
 let _getDocs;      // () => Map of open docs
 let _isOpenFn;     // () => boolean — is doc panel open
 let _createDocument;
+let _newDocument;
 let _loadDocument;
 let _switchToDoc;
 let _openPanel;
@@ -30,6 +32,7 @@ export function initLibrary(config) {
   _getDocs        = config.getDocs;
   _isOpenFn       = config.isOpen;
   _createDocument = config.createDocument;
+  _newDocument = config.newDocument;
   _loadDocument   = config.loadDocument;
   _switchToDoc    = config.switchToDoc;
   _openPanel      = config.openPanel;
@@ -227,7 +230,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     dd.style.right = (window.innerWidth - rect.right) + 'px';
     dd.style.top = (rect.bottom + 2) + 'px';
     dd.style.display = 'block';
-    dd.style.zIndex = '100000';
+    dd.style.zIndex = String(topPortalZ());
     requestAnimationFrame(() => {
       const mr = dd.getBoundingClientRect();
       if (mr.bottom > window.innerHeight - 8) {
@@ -629,7 +632,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           const rect = menuBtn.getBoundingClientRect();
           document.body.appendChild(dropdown);
           dropdown.dataset.owner = doc.id;
-          dropdown.style.cssText = 'position:fixed;z-index:10000;min-width:0;width:max-content;padding:4px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);backdrop-filter:blur(12px);font-size:12px;display:block;';
+          dropdown.style.cssText = `position:fixed;z-index:${topPortalZ()};min-width:0;width:max-content;padding:4px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);backdrop-filter:blur(12px);font-size:12px;display:block;`;
           dropdown.style.top = (rect.bottom + 4) + 'px';
           dropdown.style.left = 'auto';
           dropdown.style.right = (window.innerWidth - rect.right) + 'px';
@@ -1595,7 +1598,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     modal.className = 'modal';
     modal.id = 'doclib-modal';
     modal.innerHTML = `
-      <div class="modal-content doclib-modal-content" style="width:min(640px, 92vw);max-height:85vh;background:var(--bg);">
+      <div class="modal-content doclib-modal-content" style="width:min(640px, 92vw);background:var(--bg);">
         <div class="modal-header">
           <!-- Header title + icon mirror the currently-active sub-tab (Chats /
                Documents / Research / Archive) so the user sees ONE icon at
@@ -3223,16 +3226,16 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     const createBtn = document.getElementById('doclib-create-btn');
     if (createBtn) {
       createBtn.addEventListener('click', async () => {
-        // Create a new session, then create a blank document in it
         try {
-          const sRes = await fetch('/api/session', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Untitled Document' }) });
-          const sData = await sRes.json();
-          const sessionId = sData.session_id;
-          await _createDocument(sessionId);
-          // Close library and open the new session
+          if (_newDocument) {
+            await _newDocument();
+          } else {
+            const sessionId = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+            if (!sessionId) throw new Error('No active session');
+            await _createDocument(sessionId);
+          }
           closeLibrary();
-          if (window.sessionsModule) window.sessionsModule.loadSession(sessionId);
-          setTimeout(() => _openPanel(), 300);
+          setTimeout(() => _openPanel(), 50);
         } catch (e) {
           console.error('Failed to create document:', e);
           if (uiModule) uiModule.showError('Failed to create document');

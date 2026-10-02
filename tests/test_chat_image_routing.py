@@ -60,6 +60,15 @@ def test_image_model_prefix_routes_to_image_generation_without_endpoint_lookup(m
     assert chat_routes._is_image_generation_session(_session(model="dall-e-3"))
 
 
+def test_namespaced_gpt_image_model_routes_to_image_generation_without_endpoint_lookup(monkeypatch):
+    def fail_if_called():
+        raise AssertionError("provider-prefixed image models should not need a DB lookup")
+
+    monkeypatch.setattr(chat_routes, "SessionLocal", fail_if_called)
+
+    assert chat_routes._is_image_generation_session(_session(model="openai/gpt-5-image"))
+
+
 def test_image_endpoint_does_not_catch_text_model_on_different_path(monkeypatch):
     db = _FakeDb([
         _endpoint("http://localhost:11434/v1/images", models=["sdxl-local"]),

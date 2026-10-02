@@ -1,18 +1,143 @@
 # src/llm_core.py
 import httpx
 import asyncio
+import copy
 import time
 import json
 import logging
 import hashlib
 import threading
 import re
+import os
+import math
+from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
-from src.model_context import get_context_length, DEFAULT_CONTEXT
+from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+_LOCAL_MODEL_LOCK = asyncio.Lock()
+_LOCAL_MODEL_WAITING_FOREGROUND = 0
+_LOCAL_MODEL_CURRENT: Dict[str, object] = {}
+
+
+def _normalize_usage_counts(input_value=0, output_value=0):
+    """Return safe integer token counts, or ``None`` for malformed usage."""
+
+    def _count(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, int):
+            count = value
+        else:
+            if not math.isfinite(value) or not value.is_integer():
+                return None
+            count = int(value)
+        if count < 0 or count > (2**63 - 1):
+            return None
+        return count
+
+    input_tokens = _count(input_value)
+    output_tokens = _count(output_value)
+    if input_tokens is None or output_tokens is None:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+
+
+def _normalize_http_status(value) -> Optional[int]:
+    """Accept only genuine three-digit integral HTTP status values."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        status = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        status = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not re.fullmatch(r"\d{3}", text):
+            return None
+        status = int(text)
+    else:
+        return None
+    return status if 100 <= status <= 599 else None
+
+
+def _local_model_gate_enabled() -> bool:
+    return os.getenv("ODYSSEUS_LOCAL_MODEL_GATE", "true").lower() not in {"0", "false", "no", "off"}
+
+
+def _gate_workload(workload: Optional[str]) -> str:
+    return "background" if str(workload or "").lower() == "background" else "foreground"
+
+
+@asynccontextmanager
+async def _local_model_slot(target_url: str, model: str, workload: Optional[str] = None):
+    """Serialize local model traffic, with foreground chat taking priority.
+
+    Most local servers expose one GPU/CPU generation pipe even when their HTTP
+    API accepts multiple requests. Letting scheduled email/tasks and foreground
+    chat hit that pipe together creates the user-visible "streams crossed" and
+    "prompt waited behind a task" failure mode. Cloud providers are left alone.
+    """
+    if not _local_model_gate_enabled() or not is_local_endpoint(target_url):
+        yield
+        return
+
+    global _LOCAL_MODEL_WAITING_FOREGROUND
+    kind = _gate_workload(workload)
+    current_task = asyncio.current_task()
+    if kind == "foreground":
+        _LOCAL_MODEL_WAITING_FOREGROUND += 1
+        current = dict(_LOCAL_MODEL_CURRENT)
+        if current.get("workload") == "background":
+            task = current.get("task")
+            if isinstance(task, asyncio.Task) and not task.done():
+                logger.info(
+                    "[model-gate] cancelling background local model call for foreground request model=%s",
+                    model,
+                )
+                task.cancel()
+    else:
+        # Background work should not jump in while the browser/chat is active
+        # or while a foreground request is waiting to acquire the local model.
+        try:
+            from src.interactive_gate import has_foreground_activity
+        except Exception:
+            has_foreground_activity = lambda: False  # type: ignore
+        while _LOCAL_MODEL_WAITING_FOREGROUND > 0 or has_foreground_activity():
+            await asyncio.sleep(0.25)
+
+    acquired = False
+    try:
+        await _LOCAL_MODEL_LOCK.acquire()
+        acquired = True
+        if kind == "foreground":
+            _LOCAL_MODEL_WAITING_FOREGROUND = max(0, _LOCAL_MODEL_WAITING_FOREGROUND - 1)
+        _LOCAL_MODEL_CURRENT.clear()
+        _LOCAL_MODEL_CURRENT.update({
+            "task": current_task,
+            "workload": kind,
+            "url": target_url,
+            "model": model,
+            "started": time.time(),
+        })
+        yield
+    finally:
+        if kind == "foreground":
+            _LOCAL_MODEL_WAITING_FOREGROUND = max(0, _LOCAL_MODEL_WAITING_FOREGROUND - 1)
+        if acquired and _LOCAL_MODEL_LOCK.locked():
+            owner = _LOCAL_MODEL_CURRENT.get("task")
+            if owner is current_task:
+                _LOCAL_MODEL_CURRENT.clear()
+            _LOCAL_MODEL_LOCK.release()
 
 class LLMConfig:
     """Configuration constants for LLM operations."""
@@ -22,12 +147,55 @@ class LLMConfig:
     MAX_RETRIES = 3
     RETRY_DELAY = 0.5
     STREAM_TIMEOUT = 300
+    # TCP+TLS connect budget for a SINGLE attempt. The old hard-coded 3.0s
+    # assumed LAN/Tailscale peers ('SYN in <100ms'); it is too tight for public
+    # cloud endpoints (offshore APIs take ~0.5-1.5s cold, with jitter), so a
+    # brief blip on the first connect of an idle chat surfaced as a 503 on the
+    # streaming path (which, unlike llm_call, does not retry the connect). A
+    # genuinely dead upstream stays bounded by the dead-host cooldown. Override
+    # with env LLM_CONNECT_TIMEOUT (seconds).
+    CONNECT_TIMEOUT = float(os.getenv('LLM_CONNECT_TIMEOUT', '10') or '10')
+
+
+class _FallbackIneligibleHTTPException(HTTPException):
+    """HTTP-shaped provider failure that must never advance a route chain."""
+
+    fallback_eligible = False
+
+
+def _call_timeout(read_timeout) -> httpx.Timeout:
+    """Per-request timeout for non-streaming LLM calls (connect from config)."""
+    return httpx.Timeout(connect=LLMConfig.CONNECT_TIMEOUT, read=float(read_timeout), write=10.0, pool=5.0)
+
+
+def _stream_timeout(read_timeout) -> httpx.Timeout:
+    """Per-request timeout for streaming LLM calls (connect from config)."""
+    return httpx.Timeout(connect=LLMConfig.CONNECT_TIMEOUT, read=float(read_timeout), write=30.0, pool=5.0)
 
 
 # Cache for LLM responses
-def _get_cache_key(url: str, model: str, messages: List[Dict], 
-                   temperature: float, max_tokens: int) -> str:
-    """Generate cache key for LLM requests."""
+def _cache_header_identity(headers) -> str:
+    """Return a non-secret identity for credential-distinct request routes."""
+
+    if isinstance(headers, str):
+        try:
+            headers = json.loads(headers)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            headers = {"_raw": headers}
+    if not isinstance(headers, dict):
+        headers = {}
+    canonical = [
+        (str(key).strip().lower(), str(value))
+        for key, value in headers.items()
+    ]
+    canonical.sort()
+    encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _get_cache_key(url: str, model: str, messages: List[Dict],
+                   temperature: float, max_tokens: int, headers=None) -> str:
+    """Generate a cache key partitioned by endpoint and credential identity."""
     hashable_messages = []
     for msg in messages:
         sorted_items = tuple(sorted(msg.items()))
@@ -38,11 +206,16 @@ def _get_cache_key(url: str, model: str, messages: List[Dict],
         'model': model, 
         'messages': hashable_messages,
         'temp': temperature,
-        'max_tokens': max_tokens
+        'max_tokens': max_tokens,
+        # Never put credentials in a cache key or loggable cache payload.  The
+        # digest only prevents responses from one configured account/route
+        # being returned under another route with the same URL and model.
+        'header_identity': _cache_header_identity(headers),
     }, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()
 
 _response_cache = {}
+_response_model_cache = {}
 
 # Dead-host cooldown: maps host (scheme://host:port) -> unix ts when cooldown expires.
 # When a connect to a host fails, we mark it dead for DEAD_HOST_COOLDOWN seconds so
@@ -68,7 +241,7 @@ _host_health_lock = threading.Lock()
 _model_activity: Dict[str, float] = {}
 
 _HARMONY_MARKER_RE = re.compile(
-    r"<\|channel\|>(analysis|final)"
+    r"<\|channel\|>(analysis|commentary|final)"
     r"|<\|start\|>(?:assistant|system|user|tool)?"
     r"|<\|message\|>"
     r"|<\|end\|>"
@@ -77,6 +250,7 @@ _HARMONY_MARKER_RE = re.compile(
 )
 _HARMONY_MARKERS = (
     "<|channel|>analysis",
+    "<|channel|>commentary",
     "<|channel|>final",
     "<|start|>assistant",
     "<|start|>system",
@@ -89,6 +263,18 @@ _HARMONY_MARKERS = (
     "<|call|>",
 )
 _HARMONY_MAX_MARKER_LEN = max(len(marker) for marker in _HARMONY_MARKERS)
+
+_VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE = re.compile(
+    r"(?:\|end\|)+\|?assistan(?:t)?\|?"
+    r"|\|assistan(?:t)?\|"
+    r"|<\|im_start\|>\s*assistant"
+    r"|<\|im_end\|>",
+    re.IGNORECASE,
+)
+
+
+def _strip_visible_chat_template_artifacts(text: str) -> str:
+    return _VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE.sub("", text or "")
 
 
 def _harmony_suffix_hold_len(text: str) -> int:
@@ -126,7 +312,10 @@ class _HarmonyStreamRouter:
             out.append((text, False))
             return
         if self._in_message:
-            out.append((text, self._channel == "analysis"))
+            # analysis + commentary (tool-call preambles / function-arg bodies)
+            # are internal, not user-facing — route them to thinking so they
+            # don't leak into the visible answer; only `final` is visible.
+            out.append((text, self._channel in ("analysis", "commentary")))
 
     def _handle_marker(self, match: re.Match[str]) -> None:
         marker = match.group(0)
@@ -164,11 +353,103 @@ def _stream_delta_event(text: str, *, thinking: bool = False) -> str:
         payload["thinking"] = True
     return f"data: {json.dumps(payload)}\n\n"
 
+
+_DEGENERATE_WORD_RE = re.compile(r"[A-Za-z0-9_\u0370-\u03ff\u0400-\u04ff]+")
+
+
+class _DegenerateStreamGuard:
+    """Detect local-model token collapse before it floods the UI.
+
+    Some self-hosted models fail by repeating one token forever ("Var Var Var",
+    "Summer Summer ..."). This is not a useful response and can burn context,
+    browser memory, and GPU time. Keep the guard conservative: only fire on long
+    same-token runs or a very dominant repeated token in the recent window.
+    """
+
+    def __init__(self, model: str):
+        self.model = model or "model"
+        self.last_token = ""
+        self.same_run = 0
+        self.recent_tokens: List[str] = []
+        self.total_chars = 0
+
+    def check(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        self.total_chars += len(text)
+        tokens = [t.lower() for t in _DEGENERATE_WORD_RE.findall(text) if len(t) >= 2]
+        if not tokens:
+            return None
+        for token in tokens:
+            if token == self.last_token:
+                self.same_run += 1
+            else:
+                self.last_token = token
+                self.same_run = 1
+            self.recent_tokens.append(token)
+        if len(self.recent_tokens) > 96:
+            self.recent_tokens = self.recent_tokens[-96:]
+
+        reason = None
+        if self.same_run >= 28 and self.total_chars >= 100:
+            reason = f"repeated '{self.last_token}' {self.same_run} times"
+        elif len(self.recent_tokens) >= 72:
+            top = max(set(self.recent_tokens), key=self.recent_tokens.count)
+            count = self.recent_tokens.count(top)
+            if count >= 60 and count / max(len(self.recent_tokens), 1) >= 0.78:
+                reason = f"repeated '{top}' {count}/{len(self.recent_tokens)} recent tokens"
+        if not reason and len(self.recent_tokens) >= 80:
+            # Phrase loops are common on some local quantized MLX/MoE models:
+            # "Also be a software developer mode?" repeated forever will not
+            # trip the single-token guard above, but it is still a wedged
+            # generation. Require many repeats of the same 4-gram so normal
+            # prose/list formatting is not interrupted.
+            grams = [tuple(self.recent_tokens[i:i + 4]) for i in range(0, len(self.recent_tokens) - 3)]
+            if grams:
+                top_gram = max(set(grams), key=grams.count)
+                gram_count = grams.count(top_gram)
+                if gram_count >= 10:
+                    reason = f"repeated phrase '{' '.join(top_gram)}' {gram_count} times"
+
+        if not reason:
+            return None
+
+        logger.warning("[degenerate-stream] aborting model=%s reason=%s", self.model, reason)
+        message = (
+            f"Stopped generation: {self.model} started repeating tokens "
+            f"({reason}). Try a different model or lower temperature."
+        )
+        return f'event: error\ndata: {json.dumps({"status": 502, "text": message, "error": message, "fallback_eligible": False})}\n\n'
+
+
 def _model_activity_key(url: str, model: str) -> str:
     return f"{(url or '').strip()}|{(model or '').strip()}"
 
 def _same_model_identity(left: str, right: str) -> bool:
     return (left or "").strip().lower() == (right or "").strip().lower()
+
+def _reported_model_name(value) -> str:
+    """Return a provider model identifier only when it is usable metadata."""
+    return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _model_actual_event(requested_model: str, reported_model) -> Optional[str]:
+    """Build a provenance event when a provider resolves a different model."""
+    actual_model = _reported_model_name(reported_model)
+    if not actual_model or _same_model_identity(actual_model, requested_model):
+        return None
+    return f'data: {json.dumps({"type": "model_actual", "requested_model": requested_model, "model": actual_model})}\n\n'
+
+
+def _annotate_usage_model(usage: dict, requested_model: str, actual_model: str) -> dict:
+    """Attach provider model provenance to a normalized usage payload."""
+    actual_model = _reported_model_name(actual_model)
+    if actual_model:
+        usage["model"] = actual_model
+        if not _same_model_identity(actual_model, requested_model):
+            usage["requested_model"] = requested_model
+    return usage
+
 
 def note_model_activity(url: str, model: str):
     """Record that a real upstream request used this endpoint/model."""
@@ -240,7 +521,19 @@ def _get_cached_response(cache_key: str) -> Optional[str]:
     """Get cached response if it exists."""
     return _response_cache.get(cache_key)
 
-def _set_cached_response(cache_key: str, response: str) -> None:
+
+def _get_cached_response_model(cache_key: str) -> Optional[str]:
+    """Return provider-reported model metadata paired with a cached reply."""
+    model = _response_model_cache.get(cache_key)
+    return model if isinstance(model, str) and model.strip() else None
+
+
+def _set_cached_response(
+    cache_key: str,
+    response: str,
+    *,
+    actual_model: Optional[str] = None,
+) -> None:
     """Store response in cache."""
     if len(_response_cache) > 128:
         keys_to_remove = list(_response_cache.keys())[:64]
@@ -249,7 +542,12 @@ def _set_cached_response(cache_key: str, response: str) -> None:
             # threadpool) may have already evicted the same snapshotted key,
             # and del would raise KeyError mid-eviction (issue #659).
             _response_cache.pop(key, None)
+            _response_model_cache.pop(key, None)
     _response_cache[cache_key] = response
+    if isinstance(actual_model, str) and actual_model.strip():
+        _response_model_cache[cache_key] = actual_model.strip()
+    else:
+        _response_model_cache.pop(cache_key, None)
 
 # ── Anthropic native API adapter ──
 
@@ -264,7 +562,8 @@ def _is_ollama_native_url(url: str) -> bool:
     """Return True for native Ollama API URLs, including Ollama Cloud."""
     try:
         parsed = urlparse(url or "")
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to parse URL for Ollama detection", exc_info=e)
         return False
     host = parsed.hostname or ""
     path = (parsed.path or "").rstrip("/")
@@ -274,6 +573,24 @@ def _is_ollama_native_url(url: str) -> bool:
         return False
     local_ollama_host = host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or parsed.port == 11434
     return local_ollama_host and (path == "" or path == "/api" or path.startswith("/api/"))
+
+
+def _is_ollama_openai_compat_url(url: str) -> bool:
+    """Return True for local Ollama's OpenAI-compatible /v1 surface.
+
+    Mirrors the host detection used by ``_is_ollama_native_url`` so that the
+    two helpers stay in lockstep: a localhost Ollama on a non-default port
+    (custom ``OLLAMA_HOST``, reverse proxy, container port remap) is treated
+    the same way here as it is on the native ``/api`` path.
+    """
+    try:
+        parsed = urlparse(url or "")
+    except Exception:
+        return False
+    host = parsed.hostname or ""
+    path = (parsed.path or "").rstrip("/")
+    local_ollama_host = host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or parsed.port == 11434
+    return local_ollama_host and (path == "/v1" or path.startswith("/v1/"))
 
 
 def _ollama_api_root(url: str) -> str:
@@ -303,41 +620,112 @@ def _normalize_ollama_url(url: str) -> str:
     return base.rstrip("/") + "/chat"
 
 
-def _ollama_normalize_tool_messages(messages: List[Dict]) -> List[Dict]:
+def _normalize_openai_chat_url(url: str) -> str:
+    """Ensure an OpenAI-compatible base URL points at /chat/completions."""
+    base = (url or "").strip().rstrip("/")
+    if not base:
+        return base
+    if base.endswith("/chat/completions") or base.endswith("/completions"):
+        return base
+    if base.endswith("/models"):
+        base = base[: -len("/models")].rstrip("/")
+    return base + "/chat/completions"
+
+
+def _ollama_normalize_messages(messages: List[Dict]) -> List[Dict]:
     """Adapt Odysseus' canonical OpenAI-style messages to native Ollama /api/chat.
 
-    Odysseus carries assistant tool calls in the OpenAI shape, where
-    `function.arguments` is a JSON *string*. Native Ollama expects it to be a
-    JSON *object*; given the string it fails the whole request with HTTP 400
-    "Value looks like object, but can't find closing '}' symbol", which aborts
-    every follow-up (tool-result) round. Parse the arguments back into an object
-    here, on a shallow copy, leaving non-tool messages untouched. The opaque
-    Gemini `extra_content` (thought_signature) is dropped — it is meaningless to
-    Ollama and only matters when the conversation is replayed to Gemini.
+    Two shape mismatches silently break requests:
+
+    1. Tool calls: Odysseus carries `function.arguments` as a JSON *string*.
+       Native Ollama expects a JSON *object* and rejects the string form with
+       HTTP 400 ("Value looks like object, but can't find closing '}' symbol"),
+       aborting every follow-up (tool-result) round. Parse the arguments back
+       into an object here, on a shallow copy, leaving non-tool messages
+       untouched. The opaque Gemini `extra_content` (thought_signature) is
+       dropped — it is meaningless to Ollama and only matters when the
+       conversation is replayed to Gemini.
+
+    2. Images (issue #4723): Odysseus carries multimodal user content as an
+       OpenAI-style list ``[{type: "text", ...}, {type: "image_url",
+       image_url: {url: "data:image/...;base64,XXX"}}, ...]``. Native Ollama
+       does not accept a list for ``content`` — it wants ``content`` as a
+       string plus a separate ``images`` array of raw base64 strings (no
+       ``data:`` prefix). Without this conversion the image blocks pass
+       through untouched, the vision-capable model never sees the picture,
+       and the user gets "I can't see any image" even though the request
+       succeeded.
     """
     out: List[Dict] = []
     for m in messages or []:
-        tcs = m.get("tool_calls") if isinstance(m, dict) else None
-        if not tcs:
+        if not isinstance(m, dict):
             out.append(m)
             continue
-        new_calls = []
-        for tc in tcs:
-            fn = tc.get("function") or {}
-            args = fn.get("arguments")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args) if args.strip() else {}
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-            call: Dict = {"function": {"name": fn.get("name", ""), "arguments": args or {}}}
-            if tc.get("id"):
-                call["id"] = tc["id"]
-            new_calls.append(call)
+
         nm = dict(m)
-        nm["tool_calls"] = new_calls
+
+        # 1. Tool-call argument strings -> objects.
+        tcs = nm.get("tool_calls")
+        if tcs:
+            new_calls = []
+            for tc in tcs:
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args) if args.strip() else {}
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                call: Dict = {"function": {"name": fn.get("name", ""), "arguments": args or {}}}
+                if tc.get("id"):
+                    call["id"] = tc["id"]
+                new_calls.append(call)
+            nm["tool_calls"] = new_calls
+
+        # 2. Multimodal content list -> native content string + images array.
+        content = nm.get("content")
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            images: List[str] = list(nm.get("images") or [])
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    t = block.get("text")
+                    if t:
+                        text_parts.append(str(t))
+                elif btype == "image_url":
+                    url = (block.get("image_url") or {}).get("url", "")
+                    if not url:
+                        continue
+                    if url.startswith("data:"):
+                        # Strip the ``data:[...];base64,`` prefix — native
+                        # Ollama wants only the base64 bytes.
+                        _, _, b64 = url.partition(",")
+                        if b64:
+                            images.append(b64)
+                    else:
+                        # Native Ollama images[] is base64-only; it does
+                        # not fetch HTTP URLs.  Skip unsupported schemes
+                        # rather than sending a non-base64 string that the
+                        # model silently ignores.
+                        logger.warning(
+                            "Skipping non-data image_url (Ollama images[] "
+                            "requires base64): %s",
+                            url[:80],
+                        )
+            nm["content"] = "\n".join(text_parts).strip()
+            if images:
+                nm["images"] = images
+
         out.append(nm)
     return out
+
+
+# Backward-compatible alias for callers/tests that imported the older name
+# (it only handled tool messages originally — issue #4723 broadened scope).
+_ollama_normalize_tool_messages = _ollama_normalize_messages
 
 
 def _build_ollama_payload(
@@ -362,7 +750,7 @@ def _build_ollama_payload(
     """
     payload: Dict = {
         "model": model,
-        "messages": _ollama_normalize_tool_messages(messages),
+        "messages": _ollama_normalize_messages(messages),
         "stream": stream,
     }
     options: Dict = {}
@@ -375,7 +763,7 @@ def _build_ollama_payload(
     if options:
         payload["options"] = options
     if tools:
-        payload["tools"] = tools
+        payload["tools"] = _alias_harmony_tools(tools, model)
     return payload
 
 
@@ -405,6 +793,176 @@ def _host_match(url: str, *domains: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
+# Kimi Code subscription keys (api.kimi.com/coding/v1) require a whitelisted
+# coding-agent User-Agent; otherwise the API returns 403 access_terminated_error.
+# Tried in order; first success is cached per base URL for later requests.
+KIMI_CODE_USER_AGENTS: tuple[str, ...] = (
+    "claude-code/0.1.0",
+    "claude-code/1.0.0",
+    "KimiCLI/1.0",
+    "Kilo-Code/1.0",
+    "Roo-Code/1.0",
+    "Cursor/1.0",
+)
+KIMI_CODE_USER_AGENT = KIMI_CODE_USER_AGENTS[0]
+_kimi_code_ua_cache: dict[str, str] = {}
+
+
+def _is_kimi_code_url(url: str) -> bool:
+    if not url or not _host_match(url, "kimi.com"):
+        return False
+    try:
+        return "/coding" in (urlparse(url).path or "")
+    except Exception:
+        return False
+
+
+def _kimi_code_base_key(url: str) -> str:
+    """Normalize a Kimi Code chat/models URL to its OpenAI base (.../coding/v1)."""
+    parsed = urlparse(url)
+    path = (parsed.path or "").rstrip("/")
+    for suffix in ("/chat/completions", "/models", "/completions"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+    path = path.rstrip("/") or "/coding/v1"
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def _is_kimi_code_access_denied(status: int, body: bytes | str) -> bool:
+    if status != 403:
+        return False
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else (body or "")
+    lower = text.lower()
+    return (
+        "access_terminated_error" in lower
+        or "coding agents" in lower
+        or "only available for coding" in lower
+    )
+
+
+def _kimi_code_ua_candidates(url: str) -> list[str]:
+    if not _is_kimi_code_url(url):
+        return []
+    base_key = _kimi_code_base_key(url)
+    cached = _kimi_code_ua_cache.get(base_key)
+    if cached:
+        return [cached] + [ua for ua in KIMI_CODE_USER_AGENTS if ua != cached]
+    return list(KIMI_CODE_USER_AGENTS)
+
+
+def _remember_kimi_code_user_agent(url: str, user_agent: str) -> None:
+    _kimi_code_ua_cache[_kimi_code_base_key(url)] = user_agent
+
+
+def apply_kimi_code_headers(headers: Optional[Dict], url: str) -> Dict[str, str]:
+    """Pick a Kimi Code User-Agent (cached probe when possible)."""
+    h = dict(headers or {})
+    if not _is_kimi_code_url(url):
+        return h
+    base_key = _kimi_code_base_key(url)
+    cached = _kimi_code_ua_cache.get(base_key)
+    if cached:
+        h["User-Agent"] = cached
+        return h
+    models_url = base_key.rstrip("/") + "/models"
+    from src.tls_overrides import llm_verify
+    for ua in KIMI_CODE_USER_AGENTS:
+        trial = dict(h)
+        trial["User-Agent"] = ua
+        try:
+            r = httpx.get(models_url, headers=trial, timeout=8, verify=llm_verify())
+        except Exception:
+            continue
+        if _is_kimi_code_access_denied(r.status_code, r.content):
+            logger.debug("Kimi Code rejected User-Agent %s (403), trying next", ua)
+            continue
+        if r.status_code < 400:
+            _remember_kimi_code_user_agent(url, ua)
+            h["User-Agent"] = ua
+            return h
+        break
+    h.setdefault("User-Agent", KIMI_CODE_USER_AGENT)
+    return h
+
+
+async def apply_kimi_code_headers_async(client, headers: Optional[Dict], url: str) -> Dict[str, str]:
+    """Pick a Kimi Code User-Agent without blocking the event loop."""
+    h = dict(headers or {})
+    if not _is_kimi_code_url(url):
+        return h
+    base_key = _kimi_code_base_key(url)
+    cached = _kimi_code_ua_cache.get(base_key)
+    if cached:
+        h["User-Agent"] = cached
+        return h
+    models_url = base_key.rstrip("/") + "/models"
+    for ua in KIMI_CODE_USER_AGENTS:
+        trial = dict(h)
+        trial["User-Agent"] = ua
+        try:
+            r = await client.get(models_url, headers=trial, timeout=8)
+        except Exception:
+            continue
+        if _is_kimi_code_access_denied(r.status_code, r.content):
+            logger.debug("Kimi Code rejected User-Agent %s (403), trying next", ua)
+            continue
+        if r.status_code < 400:
+            _remember_kimi_code_user_agent(url, ua)
+            h["User-Agent"] = ua
+            return h
+        break
+    h.setdefault("User-Agent", KIMI_CODE_USER_AGENT)
+    return h
+
+
+def httpx_get_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
+    h = apply_kimi_code_headers(headers, url)
+    if not _is_kimi_code_url(url):
+        return httpx.get(url, headers=h, **kwargs)
+    last = None
+    for ua in _kimi_code_ua_candidates(url):
+        trial = dict(h)
+        trial["User-Agent"] = ua
+        last = httpx.get(url, headers=trial, **kwargs)
+        if not _is_kimi_code_access_denied(last.status_code, last.content):
+            if last.status_code < 400:
+                _remember_kimi_code_user_agent(url, ua)
+            return last
+    return last
+
+
+def httpx_post_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
+    h = apply_kimi_code_headers(headers, url)
+    if not _is_kimi_code_url(url):
+        return httpx.post(url, headers=h, **kwargs)
+    last = None
+    for ua in _kimi_code_ua_candidates(url):
+        trial = dict(h)
+        trial["User-Agent"] = ua
+        last = httpx.post(url, headers=trial, **kwargs)
+        if not _is_kimi_code_access_denied(last.status_code, last.content):
+            if last.status_code < 400:
+                _remember_kimi_code_user_agent(url, ua)
+            return last
+    return last
+
+
+async def httpx_post_kimi_aware_async(client, url: str, headers: Optional[Dict], **kwargs):
+    h = await apply_kimi_code_headers_async(client, headers, url)
+    if not _is_kimi_code_url(url):
+        return await client.post(url, headers=h, **kwargs)
+    last = None
+    for ua in _kimi_code_ua_candidates(url):
+        trial = dict(h)
+        trial["User-Agent"] = ua
+        last = await client.post(url, headers=trial, **kwargs)
+        if not _is_kimi_code_access_denied(last.status_code, last.content):
+            if last.status_code < 400:
+                _remember_kimi_code_user_agent(url, ua)
+            return last
+    return last
+
+
 def _detect_provider(url: str) -> str:
     """Detect the API provider from a configured endpoint URL.
 
@@ -426,13 +984,114 @@ def _detect_provider(url: str) -> str:
         return "openrouter"
     if _host_match(url, "groq.com"):
         return "groq"
+    if _host_match(url, "nvidia.com"):
+        return "nvidia"
+    if _host_match(url, "moonshot.ai") or _host_match(url, "moonshot.cn"):
+        return "moonshot"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
     from src.copilot import is_copilot_base
     if is_copilot_base(url):
         return "copilot"
+    if _host_match(url, "cerebras.ai"):
+        return "cerebras"
+    if _host_match(url, "mistral.ai"):
+        return "mistral"
     return "openai"
+
+
+def _is_self_hosted_openai_compatible(url: str) -> bool:
+    """True for custom/local OpenAI-compatible servers (llama.cpp, LM Studio,
+    vLLM, text-generation-webui, etc.) as opposed to cloud APIs.
+
+    Used to gate llama.cpp-server-specific payload extras (``session_id``,
+    ``cache_prompt``) used for KV-cache slot affinity (issue #2927). Strict
+    cloud providers reject unrecognized top-level fields (api.openai.com
+    returns 400, Mistral returns 422 "extra_forbidden", issue #3793), and any
+    unknown OpenAI-compatible host used to be treated as self-hosted, so those
+    fields leaked to every strict provider added as a custom endpoint.
+
+    A server only counts as self-hosted when it also resolves as local:
+    loopback/private/tailscale host, or the endpoint explicitly configured
+    with kind "local". A self-hosted server exposed via a public hostname
+    loses the affinity hint unless its endpoint kind is set to "local" -
+    a lost perf hint, versus a hard 4xx on every request the other way.
+    """
+    if _detect_provider(url) != "openai" or _host_match(url, "openai.com"):
+        return False
+    from src.model_context import is_local_endpoint
+    return is_local_endpoint(url)
+
+
+def _apply_local_cache_affinity(payload: Dict, url: str, session_id: Optional[str]) -> None:
+    """Add llama.cpp-server slot-affinity hints to an outgoing payload, in place.
+
+    As diagnosed in issue #2927, llama.cpp assigns requests to processing
+    slots via LRU when no stable identifier is present ("session_id=<empty>
+    server-selected (LCP/LRU)"), which means consecutive turns of the same
+    chat can land on different slots and lose their cached prefix entirely.
+    Sending a stable ``session_id`` (derived from the Odysseus session) lets
+    the server keep routing the same conversation to the same slot, and
+    ``cache_prompt: true`` asks it to retain/reuse the prefix it already has.
+
+    Both fields are llama.cpp / LM Studio extensions to the OpenAI schema; we
+    only set them for self-hosted OpenAI-compatible endpoints (never
+    api.openai.com or other cloud providers, which reject unrecognized
+    top-level request fields).
+    """
+    if not session_id:
+        return
+    if not _is_self_hosted_openai_compatible(url):
+        return
+    payload.setdefault("session_id", str(session_id))
+    payload.setdefault("cache_prompt", True)
+
+
+def _is_local_minimax_mlx_request(url: str, model: str) -> bool:
+    """Local MLX MiniMax-family endpoints need conservative sampling defaults.
+
+    The OpenAI-compatible MLX server accepts repetition/frequency penalties.
+    Some large quantized MiniMax/MoE ports otherwise fall into visible reasoning
+    loops ("Also be...", "No.", etc.) even for trivial prompts.
+    """
+    if not model:
+        return False
+    m = model.lower()
+    if "minimax" not in m and "mini-max" not in m:
+        return False
+    try:
+        from src.model_context import is_local_endpoint
+        return is_local_endpoint(url)
+    except Exception:
+        return False
+
+
+def _apply_local_generation_stability(payload: Dict, url: str, model: str) -> None:
+    if not _is_local_minimax_mlx_request(url, model):
+        return
+    if "temperature" in payload:
+        try:
+            # MiniMax MLX quantized ports are very sensitive to chat/agent
+            # harness size. Character presets can ask for a warmer voice, but
+            # local MiniMax needs a final compatibility clamp or trivial
+            # prompts can fall into visible reasoning/repetition loops.
+            payload["temperature"] = min(float(payload.get("temperature") or 0.2), 0.2)
+        except (TypeError, ValueError):
+            payload["temperature"] = 0.2
+    payload.setdefault("top_p", 0.9)
+    payload.setdefault("top_k", 20)
+    payload.setdefault("repetition_penalty", 1.12)
+    payload.setdefault("repetition_context_size", 256)
+    payload.setdefault("frequency_penalty", 0.08)
+    payload.setdefault("frequency_context_size", 256)
+    payload.setdefault("presence_penalty", 0.02)
+    payload.setdefault("presence_context_size", 256)
+    payload.setdefault("stop", ["<|im_end|>", "<|endoftext|>", "</s>"])
+    # A max_tokens of 0 means "server default/unbounded" for many local
+    # endpoints. Keep simple chats from running forever when the model loops.
+    if not payload.get("max_tokens") and not payload.get("max_completion_tokens"):
+        payload["max_tokens"] = 2048
 
 
 def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str, str]:
@@ -440,7 +1099,7 @@ def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str
     if isinstance(headers, dict):
         h.update(headers)
     if provider == "openrouter":
-        h.setdefault("HTTP-Referer", "https://github.com/pewdiepie-archdaemon/odysseus")
+        h.setdefault("HTTP-Referer", "https://github.com/odysseus-dev/odysseus")
         h.setdefault("X-OpenRouter-Title", "Odysseus")
     if provider == "copilot":
         # Ensure the Copilot-required headers are present even when the caller
@@ -469,19 +1128,111 @@ def _provider_label(url: str) -> str:
     if is_chatgpt_subscription_base(url): return "ChatGPT Subscription"
     from src.copilot import is_copilot_base
     if is_copilot_base(url): return "GitHub Copilot"
+    if _host_match(url, "cerebras.ai"):
+        return "cerebras"
     if _host_match(url, "mistral.ai"): return "Mistral"
     if _host_match(url, "deepseek.com"): return "DeepSeek"
+    if _host_match(url, "nvidia.com"): return "NVIDIA"
     if _host_match(url, "googleapis.com"): return "Google"
     if _host_match(url, "together.xyz", "together.ai"): return "Together"
     if _host_match(url, "fireworks.ai"): return "Fireworks"
+    if _host_match(url, "kimi.com"):
+        try:
+            if "/coding" in (urlparse(url).path or ""):
+                return "Kimi Code"
+        except Exception:
+            pass
     if _is_ollama_native_url(url): return "Ollama"
     try:
-        host = (urlparse(url).hostname or "").lower()
+        _parsed_local = urlparse(url)
+        host = (_parsed_local.hostname or "").lower()
+        port = _parsed_local.port
     except Exception:
         return "provider"
     if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        # A port alone is not authoritative: vLLM, SGLang, llama.cpp and plain
+        # OpenAI-compatible servers all routinely share 8000/8080, so naming the
+        # serving tool from the port here would mislabel real setups. The tool is
+        # identified by probing llama-server's native /props endpoint during
+        # discovery (see ModelDiscovery._fingerprint_provider); this stays neutral.
         return "local endpoint"
     return host or "provider"
+
+
+def _is_openai_hosted_chat_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url or "")
+    except Exception:
+        return False
+    path = (parsed.path or "").rstrip("/")
+    return _host_match(url, "openai.com") and path.endswith("/chat/completions")
+
+
+def _model_disallows_reasoning_effort_with_chat_tools(model: str) -> bool:
+    """OpenAI GPT 5.x variants reject reasoning_effort + tools on chat completions."""
+    m = (model or "").strip().lower()
+    return bool(re.match(r"^(?:openai/)?gpt-5(?:[.\-]\d+)?(?:[-_:].*)?$", m))
+
+
+# gpt-oss (harmony) ships BUILT-IN tools named `python` and `browser`, invoked
+# with the raw body as the argument (`to=python` + bare source), while custom
+# functions use `to=functions.NAME` + JSON. A tool we expose under a built-in's
+# name therefore gets called with the built-in convention: the model emits raw
+# code, the server tries to parse it as JSON, and the whole request dies
+# ("error parsing tool call: raw='import sys, ...'"). In streaming mode Ollama
+# does not even report it — it truncates the stream, so the turn looks like an
+# empty response. `bash` collides the same way in practice.
+#
+# Measured on gpt-oss:20b via Ollama /v1 with a fixed agentic prompt:
+#   tools named python+bash ............ 2/6 succeeded (4 parse failures)
+#   python renamed ..................... 5/6
+#   python and bash renamed ............ 6/6
+#
+# So rename the colliding tools on the way out and map the names back on the
+# way in. Confined to the transport layer: callers keep using the real names.
+_HARMONY_TOOL_ALIASES = {
+    "python": "run_python_code",
+    "bash": "run_shell_command",
+    "browser": "web_browser_tool",
+}
+_HARMONY_TOOL_ALIASES_REVERSE = {v: k for k, v in _HARMONY_TOOL_ALIASES.items()}
+
+
+def _is_harmony_model(model: str) -> bool:
+    """True for gpt-oss / harmony-format models, which have built-in tool names."""
+    return "gpt-oss" in (model or "").lower()
+
+
+def _alias_harmony_tools(tools: Optional[List[Dict]], model: str) -> Optional[List[Dict]]:
+    """Rename tools that collide with harmony built-ins. Returns a copy."""
+    if not tools or not _is_harmony_model(model):
+        return tools
+    out = []
+    for t in tools:
+        fn = t.get("function") or {}
+        alias = _HARMONY_TOOL_ALIASES.get(fn.get("name"))
+        if alias:
+            t = copy.deepcopy(t)
+            t["function"]["name"] = alias
+        out.append(t)
+    return out
+
+
+def _unalias_harmony_tool_name(name: str, model: str) -> str:
+    """Map an aliased tool name in a model response back to the real name."""
+    if not _is_harmony_model(model):
+        return name
+    return _HARMONY_TOOL_ALIASES_REVERSE.get(name, name)
+
+
+def _scrub_openai_chat_tool_reasoning(payload: Dict, target_url: str, model: str) -> None:
+    if not payload.get("tools"):
+        return
+    if not _is_openai_hosted_chat_url(target_url):
+        return
+    if not _model_disallows_reasoning_effort_with_chat_tools(model):
+        return
+    payload["reasoning_effort"] = "none"
 
 
 def _normalize_chatgpt_subscription_url(url: str) -> str:
@@ -542,8 +1293,9 @@ def _build_chatgpt_responses_payload(
     }
     if not _restricts_temperature(model):
         payload["temperature"] = temperature
-    if max_tokens and max_tokens > 0:
-        payload["max_output_tokens"] = max_tokens
+    # ChatGPT Subscription Codex API does not support max_output_tokens —
+    # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
+    # Do not include it in the payload.
     return payload
 
 
@@ -613,7 +1365,7 @@ def _uses_max_completion_tokens(model: str) -> bool:
 # perfectly good model as failing. For these models we omit the field and let
 # the API use its required default. (gpt-4.5 is intentionally excluded — it is
 # not a reasoning model and accepts temperature normally.)
-_FIXED_TEMPERATURE_MODELS = ("o1", "o3", "o4", "gpt-5")
+_FIXED_TEMPERATURE_MODELS = ("o1", "o3", "o4", "gpt-5", "kimi-for-coding")
 
 def _restricts_temperature(model: str) -> bool:
     """Check if a model rejects any non-default temperature."""
@@ -622,8 +1374,73 @@ def _restricts_temperature(model: str) -> bool:
     m = model.lower()
     return any(m.startswith(p) or f"/{p}" in m for p in _FIXED_TEMPERATURE_MODELS)
 
+
+# The official Moonshot API fixes temperature at 1.0 in thinking mode and 0.6
+# when thinking is explicitly disabled for Kimi K2.5/K2.6. Any other explicit
+# value returns HTTP 400. Odysseus does not currently send the `thinking` mode
+# control, so omit temperature and let Moonshot use its default thinking mode.
+# Keep the gate provider-specific: self-hosted Kimi deployments may accept
+# custom sampling values, and older Moonshot models have different defaults.
+def _moonshot_rejects_custom_temperature(provider: str, model: str) -> bool:
+    """Check if the official Moonshot API fixes temperature for this model."""
+    if provider != "moonshot" or not isinstance(model, str):
+        return False
+    model_id = model.lower().rsplit("/", 1)[-1]
+    return bool(re.match(r"^kimi-k2\.(?:5|6)(?:$|[-_:])", model_id))
+
+
+def _omit_temperature(provider: str, model: str) -> bool:
+    """Check if a request should use the provider's default temperature."""
+    return _restricts_temperature(model) or _moonshot_rejects_custom_temperature(
+        provider, model
+    )
+
+
+# Anthropic removed the sampling parameters (temperature, top_p, top_k) starting
+# with Claude Opus 4.7. On Opus 4.7 and later, sending `temperature` at all —
+# even 0.0 — returns HTTP 400. Earlier Claude models (Opus 4.6 and below, every
+# Sonnet/Haiku) still accept temperature in [0.0, 1.0], so the omission must be
+# version-gated rather than applied to all `claude-*` models.
+def _anthropic_rejects_temperature(model: str) -> bool:
+    """Check if a native-Anthropic model rejects the temperature field (Opus 4.7+)."""
+    if not isinstance(model, str) or not model:
+        return False
+    # `(?<![a-z])` anchors "opus" to a word boundary so a substring match like
+    # `oct-opus`/`octopus-4-8` can't be read as Opus (it would otherwise strip
+    # temperature). Both version components are capped at 1-2 digits and forbid a
+    # trailing digit, so an 8-digit date can never be read as a version number:
+    # `claude-opus-4-20250514` (Opus 4.0) parses as major-only rather than reading
+    # `20250514` as a giant minor, and `claude-3-opus-20240229` (legacy Claude 3
+    # Opus, date directly after "opus-") fails to match at all rather than reading
+    # the date as a giant major. Dated 4.7+ snapshots (`claude-opus-4-7-20260201`)
+    # keep their explicit minor and are still matched.
+    #
+    # The minor is optional and a missing minor reads as `.0`, so major-only ids
+    # like `claude-opus-5` are correctly treated as >= 4.7 (issue #5753). Without
+    # this, every Opus 5 call kept `temperature` and failed with HTTP 400 — visible
+    # only on paths that pass a temperature, e.g. scheduled tasks inheriting
+    # `stream_agent_loop`'s 0.3 default, which returned empty responses.
+    match = re.search(
+        r"(?<![a-z])opus[-_]?(\d{1,2})(?!\d)(?:[-_.](\d{1,2})(?!\d))?", model.lower()
+    )
+    if not match:
+        return False
+    major = int(match.group(1))
+    minor = int(match.group(2)) if match.group(2) else 0
+    return (major, minor) >= (4, 7)
+
+# Reasoning effort level sent to Mistral thinking-capable models. Mistral's
+# API accepts "high", "medium", "low", "none" — see
+# https://docs.mistral.ai/capabilities/reasoning/. Override via env var
+# ODYSSEUS_MISTRAL_REASONING_EFFORT (e.g. set to "medium" for cheaper chat).
+_MISTRAL_REASONING_EFFORT = os.getenv("ODYSSEUS_MISTRAL_REASONING_EFFORT", "high")
+
 # Models that support structured thinking — may output </think> without opening tag
-_THINKING_MODEL_PATTERNS = ("qwen3", "qwq", "deepseek-r1", "deepseek-reasoner", "minimax", "m2-reap", "gemma")
+_THINKING_MODEL_PATTERNS = (
+    "qwen3", "qwq", "deepseek-r1", "deepseek-reasoner", "deepseek-v4",
+    "minimax", "m2-reap", "gemma", "stepfun", "step-3", "step3",
+    "magistral", "mistral-small", "mistral-medium",
+)
 
 def _supports_thinking(model: str) -> bool:
     """Check if model supports structured thinking output."""
@@ -631,6 +1448,38 @@ def _supports_thinking(model: str) -> bool:
         return False
     m = model.lower()
     return any(p in m for p in _THINKING_MODEL_PATTERNS)
+
+def _normalize_mistral_content(content):
+    """Mistral returns content as a structured array when reasoning is on:
+        [{"type": "thinking", "thinking": [{"type": "text", "text": "..."}], "closed": true},
+         {"type": "text", "text": "...final answer..."}]
+    Convert to (text, thinking) tuple of plain strings. Pass through strings
+    unchanged so non-Mistral OpenAI-compat endpoints are unaffected.
+    """
+    if isinstance(content, str):
+        return content, ""
+    if not isinstance(content, list):
+        return "", ""
+    text_parts = []
+    thinking_parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            t = block.get("text", "")
+            if t:
+                text_parts.append(t)
+        elif btype == "thinking":
+            inner = block.get("thinking", [])
+            if isinstance(inner, list):
+                for tb in inner:
+                    if isinstance(tb, dict) and tb.get("text"):
+                        thinking_parts.append(tb["text"])
+            elif isinstance(inner, str):
+                thinking_parts.append(inner)
+    return "".join(text_parts), "".join(thinking_parts)
+
 
 def _convert_openai_content_to_anthropic(content):
     """Convert OpenAI multimodal content blocks to Anthropic format.
@@ -725,8 +1574,11 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
         "model": model,
         "messages": chat_messages,
         "max_tokens": max_tokens if max_tokens and max_tokens > 0 else 4096,
-        "temperature": temperature,
     }
+    # Opus 4.7+ removed the sampling parameters — sending `temperature` (even 0.0)
+    # returns HTTP 400. Omit it for those models; older Claude models still take it.
+    if not _anthropic_rejects_temperature(model):
+        payload["temperature"] = temperature
     if system_parts:
         system_text = "\n\n".join(system_parts)
         # Send `system` as a structured text block so we can attach a prompt-cache
@@ -799,6 +1651,25 @@ def _as_content_blocks(content) -> List[Dict]:
     return []
 
 
+def _is_untrusted_context_content(content) -> bool:
+    if isinstance(content, str):
+        return (
+            content.startswith("UNTRUSTED SOURCE DATA\n")
+            or "<<<UNTRUSTED_SOURCE_DATA>>>" in content
+        )
+    if isinstance(content, list):
+        return any(
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and _is_untrusted_context_content(block.get("text") or "")
+            for block in content
+        )
+    return False
+
+
+_REFERENCE_CONTEXT_BOUNDARY = "Reference context received."
+
+
 def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
     """Strip Odysseus-only metadata before sending messages to providers.
 
@@ -810,7 +1681,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
     (content=None, since Gemini/Ollama reject tool_calls alongside ""). Dropping
     it leaves the tool result dangling and breaks the next round.
     """
-    allowed = {"role", "content", "name", "tool_call_id", "tool_calls", "function_call"}
+    allowed = {"role", "content", "name", "tool_call_id", "tool_calls", "function_call", "reasoning_content"}
     cleaned = []
     for msg in messages or []:
         if not isinstance(msg, dict):
@@ -911,6 +1782,10 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
 
         last = merged[-1]
         if last.get("role") == "user" and item.get("role") == "user":
+            if _is_untrusted_context_content(last.get("content")):
+                merged.append({"role": "assistant", "content": _REFERENCE_CONTEXT_BOUNDARY})
+                merged.append(item)
+                continue
             last_copy = dict(last)
             lc = last_copy.get("content")
             ic = item.get("content")
@@ -936,6 +1811,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
             merged.append(item)
 
     return merged
+
 
 def _normalize_anthropic_url(url: str) -> str:
     """Ensure Anthropic URL points to /v1/messages."""
@@ -1045,11 +1921,13 @@ def list_model_ids(
             from src.endpoint_resolver import build_models_url
 
             models_url = build_models_url(base_chat_url)
-        r = httpx.get(models_url, headers=h, timeout=timeout)
+        r = httpx_get_kimi_aware(models_url, h, timeout=timeout)
         r.raise_for_status()
         data = r.json()
-        model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-        if not model_ids:
+        # Some OpenAI-compatible APIs (e.g. Together) return a bare list here.
+        items = data if isinstance(data, list) else (data.get("data") or [])
+        model_ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
+        if not model_ids and isinstance(data, dict):
             model_ids = [
                 m.get("name") or m.get("model")
                 for m in (data.get("models") or [])
@@ -1063,8 +1941,8 @@ def list_model_ids(
                 r = httpx.get(root + "/api/tags", timeout=timeout)
                 r.raise_for_status()
                 return [m.get("name") or m.get("model") for m in (r.json().get("models") or []) if m.get("name") or m.get("model")]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to fetch model list from configured endpoint", exc_info=e)
         return []
 
 def normalize_model_id(
@@ -1089,7 +1967,7 @@ def normalize_model_id(
     return None
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
+             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
     h = _provider_headers(_detect_provider(url))
@@ -1120,7 +1998,9 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         messages_copy = non_sys
 
     provider = _detect_provider(url)
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    cache_key = _get_cache_key(
+        url, model, messages_copy, temperature, max_tokens, headers=headers,
+    )
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1137,7 +2017,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             stream=False, num_ctx=get_context_length(url, model),
         )
     else:
-        target_url = url
+        target_url = _normalize_openai_chat_url(url)
         if provider == "copilot":
             from src.copilot import apply_request_headers
             apply_request_headers(h, messages_copy)
@@ -1146,14 +2026,17 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             "messages": messages_copy,
             "temperature": temperature,
         }
-        if _restricts_temperature(model):
+        if _omit_temperature(provider, model):
             payload.pop("temperature", None)
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        _apply_local_generation_stability(payload, target_url, model)
+        if provider == "mistral" and _supports_thinking(model):
+            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
     try:
         note_model_activity(target_url, model)
-        r = httpx.post(target_url, headers=h, json=payload, timeout=timeout)
+        r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
     except Exception as e:
         raise HTTPException(502, f"POST {target_url} failed: {e}")
     if not r.is_success:
@@ -1166,35 +2049,86 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             response = _parse_ollama_response(data)
         else:
             msg = data["choices"][0]["message"]
-            response = msg.get("content") or msg.get("reasoning_content") or ""
+            content = msg.get("content")
+            if isinstance(content, list):
+                # Mistral structured content — extract thinking + text
+                text_part, thinking_part = _normalize_mistral_content(content)
+                if thinking_part:
+                    response = thinking_part + "\n\n" + (text_part or "")
+                else:
+                    response = text_part or msg.get("reasoning_content") or ""
+            else:
+                response = content or msg.get("reasoning_content") or ""
         _set_cached_response(cache_key, response)
         return response
     except Exception:
         raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
 
 
-def _dedupe_candidates(candidates):
-    """Filter malformed entries and drop a later repeat of an already-seen
-    ``(url, model)`` route, preserving order (first occurrence wins).
+def _candidate_is_configured(candidate) -> bool:
+    return bool(
+        isinstance(candidate, (tuple, list))
+        and len(candidate) == 3
+        and isinstance(candidate[0], str)
+        and candidate[0].strip()
+        and isinstance(candidate[1], str)
+        and candidate[1].strip()
+    )
 
-    The chain is the primary target followed by the configured fallbacks, so a
-    fallback that repeats the session's current model — a common misconfiguration,
-    since callers prepend the live ``(url, model)`` to ``default_model_fallbacks``
-    — would otherwise make the chain re-attempt the very route that just failed:
-    a wasted round-trip plus a spurious ``fallback`` notice for a switch that did
-    not happen. Headers are not part of the key; the first tuple (with its
-    headers) is the one kept.
-    """
-    seen = set()
+
+def _safe_route_descriptor(value) -> dict:
+    value = value if isinstance(value, dict) else {}
+    endpoint_id = value.get("endpoint_id")
+    endpoint_label = value.get("endpoint_label")
+    endpoint_cost_tracked = value.get("endpoint_cost_tracked")
+    return {
+        "endpoint_id": endpoint_id if isinstance(endpoint_id, str) and endpoint_id else None,
+        "endpoint_label": (
+            endpoint_label
+            if isinstance(endpoint_label, str) and endpoint_label.strip()
+            else "Selected route"
+        ),
+        "endpoint_cost_tracked": (
+            endpoint_cost_tracked
+            if isinstance(endpoint_cost_tracked, bool)
+            else None
+        ),
+    }
+
+
+def _dedupe_model_candidates_with_descriptors(candidates, descriptors=None):
+    """Dedupe routes and their parallel non-secret descriptors together."""
+
+    seen = []
     out = []
-    for c in candidates or []:
-        if not c or not c[0] or not c[1]:
+    out_descriptors = []
+    descriptors = list(descriptors or [])
+    for index, candidate in enumerate(candidates or []):
+        if not _candidate_is_configured(candidate):
             continue
-        key = (c[0], c[1])
-        if key in seen:
+        route = (candidate[0], candidate[1], candidate[2] or {})
+        if any(route == prior for prior in seen):
             continue
-        seen.add(key)
-        out.append(c)
+        seen.append(route)
+        out.append(candidate)
+        raw_descriptor = descriptors[index] if index < len(descriptors) else {}
+        out_descriptors.append(_safe_route_descriptor(raw_descriptor))
+    return out, out_descriptors
+
+
+def dedupe_model_candidates(candidates):
+    """Filter malformed entries and drop a later repeat of an already-seen
+    ``(url, model, headers)`` route, preserving order (first occurrence wins).
+
+    The chain is the primary target followed by any caller-authorized
+    fallbacks.  A fallback that repeats the session's current model would
+    otherwise make the chain re-attempt the very route that just failed: a
+    wasted round-trip plus a spurious ``fallback`` notice for a switch that did
+    not happen. Credentials are part of route identity: two configured
+    endpoints may intentionally use the same provider URL/model with different
+    keys, and rate limiting on one must not discard the other candidate.
+    """
+    out, _descriptors = _dedupe_model_candidates_with_descriptors(candidates)
     return out
 
 
@@ -1206,7 +2140,7 @@ def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
     the next candidate. The dead-host cooldown inside `llm_call` makes repeat
     attempts at an offline primary effectively free.
     """
-    cands = _dedupe_candidates(candidates)
+    cands = dedupe_model_candidates(candidates)
     if not cands:
         raise HTTPException(503, "No model endpoint configured")
     last_err = None
@@ -1223,7 +2157,7 @@ def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
 
 async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
     """Async variant of `llm_call_with_fallback` — same semantics."""
-    cands = _dedupe_candidates(candidates)
+    cands = dedupe_model_candidates(candidates)
     if not cands:
         raise HTTPException(503, "No model endpoint configured")
     last_err = None
@@ -1238,6 +2172,93 @@ async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
     raise last_err if last_err else HTTPException(503, "All fallback candidates failed")
 
 
+def _nonstream_error_status(error: Exception) -> Optional[int]:
+    """Normalize a non-stream provider failure for explicit fallback policy."""
+
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, bool) and status is not None:
+        return _normalize_http_status(status)
+    if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return 503
+    if isinstance(error, httpx.ReadTimeout):
+        return 504
+    return None
+
+
+async def llm_call_async_with_route_fallback(
+    candidates,
+    messages,
+    *,
+    fallback_statuses,
+    **kwargs,
+):
+    """Call an ordered non-stream route chain and return route provenance.
+
+    Unlike the legacy utility helper, this advances only for an explicitly
+    eligible status.  A successful empty response still commits the current
+    candidate; empty output is not availability evidence.  The third return
+    value is the provider-reported model when available, otherwise the exact
+    configured candidate model.
+    """
+
+    raw_candidates = list(candidates or [])
+    if not raw_candidates or not _candidate_is_configured(raw_candidates[0]):
+        raise _FallbackIneligibleHTTPException(400, "Selected model endpoint is not configured")
+    candidate_request_factory = kwargs.pop("candidate_request_factory", None)
+    cands = dedupe_model_candidates(raw_candidates)
+    if not cands:
+        raise HTTPException(503, "No model endpoint configured")
+    eligible_statuses = frozenset(fallback_statuses or ())
+    for index, candidate in enumerate(cands):
+        url, model, headers = candidate
+        try:
+            candidate_messages = messages
+            candidate_kwargs = kwargs
+            if candidate_request_factory is not None:
+                request = candidate_request_factory(index, url, model, headers) or {}
+                if hasattr(request, "__await__"):
+                    request = await request
+                candidate_messages = request.get("messages", messages)
+                candidate_kwargs = {**kwargs, **(request.get("kwargs") or {})}
+            candidate_kwargs = {
+                **candidate_kwargs,
+                "availability_only_transport": True,
+            }
+            response = await llm_call_async(
+                url,
+                model,
+                candidate_messages,
+                headers=headers,
+                return_model_metadata=True,
+                **candidate_kwargs,
+            )
+            actual_model = model
+            if (
+                isinstance(response, tuple)
+                and len(response) == 2
+                and isinstance(response[0], str)
+            ):
+                response, reported_model = response
+                if isinstance(reported_model, str) and reported_model.strip():
+                    actual_model = reported_model.strip()
+            return response, candidate, actual_model
+        except Exception as error:
+            if getattr(error, "fallback_eligible", None) is False:
+                raise
+            status = _nonstream_error_status(error)
+            if index >= len(cands) - 1 or status not in eligible_statuses:
+                raise
+            tag = "primary" if index == 0 else "candidate"
+            logger.warning(
+                "[fallback] %s %s failed with eligible status %s; trying next",
+                tag,
+                model,
+                status,
+            )
+
+    raise HTTPException(503, "All fallback candidates failed")
+
+
 async def llm_call_async(
     url: str,
     model: str,
@@ -1247,8 +2268,12 @@ async def llm_call_async(
     headers: Optional[Dict] = None,
     timeout: int = LLMConfig.STREAM_TIMEOUT,
     max_retries: int = LLMConfig.MAX_RETRIES,
-    prompt_type: Optional[str] = None
-) -> str:
+    prompt_type: Optional[str] = None,
+    session_id: Optional[str] = None,
+    workload: str = "foreground",
+    availability_only_transport: bool = False,
+    return_model_metadata: bool = False,
+) -> str | tuple[str, str]:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
@@ -1266,10 +2291,14 @@ async def llm_call_async(
     else:
         messages_copy = non_sys
 
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    cache_key = _get_cache_key(
+        url, model, messages_copy, temperature, max_tokens, headers=headers,
+    )
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
+        if return_model_metadata:
+            return cached_response, (_get_cached_response_model(cache_key) or model)
         return cached_response
 
     if provider == "chatgpt-subscription":
@@ -1277,6 +2306,7 @@ async def llm_call_async(
         # that want a plain string (auto-title, memory extraction, etc.).
         # Reuse stream_llm's validated Codex SSE path and collect deltas.
         parts: List[str] = []
+        actual_model = model
         async for chunk in stream_llm(
             url,
             model,
@@ -1285,6 +2315,7 @@ async def llm_call_async(
             max_tokens=max_tokens,
             headers=headers,
             timeout=timeout,
+            workload=workload,
         ):
             event_is_error = False
             for line in str(chunk).splitlines():
@@ -1298,8 +2329,16 @@ async def llm_call_async(
                     continue
                 if raw == "[DONE]":
                     response = "".join(parts)
-                    _set_cached_response(cache_key, response)
-                    return response
+                    _set_cached_response(
+                        cache_key,
+                        response,
+                        actual_model=actual_model,
+                    )
+                    return (
+                        (response, actual_model)
+                        if return_model_metadata
+                        else response
+                    )
                 try:
                     data = json.loads(raw)
                 except json.JSONDecodeError:
@@ -1307,13 +2346,22 @@ async def llm_call_async(
                 if event_is_error or data.get("error") or (data.get("status") and data.get("text")):
                     status = int(data.get("status") or 502)
                     text = data.get("text") or data.get("error") or "ChatGPT Subscription request failed"
-                    raise HTTPException(status, text)
+                    error_type = (
+                        _FallbackIneligibleHTTPException
+                        if data.get("fallback_eligible") is False
+                        else HTTPException
+                    )
+                    raise error_type(status, text)
+                if data.get("type") == "model_actual":
+                    reported_model = data.get("model")
+                    if isinstance(reported_model, str) and reported_model.strip():
+                        actual_model = reported_model.strip()
                 delta = data.get("delta")
                 if isinstance(delta, str):
                     parts.append(delta)
         response = "".join(parts)
-        _set_cached_response(cache_key, response)
-        return response
+        _set_cached_response(cache_key, response, actual_model=actual_model)
+        return (response, actual_model) if return_model_metadata else response
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
@@ -1329,7 +2377,7 @@ async def llm_call_async(
             stream=False, num_ctx=get_context_length(url, model),
         )
     else:
-        target_url = url
+        target_url = _normalize_openai_chat_url(url)
         h = _provider_headers(provider, headers)
         if provider == "copilot":
             from src.copilot import apply_request_headers
@@ -1339,24 +2387,32 @@ async def llm_call_async(
             "messages": messages_copy,
             "temperature": temperature,
         }
-        if _restricts_temperature(model):
+        if _omit_temperature(provider, model):
             payload.pop("temperature", None)
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
+        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
+            payload["think"] = False
+        if provider == "mistral" and _supports_thinking(model):
+            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        _apply_local_cache_affinity(payload, url, session_id)
+        _apply_local_generation_stability(payload, target_url, model)
 
     if _is_host_dead(target_url):
         raise HTTPException(503, f"Upstream {_host_key(target_url)} marked unreachable (cooldown active)")
 
-    call_timeout = httpx.Timeout(connect=3.0, read=float(timeout), write=10.0, pool=5.0)
+    call_timeout = _call_timeout(timeout)
     attempt = 0
     while attempt < max_retries:
         attempt += 1
         start = time.time()
         try:
-            note_model_activity(target_url, model)
-            client = _get_http_client()
-            r = await client.post(target_url, headers=h, json=payload, timeout=call_timeout)
+            async with _local_model_slot(target_url, model, workload):
+                note_model_activity(target_url, model)
+                client = _get_http_client()
+                r = await httpx_post_kimi_aware_async(client, target_url, h, json=payload, timeout=call_timeout)
             duration = time.time() - start
             if not r.is_success:
                 friendly = _format_upstream_error(r.status_code, r.text, target_url)
@@ -1371,18 +2427,55 @@ async def llm_call_async(
             logger.info(f"LLM async call to {target_url} succeeded in {duration:.2f}s (attempt {attempt})")
             _clear_host_dead(target_url)
             data = r.json()
+            if isinstance(data, dict) and data.get("error"):
+                provider_error = data["error"]
+                status = _provider_stream_error_status(provider_error, default=400)
+                if isinstance(provider_error, dict):
+                    detail = provider_error.get("message") or provider_error.get("type") or str(provider_error)
+                else:
+                    detail = str(provider_error)
+                raise HTTPException(status, detail or "Upstream request failed")
             try:
+                reported_model = data.get("model") if isinstance(data, dict) else None
+                actual_model = (
+                    reported_model.strip()
+                    if isinstance(reported_model, str) and reported_model.strip()
+                    else model
+                )
                 if provider == "anthropic":
                     response = _parse_anthropic_response(data)
                 elif provider == "ollama":
                     response = _parse_ollama_response(data)
                 else:
                     msg = data["choices"][0]["message"]
-                    response = msg.get("content") or msg.get("reasoning_content") or ""
-                _set_cached_response(cache_key, response)
-                return response
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        # Mistral structured content — extract thinking + text
+                        # (same contract as llm_call / stream_llm; see #5435).
+                        text_part, thinking_part = _normalize_mistral_content(content)
+                        if thinking_part:
+                            response = thinking_part + "\n\n" + (text_part or "")
+                        else:
+                            response = text_part or msg.get("reasoning_content") or ""
+                    else:
+                        response = content or msg.get("reasoning_content") or ""
+                _set_cached_response(
+                    cache_key,
+                    response,
+                    actual_model=actual_model,
+                )
+                return (
+                    (response, actual_model)
+                    if return_model_metadata
+                    else response
+                )
+            except HTTPException:
+                raise
             except Exception:
-                raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
+                raise _FallbackIneligibleHTTPException(
+                    502,
+                    f"Unexpected schema from {target_url}: {str(data)[:400]}",
+                )
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             duration = time.time() - start
@@ -1391,17 +2484,106 @@ async def llm_call_async(
             if _cooled or attempt >= max_retries:
                 raise HTTPException(503, f"Cannot reach {_host_key(target_url)}: {e}")
             await asyncio.sleep(LLMConfig.RETRY_DELAY)
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except httpx.ReadTimeout as e:
             duration = time.time() - start
-            logger.warning(f"LLM async call attempt {attempt} failed after {duration:.2f}s: {e}")
+            logger.warning(f"LLM async read timed out after {duration:.2f}s: {e}")
+            if attempt >= max_retries:
+                raise HTTPException(504, f"POST {target_url} timed out after {max_retries} attempts")
+            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+        except httpx.PoolTimeout as e:
+            duration = time.time() - start
+            logger.warning(f"LLM async connection pool timed out after {duration:.2f}s: {e}")
+            if availability_only_transport:
+                raise HTTPException(
+                    504,
+                    f"POST {target_url} could not acquire an upstream connection",
+                )
+            if attempt >= max_retries:
+                raise HTTPException(504, f"POST {target_url} timed out after {max_retries} attempts")
+            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+        except httpx.WriteTimeout as e:
+            duration = time.time() - start
+            logger.warning(f"LLM async upstream timeout after {duration:.2f}s: {e}")
+            if availability_only_transport:
+                raise _FallbackIneligibleHTTPException(
+                    504,
+                    f"POST {target_url} failed during request delivery",
+                )
+            if attempt >= max_retries:
+                raise HTTPException(504, f"POST {target_url} timed out after {max_retries} attempts")
+            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+        except httpx.ProtocolError as e:
+            duration = time.time() - start
+            logger.warning(f"LLM async protocol failure after {duration:.2f}s: {e}")
+            if availability_only_transport:
+                raise _FallbackIneligibleHTTPException(
+                    502,
+                    f"POST {target_url} failed with a protocol error",
+                )
             if attempt >= max_retries:
                 raise HTTPException(502, f"POST {target_url} failed after {max_retries} attempts: {e}")
             await asyncio.sleep(LLMConfig.RETRY_DELAY)
+        except httpx.NetworkError as e:
+            duration = time.time() - start
+            logger.warning(f"LLM async network failure after {duration:.2f}s: {e}")
+            if availability_only_transport:
+                raise _FallbackIneligibleHTTPException(
+                    502,
+                    f"POST {target_url} failed with a network error",
+                )
+            if attempt >= max_retries:
+                raise HTTPException(502, f"POST {target_url} failed after {max_retries} attempts: {e}")
+            await asyncio.sleep(LLMConfig.RETRY_DELAY)
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else 502
+            raise HTTPException(status, str(e))
+        except httpx.RequestError as e:
+            duration = time.time() - start
+            logger.warning(f"LLM async request configuration failed after {duration:.2f}s: {e}")
+            raise _FallbackIneligibleHTTPException(
+                502,
+                f"POST {target_url} could not be configured: {e}",
+            )
+
+def _stream_target_url(url: str) -> str:
+    provider = _detect_provider(url)
+    if provider == "anthropic":
+        return _normalize_anthropic_url(url)
+    if provider == "ollama":
+        return _normalize_ollama_url(url)
+    if provider == "chatgpt-subscription":
+        return _normalize_chatgpt_subscription_url(url)
+    return _normalize_openai_chat_url(url)
+
 
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                     tools: Optional[List[Dict]] = None):
+                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
+                     tool_choice_none: bool = False, workload: str = "foreground"):
+    target_url = _stream_target_url(url)
+    async with _local_model_slot(target_url, model, workload):
+        async for chunk in _stream_llm_inner(
+            url,
+            model,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            headers=headers,
+            timeout=timeout,
+            prompt_type=prompt_type,
+            tools=tools,
+            session_id=session_id,
+            tool_choice_none=tool_choice_none,
+        ):
+            yield chunk
+
+
+async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+                            max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
+                            timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
+                            tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
+                            tool_choice_none: bool = False):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -1445,14 +2627,14 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         h = _provider_headers(provider, headers)
         payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
     else:
-        target_url = url
+        target_url = _normalize_openai_chat_url(url)
         payload = {
             "model": model,
             "messages": messages_copy,
             "temperature": temperature,
             "stream": True,
         }
-        if _restricts_temperature(model):
+        if _omit_temperature(provider, model):
             payload.pop("temperature", None)
         if provider not in {"openrouter", "groq"}:
             payload["stream_options"] = {"include_usage": True}
@@ -1460,26 +2642,48 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
         if tools:
-            payload["tools"] = tools
+            payload["tools"] = _alias_harmony_tools(tools, model)
+        elif tool_choice_none:
+            payload["tool_choice"] = "none"
+        # Mistral thinking-capable models — send reasoning_effort so Mistral
+        # activates thinking mode and returns structured reasoning_content.
+        # Effort level is configurable via ODYSSEUS_MISTRAL_REASONING_EFFORT
+        # (high / medium / low / none); default "high".
+        if provider == "mistral" and _supports_thinking(model):
+            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
+        # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
+        # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
+        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
+            payload["think"] = False
+        _apply_local_cache_affinity(payload, url, session_id)
+        _apply_local_generation_stability(payload, target_url, model)
+        _scrub_openai_chat_tool_reasoning(payload, target_url, model)
         h = _provider_headers(provider, headers)
         if provider == "copilot":
             from src.copilot import apply_request_headers
             apply_request_headers(h, messages_copy)
 
-    # Short connect timeout: a reachable peer answers SYN in <100ms even on
-    # Tailscale. 3s is plenty; 30s let one dead upstream wedge the UI.
-    stream_timeout = httpx.Timeout(connect=3.0, read=float(timeout), write=30.0, pool=5.0)
+    # Connect budget from LLMConfig.CONNECT_TIMEOUT (env LLM_CONNECT_TIMEOUT).
+    # The dead-host cooldown still bounds a genuinely unreachable upstream, so a
+    # wider connect budget only affects first contact and stops a brief cold
+    # connect blip (offshore/public endpoints) surfacing as a 503 on this stream
+    # path, which -- unlike llm_call -- does not retry the connect.
+    stream_timeout = _stream_timeout(timeout)
 
     if _is_host_dead(target_url):
         yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
         return
     note_model_activity(target_url, model)
+    degenerate_guard = _DegenerateStreamGuard(model)
 
     # ── ChatGPT Subscription / Codex Responses streaming ──
     if provider == "chatgpt-subscription":
         event_name = ""
         input_tokens = 0
         output_tokens = 0
+        _responses_actual_model = ""
+        _responses_model_announced = False
         try:
             client = _get_http_client()
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -1505,22 +2709,74 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     except json.JSONDecodeError:
                         continue
                     evt = data.get("type") or event_name
+                    response_data = data.get("response") or {}
+                    reported_model = (
+                        response_data.get("model")
+                        if isinstance(response_data, dict)
+                        else None
+                    )
+                    reported_model = _reported_model_name(
+                        reported_model or data.get("model")
+                    )
+                    if reported_model:
+                        _responses_actual_model = reported_model
+                        if not _responses_model_announced:
+                            model_event = _model_actual_event(model, reported_model)
+                            if model_event:
+                                _responses_model_announced = True
+                                yield model_event
                     if evt == "response.output_text.delta":
                         delta = data.get("delta") or ""
                         if delta:
+                            _degenerate = degenerate_guard.check(delta)
+                            if _degenerate:
+                                yield _degenerate
+                                return
                             yield f'data: {json.dumps({"delta": delta})}\n\n'
                     elif evt == "response.completed":
                         usage = (data.get("response") or {}).get("usage") or data.get("usage") or {}
-                        input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
-                        output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
-                        if input_tokens or output_tokens:
-                            yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": input_tokens, "output_tokens": output_tokens}})}\n\n'
+                        if isinstance(usage, dict):
+                            raw_input = (
+                                usage.get("input_tokens")
+                                if "input_tokens" in usage
+                                else usage.get("prompt_tokens", input_tokens)
+                            )
+                            raw_output = (
+                                usage.get("output_tokens")
+                                if "output_tokens" in usage
+                                else usage.get("completion_tokens", output_tokens)
+                            )
+                            normalized_usage = _normalize_usage_counts(
+                                raw_input,
+                                raw_output,
+                            )
+                            if normalized_usage and (
+                                "input_tokens" in usage
+                                or "prompt_tokens" in usage
+                                or "output_tokens" in usage
+                                or "completion_tokens" in usage
+                            ):
+                                _annotate_usage_model(
+                                    normalized_usage,
+                                    model,
+                                    _responses_actual_model,
+                                )
+                                yield f'data: {json.dumps({"type": "usage", "data": normalized_usage})}\n\n'
                         yield "data: [DONE]\n\n"
                         return
                     elif evt in ("response.failed", "error"):
                         err = data.get("error") or (data.get("response") or {}).get("error") or {}
+                        if evt == "error" and not err:
+                            # Responses API ``error`` events carry code/message
+                            # at the top level, unlike ``response.failed``.
+                            err = {
+                                key: data[key]
+                                for key in ("type", "code", "message", "status", "status_code", "http_status")
+                                if key in data
+                            }
                         text = err.get("message") if isinstance(err, dict) else str(err or "ChatGPT Subscription request failed")
-                        yield f'event: error\ndata: {json.dumps({"status": 502, "text": text})}\n\n'
+                        status = _provider_stream_error_status(err, default=400)
+                        yield f'event: error\ndata: {json.dumps({"status": status, "text": text})}\n\n'
                         return
                 yield "data: [DONE]\n\n"
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
@@ -1530,17 +2786,25 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+        except httpx.PoolTimeout:
+            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
+        except httpx.WriteTimeout:
+            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
+        except httpx.ProtocolError:
+            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
         except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
             logger.error(f"ChatGPT Subscription stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502, "fallback_eligible": False})}\n\n'
         return
 
     # ── Native Ollama streaming ──
     if provider == "ollama":
         _ollama_tool_calls: List[Dict] = []
         _harmony_router = _HarmonyStreamRouter()
+        _ollama_actual_model = ""
+        _ollama_model_announced = False
         try:
             client = _get_http_client()
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -1557,6 +2821,20 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                         j = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if j.get("error"):
+                        err = j.get("error")
+                        status = _provider_stream_error_status(err, default=400)
+                        text = err.get("message") if isinstance(err, dict) else str(err)
+                        yield f'event: error\ndata: {json.dumps({"error": text or "Ollama request failed", "status": status})}\n\n'
+                        return
+                    reported_model = _reported_model_name(j.get("model"))
+                    if reported_model:
+                        _ollama_actual_model = reported_model
+                        if not _ollama_model_announced:
+                            model_event = _model_actual_event(model, reported_model)
+                            if model_event:
+                                _ollama_model_announced = True
+                                yield model_event
                     message = j.get("message") or {}
                     thinking = message.get("thinking") or ""
                     if thinking:
@@ -1570,7 +2848,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                         if fn.get("name"):
                             _ollama_tool_calls.append({
                                 "id": tc.get("id") or f"call_{len(_ollama_tool_calls)}",
-                                "name": fn.get("name") or "",
+                                "name": _unalias_harmony_tool_name(fn.get("name") or "", model),
                                 "arguments": json.dumps(fn.get("arguments") or {}),
                             })
                     if j.get("done"):
@@ -1579,7 +2857,17 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                         if _ollama_tool_calls:
                             yield f'data: {json.dumps({"type": "tool_calls", "calls": _ollama_tool_calls})}\n\n'
                         if j.get("prompt_eval_count") is not None or j.get("eval_count") is not None:
-                            yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": j.get("prompt_eval_count", 0), "output_tokens": j.get("eval_count", 0)}})}\n\n'
+                            normalized_usage = _normalize_usage_counts(
+                                j.get("prompt_eval_count", 0),
+                                j.get("eval_count", 0),
+                            )
+                            if normalized_usage:
+                                _annotate_usage_model(
+                                    normalized_usage,
+                                    model,
+                                    _ollama_actual_model,
+                                )
+                                yield f'data: {json.dumps({"type": "usage", "data": normalized_usage})}\n\n'
                         yield "data: [DONE]\n\n"
                         return
                 for part, is_thinking in _harmony_router.flush():
@@ -1592,17 +2880,26 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+        except httpx.PoolTimeout:
+            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
+        except httpx.WriteTimeout:
+            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
+        except httpx.ProtocolError:
+            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
         except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
             logger.error(f"Ollama stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502, "fallback_eligible": False})}\n\n'
         return
 
     # ── Anthropic streaming ──
     if provider == "anthropic":
         _anth_input_tokens = 0
         _anth_output_tokens = 0
+        _anth_usage_seen = False
+        _anth_actual_model = ""
+        _anth_model_announced = False
         # Track tool_use blocks: {index: {id, name, arguments_json}}
         _anth_tool_blocks: Dict[int, Dict] = {}
         _anth_block_idx = -1
@@ -1656,7 +2953,28 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                     if partial and _anth_tool_blocks[idx].get("name") in ("create_document", "update_document", "edit_document"):
                                         yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _anth_tool_blocks[idx]["name"], "arg_delta": partial})}\n\n'
                         elif evt == "message_start":
-                            _u = j.get("message", {}).get("usage", {})
+                            message_data = j.get("message") or {}
+                            reported_model = _reported_model_name(
+                                message_data.get("model")
+                                if isinstance(message_data, dict)
+                                else None
+                            )
+                            if reported_model:
+                                _anth_actual_model = reported_model
+                                if not _anth_model_announced:
+                                    model_event = _model_actual_event(model, reported_model)
+                                    if model_event:
+                                        _anth_model_announced = True
+                                        yield model_event
+                            _u = (
+                                message_data.get("usage")
+                                if isinstance(message_data, dict)
+                                else {}
+                            ) or {}
+                            if not isinstance(_u, dict):
+                                _u = {}
+                            if "input_tokens" in _u:
+                                _anth_usage_seen = True
                             _anth_input_tokens = _u.get("input_tokens", 0)
                             # Surface prompt-cache effectiveness: cache_read > 0 means the
                             # stable system+tools prefix was served from cache this round.
@@ -1668,7 +2986,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                     _c_read, _c_write, _anth_input_tokens,
                                 )
                         elif evt == "message_delta":
-                            _anth_output_tokens = j.get("usage", {}).get("output_tokens", 0)
+                            _u = j.get("usage") or {}
+                            if not isinstance(_u, dict):
+                                _u = {}
+                            if "output_tokens" in _u:
+                                _anth_usage_seen = True
+                            _anth_output_tokens = _u.get("output_tokens", 0)
                         elif evt == "message_stop":
                             # Emit accumulated tool calls in OpenAI-compatible format
                             if _anth_tool_blocks:
@@ -1681,13 +3004,24 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                         "arguments": tb["arguments"],
                                     })
                                 yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
-                            if _anth_input_tokens or _anth_output_tokens:
-                                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens}})}\n\n'
+                            normalized_usage = _normalize_usage_counts(
+                                _anth_input_tokens,
+                                _anth_output_tokens,
+                            )
+                            if normalized_usage and _anth_usage_seen:
+                                _annotate_usage_model(
+                                    normalized_usage,
+                                    model,
+                                    _anth_actual_model,
+                                )
+                                yield f'data: {json.dumps({"type": "usage", "data": normalized_usage})}\n\n'
                             yield "data: [DONE]\n\n"
                             return
                         elif evt == "error":
-                            err_msg = j.get("error", {}).get("message", "Unknown error")
-                            yield f'event: error\ndata: {json.dumps({"error": err_msg, "status": 400})}\n\n'
+                            err = j.get("error") or {}
+                            err_msg = err.get("message", "Unknown error") if isinstance(err, dict) else str(err)
+                            status = _provider_stream_error_status(err, default=400)
+                            yield f'event: error\ndata: {json.dumps({"error": err_msg, "status": status})}\n\n'
                             return
                     except json.JSONDecodeError:
                         continue
@@ -1699,11 +3033,17 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+        except httpx.PoolTimeout:
+            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
+        except httpx.WriteTimeout:
+            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
+        except httpx.ProtocolError:
+            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
         except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
             logger.error(f"Anthropic stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502, "fallback_eligible": False})}\n\n'
         return
 
     # ── OpenAI-compatible streaming ──
@@ -1746,6 +3086,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
 
     try:
         client = _get_http_client()
+        h = await apply_kimi_code_headers_async(client, h, target_url)
         async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
             _clear_host_dead(target_url)
             if r.status_code != 200:
@@ -1776,6 +3117,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                         if data.strip():
                             if data.startswith("{"):
                                 j = json.loads(data)
+                                if j.get("error"):
+                                    err = j.get("error")
+                                    status = _provider_stream_error_status(err, default=400)
+                                    text = err.get("message") if isinstance(err, dict) else str(err)
+                                    yield f'event: error\ndata: {json.dumps({"error": text or "Upstream request failed", "status": status})}\n\n'
+                                    return
                                 chunk_model = j.get("model")
                                 if isinstance(chunk_model, str) and chunk_model.strip():
                                     _actual_model = chunk_model.strip()
@@ -1801,9 +3148,21 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                     or _delta0.get("thinking")
                                     or _delta0.get("tool_calls")
                                 )
-                                if "usage" in j and not _delta_has_output:
-                                    u = j["usage"] or {}
-                                    _usage_data = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
+                                u = j.get("usage")
+                                _has_genuine_usage = (
+                                    isinstance(u, dict)
+                                    and (
+                                        "prompt_tokens" in u
+                                        or "completion_tokens" in u
+                                    )
+                                )
+                                if _has_genuine_usage and not _delta_has_output:
+                                    _usage_data = _normalize_usage_counts(
+                                        u.get("prompt_tokens", 0),
+                                        u.get("completion_tokens", 0),
+                                    )
+                                    if _usage_data is None:
+                                        continue
                                     # llama.cpp puts a `timings` block alongside `usage` with the
                                     # TRUE generation speed (predicted_per_second) — pure decode,
                                     # excluding prefill/network. Pass it through so the UI shows the
@@ -1829,10 +3188,31 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                         # Text content
                                         # Reasoning tokens (VLLM --reasoning-parser, e.g. Qwen3/DeepSeek-R1, Nemotron). vLLM 0.20.2 / NIM emit the field as `reasoning`; older builds use `reasoning_content`. Some OpenAI-compatible Ollama builds use `thinking`.
                                         reasoning = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking") or ""
-                                        if reasoning:
-                                            yield _stream_delta_event(reasoning, thinking=True)
                                         content = delta.get("content") or ""
+                                        # Mistral structured content: content is a list of typed blocks
+                                        # ({"type": "thinking", ...}, {"type": "text", ...}). Split into
+                                        # reasoning + text so thinking streams into the thinking panel.
+                                        if isinstance(content, list):
+                                            text_part, thinking_part = _normalize_mistral_content(content)
+                                            if thinking_part:
+                                                reasoning = (reasoning + thinking_part) if reasoning else thinking_part
+                                            content = text_part
+                                        if reasoning:
+                                            _degenerate = degenerate_guard.check(reasoning)
+                                            if _degenerate:
+                                                yield _degenerate
+                                                return
+                                            yield _stream_delta_event(reasoning, thinking=True)
                                         if content:
+                                            content = _strip_visible_chat_template_artifacts(content)
+                                            if not content:
+                                                continue
+                                            _degenerate = degenerate_guard.check(content)
+                                            if _degenerate:
+                                                yield _degenerate
+                                                return
+                                            content = re.sub(r"<mm:think(\s+[^>]*)?>", r"<think\1>", content, flags=re.IGNORECASE)
+                                            content = re.sub(r"</mm:think>", "</think>", content, flags=re.IGNORECASE)
                                             stripped = content.lstrip()
                                             # gpt-oss harmony format (<|channel|>analysis/final): route via the harmony
                                             # stream router. Sticky once the first marker appears — distinct from the
@@ -1928,7 +3308,10 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                             if tc.get("extra_content"):
                                                 _tc_acc[idx]["extra_content"] = tc["extra_content"]
                                             if func.get("name"):
-                                                _tc_acc[idx]["name"] = func["name"]
+                                                # Map harmony aliases back to real
+                                                # tool names before anything
+                                                # downstream sees them.
+                                                _tc_acc[idx]["name"] = _unalias_harmony_tool_name(func["name"], model)
                                             if "arguments" in func:
                                                 # Guard against a null arguments delta: `func` can be
                                                 # {"arguments": None} (JSON null), and a raw `+= None`
@@ -1966,11 +3349,17 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
     except httpx.ReadTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+    except httpx.PoolTimeout:
+        yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
+    except httpx.WriteTimeout:
+        yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
+    except httpx.ProtocolError:
+        yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
     except httpx.NetworkError:
-        yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+        yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
     except Exception as e:
         logger.error(f"Stream error: {e}")
-        yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+        yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502, "fallback_eligible": False})}\n\n'
 
 
 def _summarize_stream_error(err_chunk: Optional[str]) -> str:
@@ -1991,12 +3380,143 @@ def _summarize_stream_error(err_chunk: Optional[str]) -> str:
     return "primary model failed"
 
 
+def _stream_error_status(err_chunk: Optional[str]) -> Optional[int]:
+    """Return the integer status from an SSE error chunk when present."""
+
+    if not err_chunk:
+        return None
+    try:
+        for line in err_chunk.split("\n"):
+            if not line.startswith("data: "):
+                continue
+            status = json.loads(line[6:]).get("status")
+            return _normalize_http_status(status)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _stream_error_fallback_override(err_chunk: Optional[str]) -> Optional[bool]:
+    """Return an adapter's explicit eligibility decision when present."""
+
+    if not err_chunk:
+        return None
+    try:
+        for line in err_chunk.split("\n"):
+            if not line.startswith("data: "):
+                continue
+            value = json.loads(line[6:]).get("fallback_eligible")
+            return value if isinstance(value, bool) else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _request_factory_error_chunk(error: Exception, status: Optional[int]) -> str:
+    """Convert route-request preparation failures into a safe SSE error."""
+
+    wire_status = status if status is not None else 500
+    payload = {
+        "error": f"Model request preparation failed (HTTP {wire_status})",
+        "status": wire_status,
+    }
+    override = getattr(error, "fallback_eligible", None)
+    if isinstance(override, bool):
+        payload["fallback_eligible"] = override
+    elif status is None:
+        # An unclassified internal/configuration failure must never become an
+        # availability fallback merely because its safe wire status is 500.
+        payload["fallback_eligible"] = False
+    return f'event: error\ndata: {json.dumps(payload)}\n\n'
+
+
+# Symbolic-only rate-limit statuses providers emit without a numeric code.
+# RESOURCE_EXHAUSTED is the gRPC/Google symbol for 429; the other two appear
+# in OpenAI-compatible proxies. Any other symbolic status still fails closed.
+_SYMBOLIC_RATE_LIMIT_STATUSES = frozenset({
+    "RATE_LIMITED",
+    "RATE_LIMIT_EXCEEDED",
+    "RESOURCE_EXHAUSTED",
+})
+
+
+def _provider_stream_error_status(error, *, default: int = 400) -> int:
+    """Classify structured provider stream errors without making them eligible by default.
+
+    Some streaming APIs report an HTTP 200 handshake and put the real failure
+    in a later event. Unknown application errors are request failures, not
+    availability evidence; only explicit transient/server markers become 5xx
+    or rate-limit statuses.
+    """
+
+    if isinstance(error, dict):
+        # A structured numeric status is authoritative. Text heuristics are
+        # only a fallback for providers that omit it.
+        saw_explicit_status = False
+        symbolic_rate_limited = False
+        for key in ("status", "status_code", "http_status", "code"):
+            if key not in error:
+                continue
+            value = error.get(key)
+            if value is None:
+                continue
+            # Google-style errors use a symbolic ``status`` together with a
+            # numeric HTTP ``code``.  A symbolic ``code`` remains part of the
+            # marker heuristics below; it is not itself an explicit status.
+            if key != "code":
+                saw_explicit_status = True
+            if (
+                key == "status"
+                and isinstance(value, str)
+                and value.strip().upper() in _SYMBOLIC_RATE_LIMIT_STATUSES
+            ):
+                # Only availability evidence when no numeric status follows:
+                # a payload pairing a symbolic status with e.g. code=401 must
+                # surface the numeric truth, not advance fallback.
+                symbolic_rate_limited = True
+                continue
+            status = _normalize_http_status(value)
+            if status is not None:
+                return status
+        if symbolic_rate_limited:
+            return 429
+        if saw_explicit_status:
+            return default
+        marker = " ".join(str(error.get(key) or "") for key in ("type", "code", "message")).lower()
+    else:
+        marker = str(error or "").lower()
+
+    if "insufficient_quota" in marker or "billing" in marker:
+        return 402
+    if any(token in marker for token in ("authentication", "unauthorized", "invalid api key", "invalid_api_key")):
+        return 401
+    if any(token in marker for token in ("permission", "forbidden")):
+        return 403
+    if any(token in marker for token in ("not_found", "not found", "unknown model")):
+        return 404
+    if any(token in marker for token in ("invalid_request", "invalid request", "unsupported", "malformed", "bad request")):
+        return 400
+    if any(token in marker for token in ("rate_limit", "rate limit", "too many requests")):
+        return 429
+    if any(token in marker for token in ("overloaded", "over capacity")):
+        return 529
+    if any(token in marker for token in ("timeout", "timed out")):
+        return 504
+    if any(token in marker for token in ("api_error", "server_error", "server error", "internal error", "temporarily unavailable")):
+        return 500
+
+    return default
+
+
 async def stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
     `candidates` is a list of (url, model, headers). Each is tried in order,
-    but only retried on a *pre-content* failure — i.e. an ``event: error``
-    that arrives before any assistant text / tool-call data has been yielded.
+    but only retried on an eligible *pre-content* failure. Callers can restrict
+    errors with ``fallback_statuses`` and disable empty-completion switching
+    with ``fallback_on_empty=False``. Omitting both preserves the generic
+    fallback behavior for non-foreground call sites.
+    Metadata is held until substantive output commits the candidate.
     Once a candidate has emitted real output we never switch (that would
     duplicate streamed tokens); a later error from that candidate passes
     through unchanged. The dead-host cooldown in stream_llm makes repeat
@@ -2004,57 +3524,207 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
 
     Yields the same SSE chunk protocol as stream_llm.
     """
-    cands = _dedupe_candidates(candidates)
-    if not cands:
-        yield f'event: error\ndata: {json.dumps({"error": "No model endpoint configured", "status": 503})}\n\n'
+    fallback_statuses = kwargs.pop("fallback_statuses", None)
+    fallback_on_empty = bool(kwargs.pop("fallback_on_empty", True))
+    candidate_request_factory = kwargs.pop("candidate_request_factory", None)
+    candidate_route_descriptors = kwargs.pop("candidate_route_descriptors", None)
+    eligible_statuses = None if fallback_statuses is None else frozenset(fallback_statuses)
+
+    raw_candidates = list(candidates or [])
+    if not raw_candidates or not _candidate_is_configured(raw_candidates[0]):
+        yield f'event: error\ndata: {json.dumps({"error": "Selected model endpoint is not configured", "status": 400, "fallback_eligible": False})}\n\n'
         return
+    cands, route_descriptors = _dedupe_model_candidates_with_descriptors(
+        raw_candidates,
+        candidate_route_descriptors,
+    )
 
     primary_model = cands[0][1]
+    primary_route = route_descriptors[0]
     last_error = None
+    failures = []
     for i, (url, model, headers) in enumerate(cands):
         is_last = (i == len(cands) - 1)
         emitted = False
         retried = False
-        async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
-            if chunk.startswith("event: error"):
-                if not emitted and not is_last:
-                    # Pre-content failure with fallbacks left — swallow and
-                    # move to the next candidate.
-                    last_error = chunk
-                    retried = True
-                    if i == 0:
-                        logger.warning(f"[fallback] primary {model} failed before output; trying fallback")
-                    else:
-                        logger.warning(f"[fallback] candidate {model} failed; trying next")
-                    break
-                yield chunk
-                continue
-            # Any data chunk other than the terminal [DONE] means real output.
-            if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                try:
-                    event_data = json.loads(chunk[6:])
-                except Exception:
-                    event_data = {}
-                if event_data.get("type") == "model_actual":
+        pending_metadata = []
+        candidate_messages = messages
+        candidate_kwargs = kwargs
+        if candidate_request_factory is not None:
+            try:
+                request = candidate_request_factory(i, url, model, headers) or {}
+                if hasattr(request, "__await__"):
+                    request = await request
+                candidate_messages = request.get("messages", messages)
+                candidate_kwargs = {**kwargs, **(request.get("kwargs") or {})}
+            except Exception as error:
+                status = _nonstream_error_status(error)
+                eligibility_override = getattr(error, "fallback_eligible", None)
+                eligible = (
+                    True
+                    if eligible_statuses is None
+                    else (
+                        eligibility_override
+                        if isinstance(eligibility_override, bool)
+                        else status in eligible_statuses
+                    )
+                )
+                error_chunk = _request_factory_error_chunk(error, status)
+                if not is_last and eligible:
+                    last_error = error_chunk
+                    failures.append({
+                        "candidate_index": i,
+                        "model": model,
+                        "status": status,
+                        "reason": _summarize_stream_error(error_chunk),
+                    })
+                    tag = "primary" if i == 0 else "candidate"
+                    logger.warning(
+                        "[fallback] %s %s request preparation failed with "
+                        "eligible status %s; trying next",
+                        tag,
+                        model,
+                        status,
+                    )
+                    continue
+                yield error_chunk
+                return
+        candidate_stream = stream_llm(
+            url,
+            model,
+            candidate_messages,
+            headers=headers,
+            **candidate_kwargs,
+        )
+        try:
+            async for chunk in candidate_stream:
+                if chunk.startswith("event: error"):
+                    status = _stream_error_status(chunk)
+                    eligibility_override = _stream_error_fallback_override(chunk)
+                    eligible = (
+                        True
+                        if eligible_statuses is None
+                        else (
+                            eligibility_override
+                            if eligibility_override is not None
+                            else status in eligible_statuses
+                        )
+                    )
+                    if not emitted and not is_last and eligible:
+                        # Pre-content failure with fallbacks left — swallow and
+                        # move to the next candidate.
+                        last_error = chunk
+                        failures.append({
+                            "candidate_index": i,
+                            "model": model,
+                            "status": status,
+                            "reason": _summarize_stream_error(chunk),
+                        })
+                        retried = True
+                        if i == 0:
+                            logger.warning(f"[fallback] primary {model} failed before output; trying fallback")
+                        else:
+                            logger.warning(f"[fallback] candidate {model} failed; trying next")
+                        break
+                    if not emitted:
+                        # A last-candidate error is already the clearest terminal
+                        # result; do not append an empty-completion error as well.
+                        yield chunk
+                        return
                     yield chunk
                     continue
-                # First real output from a NON-primary candidate: tell the client
-                # the selected model failed and another answered. Without this the
-                # fallback is invisible — a misconfigured provider looks like it
-                # works because the reply is shown under the originally selected
-                # model's name (e.g. a Bedrock/Claude endpoint that 400s every
-                # request but appears fine because another model silently answered).
-                if not emitted and i > 0:
-                    yield ('data: ' + json.dumps({
-                        "type": "fallback",
-                        "selected_model": primary_model,
-                        "answered_by": model,
-                        "reason": _summarize_stream_error(last_error),
-                    }) + '\n\n')
-                emitted = True
-            yield chunk
-        if not retried:
-            return  # candidate finished (success, or terminal error already sent)
-    # Every candidate failed pre-content — surface the last error.
-    if last_error:
-        yield last_error
+
+                event_data = {}
+                is_done = chunk.startswith("data: [DONE]")
+                if chunk.startswith("data: ") and not is_done:
+                    try:
+                        event_data = json.loads(chunk[6:])
+                    except Exception:
+                        pass
+
+                delta = event_data.get("delta")
+                event_type = event_data.get("type")
+                substantive = (
+                    isinstance(delta, str) and bool(delta.strip())
+                ) or (
+                    event_type == "tool_calls"
+                    and bool(event_data.get("calls"))
+                )
+
+                if substantive and not emitted:
+                    # First real output from a NON-primary candidate: tell the client
+                    # the selected model failed and another answered. Without this the
+                    # fallback is invisible — a misconfigured provider looks like it
+                    # works because the reply is shown under the originally selected
+                    # model's name (e.g. a Bedrock/Claude endpoint that 400s every
+                    # request but appears fine because another model silently answered).
+                    if i > 0:
+                        primary_reason = (
+                            failures[0]["reason"]
+                            if failures
+                            else _summarize_stream_error(last_error)
+                        )
+                        yield ('data: ' + json.dumps({
+                            "type": "fallback",
+                            "selected_model": primary_model,
+                            "answered_by": model,
+                            "selected_endpoint_id": primary_route.get("endpoint_id"),
+                            "selected_endpoint_label": primary_route.get("endpoint_label"),
+                            "selected_endpoint_cost_tracked": primary_route.get("endpoint_cost_tracked"),
+                            "answered_by_endpoint_id": route_descriptors[i].get("endpoint_id"),
+                            "answered_by_endpoint_label": route_descriptors[i].get("endpoint_label"),
+                            "answered_by_endpoint_cost_tracked": route_descriptors[i].get("endpoint_cost_tracked"),
+                            "candidate_index": i,
+                            "reason": primary_reason,
+                            "failures": [
+                                {
+                                    "candidate_index": failure["candidate_index"],
+                                    "model": failure["model"],
+                                    "status": failure["status"],
+                                }
+                                for failure in failures
+                            ],
+                        }) + '\n\n')
+                    # Metadata must not commit a candidate. Once real output arrives,
+                    # flush it after any fallback notice and before the output itself.
+                    for metadata_chunk in pending_metadata:
+                        yield metadata_chunk
+                    pending_metadata.clear()
+                    emitted = True
+
+                if substantive or emitted:
+                    yield chunk
+                elif not is_done:
+                    pending_metadata.append(chunk)
+        finally:
+            close_candidate = getattr(candidate_stream, "aclose", None)
+            if callable(close_candidate):
+                try:
+                    await close_candidate()
+                except Exception as close_error:
+                    logger.warning(
+                        "[fallback] failed to close candidate %s stream: %s",
+                        model,
+                        type(close_error).__name__,
+                    )
+
+        if emitted:
+            return
+        if retried:
+            continue
+        if not is_last and fallback_on_empty:
+            last_error = f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502})}\n\n'
+            failures.append({
+                "candidate_index": i,
+                "model": model,
+                "status": 502,
+                "reason": _summarize_stream_error(last_error),
+            })
+            tag = "primary" if i == 0 else "candidate"
+            logger.warning(f"[fallback] {tag} {model} returned no substantive output; trying next")
+            continue
+        if not is_last:
+            yield f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502})}\n\n'
+            return
+        yield f'event: error\ndata: {json.dumps({"error": "All model candidates returned no substantive output", "status": 502})}\n\n'
+        return

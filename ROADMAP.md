@@ -12,7 +12,6 @@ the codebase, you are probably right to stay away.
   and WSL all need coverage.
 
 - Integration audit: do integrations even work? Confirm what works, what needs setup docs, and what should be removed or hidden. 
-- Self-host troubleshooting cookbook. Document the weird 30-second fixes that otherwise become 30-minute searches: Dovecot cleartext auth for local stacks, ntfy Android Instant Delivery for non-ntfy.sh servers, clipboard limits on plain-HTTP Tailscale URLs, Radicale collection URLs, and similar traps.
 - Cookbook reliability on other computers. This is probably the area most likely to need work across different machines, GPUs, drivers, shells, and Python environments.
 - Cookbook SGLang support across platforms. Make sure SGLang setup/serve works
   predictably on Linux, Windows/WSL, macOS where possible, Docker, and common
@@ -33,6 +32,14 @@ the codebase, you are probably right to stay away.
   before the user request really starts. We need slimmer prompts, better tool
   selection, smaller default tool sets, and clearer guidance for models with
   4k/8k/16k context windows.
+- Local model speculative decoding support. For Odysseus-tuned local models,
+  plan to ship or recommend a small same-tokenizer draft model when the serving
+  backend supports it. Early vLLM testing showed a generic `Qwen3-0.6B` draft
+  beside `Qwen3-8B` can materially reduce wall time, while an unsupported
+  DSpark conversion performed poorly. Treat this as a supported draft-model lane
+  first; keep MTP-specific packaging as future work only when the architecture
+  and runtime support are real. Judge this by time-to-success, tool correctness,
+  grammar, and unchanged target output, not tokens/sec alone.
 - Skill/tool prompt-injection audit. User-editable skills, notes, documents,
   fetched pages, and memories should be treated as untrusted data. Keep testing
   whether models follow malicious instructions from those surfaces.

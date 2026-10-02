@@ -9,130 +9,56 @@ Extracted from agent_tools.py.
 
 import asyncio
 import collections
+import contextvars
 import json
 import logging
 import os
 import pathlib
 import re
+import stat
 import sys
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
-from src.tool_security import is_public_blocked_tool, owner_is_admin_or_single_user
+
+
+from src.tool_security import (
+    BUILTIN_EMAIL_TOOLS,
+    email_tool_policy_names,
+    is_public_blocked_tool,
+    owner_is_admin_or_single_user,
+)
+from src.tool_capabilities import ToolRunSecurityContext, blocked_tool_result
+from src.tool_approvals import ExactToolApproval
 from src.tool_policy import ToolPolicy
-from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
+from src.constants import (
+    MAX_OUTPUT_CHARS,
+    MAX_READ_CHARS,
+    MAX_DIFF_LINES,
+    AGENT_WORKSPACE_DIR,
+)
 from src.tool_utils import _truncate, get_mcp_manager
 
+
+class _MissingToolSecurityContext:
+    pass
+
+
+class _NoToolSecurityContext:
+    """Explicit sentinel for non-agent callers that have no run provenance."""
+
+
+_MISSING_TOOL_SECURITY_CONTEXT = _MissingToolSecurityContext()
+NO_TOOL_SECURITY_CONTEXT = _NoToolSecurityContext()
+
 # Persistent working directory for agent subprocesses.
-# Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
-# (/app/data) and the local data directory for manual installs.
-# Using this as cwd and HOME prevents the agent from silently creating files
-# in ephemeral container layers that are lost on the next rebuild.
-_AGENT_WORKDIR = DATA_DIR
+# Resolves to <repo_root>/data/agent_workspace, inside the bind-mounted volume
+# in Docker (/app/data), so files survive a rebuild as before. The subdirectory
+# rather than data/ itself keeps agent scratch files and dotfiles out of the
+# directory holding the session store and the auth database.
+_AGENT_WORKDIR = AGENT_WORKSPACE_DIR
 
 
-def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
-    """Build a unified diff of a file write for display in the chat.
-
-    Returns {"text": <unified diff>, "added": N, "removed": M, "new_file": bool}
-    or None when there's no textual change. Truncates very large diffs.
-    """
-    if old == new:
-        return None
-    import difflib
-
-    old_lines = old.splitlines()
-    new_lines = new.splitlines()
-    label = path or "file"
-    diff_lines = list(difflib.unified_diff(
-        old_lines, new_lines,
-        fromfile=f"a/{label}", tofile=f"b/{label}",
-        lineterm="",
-    ))
-    added = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
-    removed = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
-    truncated = False
-    if len(diff_lines) > MAX_DIFF_LINES:
-        diff_lines = diff_lines[:MAX_DIFF_LINES]
-        truncated = True
-    text = "\n".join(diff_lines)
-    if truncated:
-        text += f"\n… diff truncated at {MAX_DIFF_LINES} lines"
-    return {
-        "text": text,
-        "added": added,
-        "removed": removed,
-        "new_file": old == "",
-        "file": os.path.basename(path) or (path or "file"),
-    }
-
-
-async def _do_edit_file(content: str, workspace: Optional[str] = None) -> Dict[str, Any]:
-    """Exact string-replacement edit of an on-disk file.
-
-    content is JSON: {"path", "old_string", "new_string", "replace_all"?}.
-    Fails if old_string is missing or non-unique (unless replace_all) so the
-    model can't silently edit the wrong place. Returns a unified diff for the UI.
-    Confined to the workspace when one is set (same policy as write_file).
-    """
-    try:
-        args = json.loads(content) if content.strip().startswith("{") else {}
-    except (json.JSONDecodeError, TypeError):
-        args = {}
-    raw_path = (args.get("path") or "").strip()
-    old = args.get("old_string", "")
-    new = args.get("new_string", "")
-    replace_all = bool(args.get("replace_all", False))
-    if not raw_path:
-        return {"error": "edit_file: path required", "exit_code": 1}
-    # Confine to the workspace when set, else the same allowlist + sensitive-file
-    # policy as read/write_file.
-    try:
-        path = (_resolve_tool_path_in_workspace(workspace, raw_path)
-                if workspace else _resolve_tool_path(raw_path))
-    except ValueError as e:
-        return {"error": f"edit_file: {e}", "exit_code": 1}
-    if old == "":
-        return {"error": "edit_file: old_string required (use write_file to create a file)", "exit_code": 1}
-    if old == new:
-        return {"error": "edit_file: old_string and new_string are identical", "exit_code": 1}
-
-    def _apply():
-        with open(path, "r", encoding="utf-8") as f:
-            original = f.read()
-        count = original.count(old)
-        if count == 0:
-            return original, None, "not_found"
-        if count > 1 and not replace_all:
-            return original, None, f"not_unique:{count}"
-        updated = original.replace(old, new) if replace_all else original.replace(old, new, 1)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(updated)
-        return original, updated, "ok"
-
-    try:
-        original, updated, status = await asyncio.to_thread(_apply)
-    except FileNotFoundError:
-        return {"error": f"edit_file: {path}: not found (use write_file to create it)", "exit_code": 1}
-    except (IsADirectoryError, UnicodeDecodeError):
-        return {"error": f"edit_file: {path}: not an editable text file", "exit_code": 1}
-    except PermissionError:
-        return {"error": f"edit_file: {path}: permission denied", "exit_code": 1}
-    except OSError as e:
-        return {"error": f"edit_file: {path}: {e}", "exit_code": 1}
-
-    if status == "not_found":
-        return {"error": f"edit_file: old_string not found in {path}. Read the file and match it exactly.", "exit_code": 1}
-    if status.startswith("not_unique"):
-        n = status.split(":", 1)[1]
-        return {"error": f"edit_file: old_string is not unique in {path} ({n} matches). Add surrounding context or set replace_all=true.", "exit_code": 1}
-
-    n = original.count(old)
-    result = {"output": f"Edited {path} ({n} replacement{'s' if n != 1 else ''})", "exit_code": 0}
-    diff = _unified_diff(original, updated, path)
-    if diff:
-        result["diff"] = diff
-    return result
 
 # ---------------------------------------------------------------------------
 # Path confinement for read_file / write_file
@@ -146,10 +72,15 @@ async def _do_edit_file(content: str, workspace: Optional[str] = None) -> Dict[s
 #   1. Sensitive-subpath deny list — checked FIRST. Blocks .ssh,
 #      .gnupg, shell rc files, token/env files even if the root above
 #      them is on the allowlist.
-#   2. Allowlist — only the directories the agent legitimately needs
-#      (project data/, system tmp). $HOME is NOT on the default list.
-#   3. Opt-in extra roots — admin can add broader roots via the
-#      "tool_path_extra_roots" setting (list of path strings).
+#   2. Application-state deny (_is_app_state_path) - DATA_DIR holds the
+#      session store, auth database, app key and settings, so only
+#      _agent_readable_data_subdirs() is readable inside it.
+#   3. Allowlist - only the directories the agent legitimately needs
+#      (its data/ workspace, user content, system tmp). $HOME is NOT on
+#      the default list.
+#   4. Opt-in extra roots - admin can add broader roots via the
+#      "tool_path_extra_roots" setting. These cannot re-open DATA_DIR;
+#      rule 2 is independent of which root a path arrived through.
 # ---------------------------------------------------------------------------
 
 _SENSITIVE_BASENAMES: set[str] = {
@@ -165,25 +96,213 @@ _SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
     "known_hosts",
 )
 
+# Case-folded views used for matching. On a case-insensitive filesystem
+# (Windows, default macOS) ".SSH/AUTHORIZED_KEYS" and ".env" resolve to the
+# same protected files as their lowercase forms, so the deny-list has to fold
+# case before comparing — the sibling resolver already normcases paths for the
+# same reason. casefold (not os.path.normcase) because normcase is a no-op on
+# POSIX, which is exactly where the macOS read-exfil path lives.
+_SENSITIVE_BASENAMES_CF: frozenset[str] = frozenset(b.casefold() for b in _SENSITIVE_BASENAMES)
+_SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _SENSITIVE_FILE_PATTERNS)
+
 
 def _is_sensitive_path(resolved: str) -> bool:
     """Return True if *resolved* falls under a sensitive directory or
     matches a sensitive filename — regardless of what root it sits under.
+
+    Matching is case-insensitive: on Windows / default macOS a case-variant
+    name (``.SSH``, ``AUTHORIZED_KEYS``, ``Id_Rsa``) points at the same file as
+    the lowercase form, so a case-sensitive check would let it slip past the
+    deny-list in every file tool that relies on it.
     """
-    parts = resolved.split(os.sep)
-    filenames: set[str] = {parts[-1]} if parts else set()
+    parts = [p.casefold() for p in resolved.split(os.sep)]
+    filename = parts[-1] if parts else ""
 
     # Check if any path component is a sensitive directory.
     for part in parts:
-        if part in _SENSITIVE_BASENAMES:
+        if part in _SENSITIVE_BASENAMES_CF:
             return True
 
     # Check filename against known sensitive files.
-    for pat in _SENSITIVE_FILE_PATTERNS:
-        if pat in filenames:
-            return True
+    return filename in _SENSITIVE_FILE_PATTERNS_CF
 
+
+def _path_within(resolved: str, root: str) -> bool:
+    """True when *resolved* is *root* itself or sits underneath it.
+
+    Use the platform's path-case rules.  This helper participates in allow
+    decisions, so unconditional case-folding would let a distinct ``/DATA``
+    tree masquerade as a descendant of ``/data`` on case-sensitive systems.
+    """
+    resolved, root = os.path.normcase(resolved), os.path.normcase(root)
+    if resolved == root:
+        return True
+    try:
+        if os.path.commonpath([resolved, root]) == root:
+            return True
+    except ValueError:
+        return False
+    # normcase is intentionally conservative about assumptions (notably on
+    # POSIX), so consult the filesystem when paths exist.  This recognizes a
+    # case alias on a case-insensitive volume without treating distinct
+    # case-sensitive paths as the same allow root.
+    if os.path.exists(root):
+        candidate = resolved
+        while True:
+            try:
+                if os.path.exists(candidate) and os.path.samefile(candidate, root):
+                    return True
+            except OSError:
+                pass
+            parent = os.path.dirname(candidate)
+            if parent == candidate:
+                break
+            candidate = parent
     return False
+
+
+def _path_within_conservative(resolved: str, root: str) -> bool:
+    """Containment for deny decisions, folding case to fail closed."""
+    resolved, root = resolved.casefold(), root.casefold()
+    if resolved == root:
+        return True
+    try:
+        return os.path.commonpath([resolved, root]) == root
+    except ValueError:
+        return False
+
+
+def _agent_readable_data_subdirs() -> tuple[str, ...]:
+    """The only parts of DATA_DIR the agent's file tools may reach.
+
+    The agent's own scratch folder, plus the directories of user content whose
+    paths the application itself gives to the model, which it would then be
+    unable to open.  These normally live under DATA_DIR; the documented mail
+    attachment override may instead name a disjoint external directory:
+
+      UPLOAD_DIR            the chat upload manifest renders "path=<p>" and
+                            says to read it with read_file (agent_loop.py)
+      MAIL_ATTACHMENTS_DIR  download_attachment returns the path and its own
+                            description tells the model to read it
+      PERSONAL_DIR          GET /api/personal returns a path per file and is
+                            reachable through the app_api tool; RUNBOOK_DIR
+                            nests under it
+      PERSONAL_UPLOADS_DIR  indexed as a personal-docs directory, which
+                            manage_rag lists as an absolute path
+
+    Order matters: the first entry is roots[0], which _resolve_search_root uses
+    when grep/glob/ls are called with no path.
+    """
+    from src.constants import (
+        DATA_DIR,
+        MAIL_ATTACHMENTS_DIR,
+        PERSONAL_DIR,
+        PERSONAL_UPLOADS_DIR,
+        UPLOAD_DIR,
+    )
+    configured = (
+        (AGENT_WORKSPACE_DIR, "agent_workspace", False),
+        (UPLOAD_DIR, "uploads", False),
+        # This has a documented environment override and may legitimately
+        # live outside DATA_DIR, but it must never equal/contain DATA_DIR.
+        (MAIL_ATTACHMENTS_DIR, "mail-attachments", True),
+        (PERSONAL_DIR, "personal_docs", False),
+        (PERSONAL_UPLOADS_DIR, "personal_uploads", False),
+    )
+    configured_data_dir = os.path.abspath(os.path.expanduser(str(DATA_DIR)))
+    data_dir = os.path.realpath(configured_data_dir)
+    safe: list[str] = []
+    for raw, internal_name, external_ok in configured:
+        value = str(raw or "").strip()
+        # These paths are security-policy roots, not ordinary allowlist
+        # entries. Internal roles may inherit a relative DATA_DIR, but must
+        # still resolve to their exact canonical child below. External mail
+        # overrides require an absolute, disjoint directory.
+        if not value:
+            continue
+        expanded = os.path.abspath(os.path.expanduser(value))
+        # A policy root must not acquire an exemption by redirecting its final
+        # path component to protected state or to an unrelated external tree.
+        if os.path.islink(expanded):
+            continue
+        resolved = os.path.realpath(expanded)
+        if os.path.exists(resolved) and not os.path.isdir(resolved):
+            continue
+        expected_internal = os.path.join(data_dir, internal_name)
+        expected_configured = os.path.join(configured_data_dir, internal_name)
+        inside_data = (
+            os.path.normcase(expanded)
+            in {
+                os.path.normcase(expected_configured),
+                os.path.normcase(expected_internal),
+            }
+            and resolved == expected_internal
+        )
+        external_safe = (
+            external_ok
+            and os.path.isabs(os.path.expanduser(value))
+            and resolved != data_dir
+            and os.path.dirname(resolved) != resolved
+            and not _path_within(data_dir, resolved)
+            and not _path_within(resolved, data_dir)
+        )
+        if not (inside_data or external_safe) or _is_sensitive_path(resolved):
+            continue
+        safe.append(resolved)
+    return tuple(safe)
+
+
+def _is_app_state_path(resolved: str) -> bool:
+    """True for anything under DATA_DIR that is not agent-readable.
+
+    DATA_DIR holds the session store, the auth database, the app encryption key
+    and the settings file. A model-supplied path must not reach those through
+    any root, so this is checked in both resolvers rather than expressed as an
+    absence from the allowlist: a workspace bound at or above the data
+    directory, or an opt-in tool_path_extra_roots entry covering it, would
+    otherwise put them back in reach.
+
+    A containment rule rather than a filename deny list, so state files added
+    later are covered without anyone remembering to list them, and so a user's
+    own settings.json or app.db inside a real workspace is not caught.
+    """
+    from src.constants import DATA_DIR
+    if not _path_within_conservative(resolved, os.path.realpath(DATA_DIR)):
+        return False
+    return not any(
+        _path_within(resolved, d)
+        for d in _agent_readable_data_subdirs()
+    )
+
+
+def _is_hardlinked_regular_file(resolved: str) -> bool:
+    """Reject inode aliases that can smuggle DATA_DIR state into an allow root."""
+    try:
+        target = os.stat(resolved, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(target.st_mode) and getattr(target, "st_nlink", 1) > 1
+
+
+def _is_denied_tool_path(resolved: str) -> bool:
+    """Apply every path deny to a canonical traversal result."""
+    return (
+        _is_sensitive_path(resolved)
+        or _is_app_state_path(resolved)
+        or _is_hardlinked_regular_file(resolved)
+    )
+
+
+def _can_traverse_tool_path(resolved: str) -> bool:
+    """Allow walking a denied state parent only to reach safe carve-outs."""
+    if _is_sensitive_path(resolved):
+        return False
+    if not _is_app_state_path(resolved):
+        return True
+    return any(
+        _path_within(readable, resolved)
+        for readable in _agent_readable_data_subdirs()
+    )
 
 
 def _tool_path_roots() -> list[str]:
@@ -193,9 +312,9 @@ def _tool_path_roots() -> list[str]:
     """
     roots: list[str] = []
 
-    # Project data directory — the agent's primary workspace.
-    from src.constants import DATA_DIR
-    roots.append(DATA_DIR)
+    # The agent's workspace plus the user-content directories inside data/.
+    # The rest of DATA_DIR is denied by _is_app_state_path.
+    roots.extend(_agent_readable_data_subdirs())
 
     # /tmp (and its macOS realpath /private/tmp).
     roots.append("/tmp")
@@ -246,7 +365,13 @@ def _resolve_tool_path(raw_path: str) -> str:
 
     Returns the realpath on success. Raises ValueError on rejection.
     Symlinks are resolved before comparison.
+
+    When a workspace is active for this turn, paths are confined to it instead
+    of the default allowlist (see _resolve_tool_path_in_workspace).
     """
+    ws = get_active_workspace()
+    if ws:
+        return _resolve_tool_path_in_workspace(ws, raw_path)
     if raw_path is None or not str(raw_path).strip():
         raise ValueError("path is required")
     expanded = os.path.expanduser(str(raw_path).strip())
@@ -257,6 +382,12 @@ def _resolve_tool_path(raw_path: str) -> str:
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
+    if _is_app_state_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is inside the application state directory"
+        )
+    if _is_hardlinked_regular_file(resolved):
+        raise ValueError(f"path '{raw_path}' is a hard-linked file")
 
     for root in _tool_path_roots():
         if resolved == root:
@@ -292,6 +423,12 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
+    if _is_app_state_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is inside the application state directory"
+        )
+    if _is_hardlinked_regular_file(resolved):
+        raise ValueError(f"path '{raw_path}' is a hard-linked file")
     if resolved != base:
         # normcase so containment holds on case-insensitive filesystems
         # (Windows, default macOS): it lowercases on Windows and is a no-op on
@@ -305,172 +442,99 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
             raise ValueError(f"path '{raw_path}' is outside the workspace ({workspace})")
     return resolved
 
-# Bash + python tools used to share a single 60s timeout. That's
-# enough for one-shot commands but starves real workloads (pip
-# install, ffmpeg conversions, etc.) — and worse, the agent saw the
-# 60s timeout and went silent because it had nothing to report.
-# The new default is intentionally generous: long enough that real
-# work isn't killed mid-flight, but bounded so a runaway process
-# (infinite loop, hung connect, etc.) eventually frees the worker.
-# The user can cancel sooner via the chat stop button — when the
-# SSE stream is torn down, the asyncio task running the subprocess
-# gets cancelled and the subprocess is killed by the finally block.
-DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
-DEFAULT_PYTHON_TIMEOUT = 60 * 60
-
-# How often to push a progress event while a long-running subprocess
-# is still in flight. The frontend cares about "alive" more than
-# "every-byte" — 2s is the sweet spot.
-PROGRESS_INTERVAL_S = 2.0
-# Tail buffer size — we keep the most recent N lines of stdout +
-# stderr so the progress event includes a "what's it doing right now"
-# snippet without dragging the whole output along.
-PROGRESS_TAIL_LINES = 12
-
-# Directories ignored by the code-nav tools' Python fallbacks so results aren't
-# polluted by VCS internals / dependency trees / build caches. ripgrep already
-# honours .gitignore; this is the parity floor for the no-rg path (and the
-# explicit excludes passed to rg so it skips them even without a .gitignore).
-_CODENAV_SKIP_DIRS = frozenset({
-    ".git", ".hg", ".svn", "node_modules", "venv", ".venv", "__pycache__",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build",
-    ".next", ".cache", "site-packages", ".idea", ".tox",
-})
-# Per-tool result caps (keep tool output cheap + model-friendly).
-_CODENAV_MAX_HITS = 200
-_CODENAV_MAX_LINE = 400
 
 
-def _resolve_search_root(raw_path: str, workspace: Optional[str] = None) -> str:
+# ---------------------------------------------------------------------------
+# Active workspace (per-turn, context-local)
+# ---------------------------------------------------------------------------
+# Set ONCE in execute_tool_block from the request's `workspace`. The path
+# resolvers (_resolve_tool_path / _resolve_search_root) and the subprocess cwd
+# helper (agent_cwd) read it from here, so confinement is enforced in a single
+# place: any tool that resolves paths through these helpers is confined
+# automatically and cannot accidentally bypass the workspace. contextvars are
+# task-local, so concurrent turns don't leak into each other.
+_active_workspace: contextvars.ContextVar = contextvars.ContextVar(
+    "agent_active_workspace", default=None
+)
+
+
+def get_active_workspace() -> Optional[str]:
+    """The folder the agent is confined to this turn, or None."""
+    return _active_workspace.get()
+
+
+def vet_workspace(raw: str) -> Optional[str]:
+    """Validate a requested workspace path at bind time.
+
+    Returns the canonical path, or None when it is unusable: not a real
+    directory, or itself a sensitive path (.ssh, .gnupg, ...). The in-workspace
+    resolver deny-lists sensitive paths *inside* the workspace, but the
+    empty-path search root is the workspace itself, so the root has to be
+    vetted before it is ever bound.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    resolved = os.path.realpath(os.path.expanduser(raw))
+    if not os.path.isdir(resolved) or _is_sensitive_path(resolved):
+        return None
+    # Refuse the bind rather than binding a workspace where every subsequent
+    # tool call would fail on the same deny list.
+    if _is_app_state_path(resolved):
+        return None
+    # Reject filesystem roots: binding / (or a Windows drive/UNC root) as the
+    # workspace would make every absolute path "inside" it, collapsing the
+    # confinement into host-wide file access. A root is its own dirname, which
+    # also covers C:\ and \\server\share without platform-specific lists.
+    if os.path.dirname(resolved) == resolved:
+        return None
+    return resolved
+
+
+def agent_cwd() -> str:
+    """Working directory for agent subprocesses (bash/python/background jobs):
+    the active workspace when set, else the persistent data dir."""
+    workspace = get_active_workspace()
+    if workspace:
+        return workspace
+    resolved = os.path.realpath(_AGENT_WORKDIR)
+    if resolved not in _agent_readable_data_subdirs():
+        raise RuntimeError("agent workspace is not a safe real directory")
+    return resolved
+
+
+def get_mcp_manager():
+    from src import agent_tools
+    return agent_tools.get_mcp_manager()
+
+
+
+
+def _resolve_search_root(raw_path: str) -> str:
     """Resolve + confine a code-nav path (grep/glob/ls).
 
-    With a workspace set, the workspace folder is the root and supplied paths are
-    confined inside it (same policy as read_file). Without one, an empty path
-    defaults to the agent's primary root (project data dir) and a supplied path
+    With a workspace active, the workspace folder is the root and a supplied
+    path is confined inside it. Otherwise an empty path defaults to the agent's
+    primary root (its workspace under the project data dir) and a supplied path
     is confined by the global allowlist + sensitive-file policy.
     """
     raw = (raw_path or "").strip()
-    if workspace:
-        if not raw:
-            return os.path.realpath(workspace)
-        return _resolve_tool_path_in_workspace(workspace, raw)
+    ws = get_active_workspace()
+    if ws:
+        # Resolve the empty case as the workspace path rather than returning
+        # it directly: returned unchecked it skipped both deny lists, so a
+        # bare ls listed whatever the workspace was bound to.
+        return _resolve_tool_path_in_workspace(ws, raw or ws)
     if not raw:
         roots = _tool_path_roots()
-        return roots[0] if roots else os.path.realpath(".")
+        default_root = os.path.realpath(AGENT_WORKSPACE_DIR)
+        if default_root in roots and not _is_denied_tool_path(default_root):
+            return default_root
+        raise ValueError("default agent workspace is not a safe readable data subdirectory")
     return _resolve_tool_path(raw)
 
 logger = logging.getLogger(__name__)
 
-
-async def _run_subprocess_streaming(
-    proc: asyncio.subprocess.Process,
-    *,
-    timeout: float,
-    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
-) -> Tuple[str, str, Optional[int], bool]:
-    """Run a subprocess to completion, streaming progress.
-
-    Reads stdout + stderr line-by-line into ring buffers so a
-    periodic progress callback can emit a "tail" of recent output
-    without waiting for the full result. Returns
-    (full_stdout, full_stderr, return_code, timed_out).
-
-    `timed_out=True` means the process was killed because it ran
-    past `timeout` seconds. Whatever output we'd buffered up to
-    that point is still returned.
-    """
-    started = time.time()
-    stdout_full: list[str] = []
-    stderr_full: list[str] = []
-    tail = collections.deque(maxlen=PROGRESS_TAIL_LINES)
-
-    async def _reader(stream, full_buf, label: str):
-        if stream is None:
-            return
-        while True:
-            line = await stream.readline()
-            if not line:
-                break
-            decoded = line.decode("utf-8", errors="replace").rstrip("\n")
-            full_buf.append(decoded)
-            if label == "err":
-                tail.append(f"! {decoded}")
-            else:
-                tail.append(decoded)
-
-    async def _progress_emitter():
-        # Skip the first push — many commands finish well under
-        # PROGRESS_INTERVAL_S and a 0-second "progress" event would
-        # just add UI churn.
-        await asyncio.sleep(PROGRESS_INTERVAL_S)
-        while True:
-            if progress_cb:
-                try:
-                    await progress_cb({
-                        "elapsed_s": round(time.time() - started, 1),
-                        "tail": "\n".join(list(tail)),
-                    })
-                except Exception:
-                    # Progress is best-effort — never let a UI hiccup
-                    # break the underlying subprocess.
-                    pass
-            await asyncio.sleep(PROGRESS_INTERVAL_S)
-
-    rd_out = asyncio.create_task(_reader(proc.stdout, stdout_full, "out"))
-    rd_err = asyncio.create_task(_reader(proc.stderr, stderr_full, "err"))
-    prog_task = asyncio.create_task(_progress_emitter()) if progress_cb else None
-
-    timed_out = False
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        timed_out = True
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2)
-        except Exception:
-            pass
-    except asyncio.CancelledError:
-        # User hit stop / SSE stream torn down. Kill the child so it
-        # doesn't keep running orphaned. Re-raise so the agent loop's
-        # cancellation propagates as the user expects.
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2)
-        except Exception:
-            pass
-        # Best-effort: stop the readers + emitter before re-raising.
-        for t in (rd_out, rd_err):
-            t.cancel()
-        if prog_task is not None:
-            prog_task.cancel()
-        raise
-    finally:
-        if prog_task is not None and not prog_task.done():
-            prog_task.cancel()
-            try:
-                await prog_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        # Wait for readers to finish draining the pipes.
-        for t in (rd_out, rd_err):
-            try:
-                await asyncio.wait_for(t, timeout=1)
-            except Exception:
-                pass
-
-    return (
-        "\n".join(stdout_full),
-        "\n".join(stderr_full),
-        proc.returncode,
-        timed_out,
-    )
 
 _ADMIN_TOOLS = {
     "app_api",
@@ -505,6 +569,24 @@ _MCP_TOOL_MAP = {
     "web_fetch":      ("web_fetch",  "web_fetch"),
     "generate_image": ("image_gen",  "generate_image"),
 }
+_EMAIL_MCP_OWNER_ARG = "_odysseus_owner"
+
+
+def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[str]]:
+    raw = (content or "").strip()
+    if not raw:
+        return {}, None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        if tool.startswith("mcp__email__"):
+            return {}, "Email MCP tool arguments must be a JSON object."
+        return {}, None
+    if not isinstance(parsed, dict):
+        if tool.startswith("mcp__email__"):
+            return {}, "Email MCP tool arguments must be a JSON object."
+        return {}, None
+    return parsed, None
 
 
 def _parse_generate_image(content: str) -> Dict:
@@ -554,8 +636,42 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
 }
 
 
+# Primary argument key(s) for the legacy line-parsed tools. When a fenced
+# block's content is a JSON object carrying one of these keys, it's structured
+# inline args (the relaxed parser's ```web_search {"query": "..."}``` shape) —
+# use the object directly instead of letting the line-based parsers wrap the
+# whole JSON string as the query/url/path/prompt. Keyed off membership only
+# (the primary key never changes), so this can't drift; an unrecognized object
+# safely falls through to the line-based parser, i.e. the previous behavior.
+#
+# IMPORTANT — this only covers the MCP path. _build_mcp_args is reached via
+# _call_mcp_tool only for _MCP_TOOL_MAP tools (so an entry outside that map is
+# dead, as manage_memory was). And of these, only generate_image has a live MCP
+# server today; web_search/web_fetch/read_file/write_file have none, so they run
+# via _direct_fallback -> TOOL_HANDLERS, whose handlers decode JSON themselves
+# (see ReadFileTool/WriteFileTool/WebSearchTool/WebFetchTool). The entries here
+# are kept as defense-in-depth for if/when those servers are added. The live
+# fix for each server-less tool lives in its handler. test_write_file_inline_
+# json_args and test_mcp_json_primary_keys_are_all_live pin both halves.
+_MCP_JSON_PRIMARY_KEYS: Dict[str, tuple] = {
+    "web_search":     ("query", "queries"),
+    "web_fetch":      ("url",),
+    "read_file":      ("path",),
+    "write_file":     ("path",),
+    "generate_image": ("prompt",),
+}
+
+
 def _build_mcp_args(tool: str, content: str) -> Dict:
     """Convert fenced-block text content to structured MCP arguments."""
+    primaries = _MCP_JSON_PRIMARY_KEYS.get(tool)
+    if primaries and content.strip().startswith("{"):
+        try:
+            decoded = json.loads(content.strip())
+        except (json.JSONDecodeError, TypeError):
+            decoded = None
+        if isinstance(decoded, dict) and any(k in decoded for k in primaries):
+            return decoded
     parser = _MCP_ARG_PARSERS.get(tool)
     return parser(content) if parser else {}
 
@@ -564,12 +680,11 @@ async def _call_mcp_tool(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
-    workspace: Optional[str] = None,
 ) -> Dict:
     """Route a legacy tool call through the MCP manager, with direct fallbacks."""
     mcp = get_mcp_manager()
     if not mcp:
-        return await _direct_fallback(tool, content, progress_cb=progress_cb, workspace=workspace) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
+        return await _direct_fallback(tool, content, progress_cb=progress_cb) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
 
     server_id, tool_name = _MCP_TOOL_MAP[tool]
     qualified = f"mcp__{server_id}__{tool_name}"
@@ -578,7 +693,7 @@ async def _call_mcp_tool(
 
     # If MCP server not connected, try direct fallback
     if isinstance(result, dict) and result.get("exit_code") == 1 and "not connected" in result.get("error", ""):
-        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb, workspace=workspace)
+        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb)
         if fallback:
             return fallback
 
@@ -636,25 +751,9 @@ async def _direct_fallback(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
-    workspace: Optional[str] = None,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> Optional[Dict]:
-    """In-process execution path for the eight tools that used to live as
-    stdio MCP servers under mcp_servers/. Those servers were deleted in
-    favor of native execution; this function is now the canonical path,
-    not a fallback. The name is kept for backwards compat with callers.
-
-    `progress_cb` is called periodically while bash/python subprocesses
-    are still running, with `{elapsed_s, tail}` payloads. Other tools
-    ignore it.
-    """
-    # Inherit env + force a sane terminal so subprocesses that touch
-    # terminfo (anything calling `clear`, `tput`, `os.system("clear")`,
-    # or scripts that probe $TERM) don't spam "TERM environment variable
-    # not set" errors. The agent's bash/python tool calls run with PIPE
-    # stdin/stdout (no real TTY), so curses/termios still won't work —
-    # but at least non-interactive code with incidental TERM lookups
-    # stops failing. COLUMNS/LINES give terminal-width-aware tools (less,
-    # rich, etc.) reasonable defaults instead of 0×0.
     _subproc_env = {
         **os.environ,
         "TERM": "xterm-256color",
@@ -664,449 +763,43 @@ async def _direct_fallback(
     }
 
     try:
-        if tool == "bash":
-            proc = await asyncio.create_subprocess_shell(
-                content,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_subproc_env,
-                cwd=workspace or _AGENT_WORKDIR,
-            )
-            stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
-                proc,
-                timeout=DEFAULT_BASH_TIMEOUT,
-                progress_cb=progress_cb,
-            )
-            if timed_out:
-                return {"error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
-            output = stdout.rstrip()
-            err = stderr.rstrip()
-            if err:
-                output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
-            output = _truncate(output, MAX_OUTPUT_CHARS)
-            return {"output": output or "(no output)", "exit_code": rc or 0}
+        ctx = {
+            "progress_cb": progress_cb,
+            "subproc_env": _subproc_env,
+            "session_id": session_id,
+            "owner": owner,
+        }
 
-        if tool == "python":
-            # Run user code in a subprocess so an infinite loop or crash
-            # can't take the whole server down. -I = isolated mode (skip
-            # user site, no PYTHONPATH inheritance) for hygiene.
-            proc = await asyncio.create_subprocess_exec(
-                # Use the running interpreter — there is no `python3.exe` on
-                # Windows, which made the agent's `python` tool fail there.
-                (sys.executable or "python"), "-I", "-c", content,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_subproc_env,
-                cwd=workspace or _AGENT_WORKDIR,
-            )
-            stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
-                proc,
-                timeout=DEFAULT_PYTHON_TIMEOUT,
-                progress_cb=progress_cb,
-            )
-            if timed_out:
-                return {"error": f"python: timed out after {DEFAULT_PYTHON_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
-            output = stdout.rstrip()
-            err = stderr.rstrip()
-            if err:
-                output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
-            output = _truncate(output, MAX_OUTPUT_CHARS)
-            return {"output": output or "(no output)", "exit_code": rc or 0}
+        from src.agent_tools import TOOL_HANDLERS
+        if tool in TOOL_HANDLERS:
+            return await TOOL_HANDLERS[tool](content, ctx)
 
-        if tool == "read_file":
-            # Args: plain path on line 1 (back-compat) OR JSON
-            # {path, offset?, limit?} where offset/limit are a 1-based line range.
-            raw_path, offset, limit = content.split("\n", 1)[0].strip(), 0, 0
-            _stripped = content.strip()
-            if _stripped.startswith("{"):
-                try:
-                    _a = json.loads(_stripped)
-                    raw_path = str(_a.get("path", "")).strip()
-                    offset = int(_a.get("offset") or 0)
-                    limit = int(_a.get("limit") or 0)
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    pass
-            try:
-                path = (_resolve_tool_path_in_workspace(workspace, raw_path)
-                        if workspace else _resolve_tool_path(raw_path))
-            except ValueError as e:
-                return {"error": f"read_file: {e}", "exit_code": 1}
-            try:
-                # Run blocking read in a thread to keep the loop responsive.
-                def _read():
-                    if offset > 0 or limit > 0:
-                        # Line-range read: slice [offset, offset+limit).
-                        start = max(offset, 1)
-                        out, n, budget = [], 0, MAX_READ_CHARS
-                        with open(path, "r", encoding="utf-8", errors="replace") as f:
-                            for i, line in enumerate(f, 1):
-                                if i < start:
-                                    continue
-                                if limit > 0 and n >= limit:
-                                    break
-                                out.append(line)
-                                n += 1
-                                budget -= len(line)
-                                if budget <= 0:
-                                    out.append(f"\n... [truncated at {MAX_READ_CHARS} chars]")
-                                    break
-                        return "".join(out)
-                    with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        return f.read(MAX_READ_CHARS + 1)
-                data = await asyncio.to_thread(_read)
-            except FileNotFoundError:
-                return {"error": f"read_file: {path}: not found", "exit_code": 1}
-            except PermissionError:
-                return {"error": f"read_file: {path}: permission denied", "exit_code": 1}
-            except IsADirectoryError:
-                return {"error": f"read_file: {path}: is a directory (use ls)", "exit_code": 1}
-            except OSError as e:
-                return {"error": f"read_file: {path}: {e}", "exit_code": 1}
-            if not (offset > 0 or limit > 0) and len(data) > MAX_READ_CHARS:
-                data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
-            return {"output": data, "exit_code": 0}
-
-        if tool == "write_file":
-            lines = content.split("\n", 1)
-            raw_path = lines[0].strip()
-            body = lines[1] if len(lines) > 1 else ""
-            try:
-                path = (_resolve_tool_path_in_workspace(workspace, raw_path)
-                        if workspace else _resolve_tool_path(raw_path))
-            except ValueError as e:
-                return {"error": f"write_file: {e}", "exit_code": 1}
-            try:
-                def _write():
-                    # Capture prior content (best-effort, text) so we can show a
-                    # before/after diff. Missing/binary file → treat as empty.
-                    old = ""
-                    try:
-                        with open(path, "r", encoding="utf-8") as f:
-                            old = f.read()
-                    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, OSError):
-                        old = ""
-                    d = os.path.dirname(path)
-                    if d:
-                        os.makedirs(d, exist_ok=True)
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(body)
-                    return old, len(body)
-                old_content, size = await asyncio.to_thread(_write)
-            except PermissionError:
-                return {"error": f"write_file: {path}: permission denied", "exit_code": 1}
-            except OSError as e:
-                return {"error": f"write_file: {path}: {e}", "exit_code": 1}
-            diff = _unified_diff(old_content, body, path)
-            result = {"output": f"Wrote {size} bytes to {path}", "exit_code": 0}
-            if diff:
-                result["diff"] = diff
-            return result
-
-        if tool == "grep":
-            # Args (JSON): {pattern, path?, glob?, ignore_case?, max_results?}.
-            # Bare string → treated as the pattern.
-            args: Dict[str, Any] = {}
-            _s = (content or "").strip()
-            if _s.startswith("{"):
-                try:
-                    args = json.loads(_s)
-                except json.JSONDecodeError:
-                    args = {}
-            else:
-                args = {"pattern": _s}
-            pattern = str(args.get("pattern", "")).strip()
-            if not pattern:
-                return {"error": "grep: pattern is required", "exit_code": 1}
-            ignore_case = bool(args.get("ignore_case"))
-            glob_pat = str(args.get("glob", "") or "").strip()
-            try:
-                max_hits = int(args.get("max_results") or _CODENAV_MAX_HITS)
-            except (TypeError, ValueError):
-                max_hits = _CODENAV_MAX_HITS
-            max_hits = max(1, min(max_hits, _CODENAV_MAX_HITS))
-            try:
-                root = _resolve_search_root(str(args.get("path", "")), workspace)
-            except ValueError as e:
-                return {"error": f"grep: {e}", "exit_code": 1}
-
-            def _grep():
-                import re as _re
-                import shutil
-                rg = shutil.which("rg")
-                if rg:
-                    cmd = [rg, "--line-number", "--no-heading", "--color=never",
-                           "--max-count", str(max_hits)]
-                    if ignore_case:
-                        cmd.append("--ignore-case")
-                    if glob_pat:
-                        cmd += ["--glob", glob_pat]
-                    # Exclude junk dirs even when the tree has no .gitignore, so
-                    # results match the Python fallback's skip set.
-                    for _d in _CODENAV_SKIP_DIRS:
-                        cmd += ["--glob", f"!**/{_d}/**"]
-                    cmd += ["--regexp", pattern, root]
-                    try:
-                        import subprocess
-                        p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-                        lines = [ln for ln in (p.stdout or "").splitlines() if ln][:max_hits]
-                        return lines, None
-                    except subprocess.TimeoutExpired:
-                        return None, "grep: timed out"
-                    except Exception as _e:
-                        return None, f"grep: {_e}"
-                # Python fallback (no ripgrep): walk + regex.
-                try:
-                    rx = _re.compile(pattern, _re.IGNORECASE if ignore_case else 0)
-                except _re.error as _e:
-                    return None, f"grep: bad pattern: {_e}"
-                import fnmatch
-                hits = []
-                if os.path.isfile(root):
-                    file_iter = [root]
-                else:
-                    file_iter = []
-                    for dp, dns, fns in os.walk(root):
-                        dns[:] = [d for d in dns if d not in _CODENAV_SKIP_DIRS]
-                        for fn in fns:
-                            if glob_pat and not fnmatch.fnmatch(fn, glob_pat):
-                                continue
-                            file_iter.append(os.path.join(dp, fn))
-                for fp in file_iter:
-                    if len(hits) >= max_hits:
-                        break
-                    try:
-                        with open(fp, "r", encoding="utf-8", errors="strict") as f:
-                            for i, line in enumerate(f, 1):
-                                if rx.search(line):
-                                    hits.append(f"{fp}:{i}:{line.rstrip()[:_CODENAV_MAX_LINE]}")
-                                    if len(hits) >= max_hits:
-                                        break
-                    except (UnicodeDecodeError, OSError):
-                        continue  # skip binary / unreadable
-                return hits, None
-
-            lines, err = await asyncio.to_thread(_grep)
-            if err:
-                return {"error": err, "exit_code": 1}
-            if not lines:
-                return {"output": f"No matches for {pattern!r} under {root}", "exit_code": 0}
-            out = "\n".join(ln[:_CODENAV_MAX_LINE] for ln in lines)
-            if len(lines) >= max_hits:
-                out += f"\n... [capped at {max_hits} matches]"
-            return {"output": _truncate(out), "exit_code": 0}
-
-        if tool == "glob":
-            args = {}
-            _s = (content or "").strip()
-            if _s.startswith("{"):
-                try:
-                    args = json.loads(_s)
-                except json.JSONDecodeError:
-                    args = {}
-            else:
-                args = {"pattern": _s}
-            pattern = str(args.get("pattern", "")).strip()
-            if not pattern:
-                return {"error": "glob: pattern is required", "exit_code": 1}
-            try:
-                root = _resolve_search_root(str(args.get("path", "")), workspace)
-            except ValueError as e:
-                return {"error": f"glob: {e}", "exit_code": 1}
-
-            def _glob():
-                from pathlib import Path
-                base = Path(root)
-                if not base.is_dir():
-                    return None, f"glob: {root}: not a directory"
-                matched = []
-                try:
-                    for p in base.rglob(pattern):
-                        if set(p.relative_to(base).parts) & _CODENAV_SKIP_DIRS:
-                            continue
-                        try:
-                            mtime = p.stat().st_mtime
-                        except OSError:
-                            mtime = 0
-                        matched.append((mtime, str(p)))
-                        if len(matched) > _CODENAV_MAX_HITS * 5:
-                            break
-                except (OSError, ValueError) as _e:
-                    return None, f"glob: {_e}"
-                matched.sort(key=lambda t: t[0], reverse=True)  # newest first
-                return [pth for _, pth in matched[:_CODENAV_MAX_HITS]], None
-
-            paths, err = await asyncio.to_thread(_glob)
-            if err:
-                return {"error": err, "exit_code": 1}
-            if not paths:
-                return {"output": f"No files matching {pattern!r} under {root}", "exit_code": 0}
-            out = "\n".join(paths)
-            if len(paths) >= _CODENAV_MAX_HITS:
-                out += f"\n... [capped at {_CODENAV_MAX_HITS} files]"
-            return {"output": _truncate(out), "exit_code": 0}
-
-        if tool == "ls":
-            raw_path = ""
-            _s = (content or "").strip()
-            if _s.startswith("{"):
-                try:
-                    raw_path = str(json.loads(_s).get("path", "")).strip()
-                except json.JSONDecodeError:
-                    raw_path = ""
-            else:
-                raw_path = _s.split("\n", 1)[0].strip()
-            try:
-                root = _resolve_search_root(raw_path, workspace)
-            except ValueError as e:
-                return {"error": f"ls: {e}", "exit_code": 1}
-
-            def _ls():
-                if not os.path.isdir(root):
-                    return None, f"ls: {root}: not a directory"
-                rows = []
-                try:
-                    with os.scandir(root) as it:
-                        for entry in it:
-                            if entry.name.startswith("."):
-                                continue
-                            try:
-                                is_dir = entry.is_dir(follow_symlinks=False)
-                                size = entry.stat(follow_symlinks=False).st_size if not is_dir else 0
-                            except OSError:
-                                continue
-                            rows.append((is_dir, entry.name, size))
-                except (PermissionError, OSError) as _e:
-                    return None, f"ls: {_e}"
-                rows.sort(key=lambda r: (not r[0], r[1].lower()))  # dirs first, then name
-                lines = [f"{root}:"]
-                for is_dir, name, size in rows[:_CODENAV_MAX_HITS]:
-                    lines.append(f"  {name}/" if is_dir else f"  {name}  ({size} B)")
-                if len(rows) > _CODENAV_MAX_HITS:
-                    lines.append(f"  ... [{len(rows) - _CODENAV_MAX_HITS} more]")
-                if not rows:
-                    lines.append("  (empty)")
-                return "\n".join(lines), None
-
-            out, err = await asyncio.to_thread(_ls)
-            if err:
-                return {"error": err, "exit_code": 1}
-            return {"output": _truncate(out), "exit_code": 0}
-
-        if tool == "web_search":
-            from src.search import comprehensive_web_search
-            raw = content.strip()
-            query = raw
-            time_filter = None
-            max_pages = 5
-            # Allow JSON-shaped args: {"query": "...", "time_filter": "day", "max_pages": 7}
-            if raw.startswith("{"):
-                try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, dict) and "query" in parsed:
-                        query = str(parsed.get("query", "")).strip()
-                        tf = parsed.get("time_filter") or parsed.get("freshness")
-                        if isinstance(tf, str) and tf.lower() in ("day", "week", "month", "year"):
-                            time_filter = tf.lower()
-                        mp = parsed.get("max_pages")
-                        if isinstance(mp, int) and 1 <= mp <= 10:
-                            max_pages = mp
-                except json.JSONDecodeError:
-                    pass
-            if not query:
-                query = raw.split("\n")[0].strip()
-            # Auto-detect freshness from query phrasing when not explicit
-            if time_filter is None:
-                q_lc = query.lower()
-                if any(kw in q_lc for kw in ("today", "latest", "breaking", "this morning", "right now", "currently")):
-                    time_filter = "day"
-                elif any(kw in q_lc for kw in ("this week", "past week", "recent news", "last few days")):
-                    time_filter = "week"
-                elif any(kw in q_lc for kw in ("this month", "past month")):
-                    time_filter = "month"
-                elif " news" in q_lc or q_lc.startswith("news ") or q_lc.endswith(" news"):
-                    time_filter = "week"
-            loop = asyncio.get_running_loop()
-            text, sources = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: comprehensive_web_search(
-                        query,
-                        max_pages=max_pages,
-                        time_filter=time_filter,
-                        return_sources=True,
-                    ),
-                ),
-                timeout=30,
-            )
-            output = text[:MAX_OUTPUT_CHARS] if len(text) > MAX_OUTPUT_CHARS else text
-            if sources:
-                output += "\n\n<!-- SOURCES:" + json.dumps(sources) + " -->"
-            return {"output": output, "exit_code": 0}
-
-        if tool == "web_fetch":
-            # Lightweight single-URL fetch. Wraps the SSRF-safe fetcher used
-            # by deep research, so private/loopback/metadata addresses are
-            # already blocked there.
-            from src.search.content import fetch_webpage_content
-            raw = content.strip()
-            url = ""
-            # Accept either a JSON arg ({"url": "..."}) or a plain URL/domain.
-            if raw.startswith("{"):
-                try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, dict):
-                        url = str(parsed.get("url") or "").strip()
-                except json.JSONDecodeError:
-                    url = ""
-            if not url:
-                # Non-JSON (or JSON without a usable url): take the first line
-                # only, so a URL followed by commentary still parses.
-                url = raw.split("\n")[0].strip()
-            # Reject anything that isn't a single bare URL/domain token.
-            if not url or url.startswith("{") or any(c in url for c in (" ", "\t", "\n")):
-                return {"error": "web_fetch: provide a single URL or domain, e.g. example.com", "exit_code": 1}
-            low = url.lower()
-            if "://" in low and not low.startswith(("http://", "https://")):
-                return {"error": f"web_fetch: unsupported URL scheme (only http/https): {url[:80]}", "exit_code": 1}
-            # Accept bare domains like "example.com" by defaulting to https.
-            if not low.startswith(("http://", "https://")):
-                url = "https://" + url
-            loop = asyncio.get_running_loop()
-            try:
-                result = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: fetch_webpage_content(url, timeout=10)),
-                    timeout=30,
-                )
-            except asyncio.TimeoutError:
-                return {"error": f"web_fetch: timed out fetching {url}", "exit_code": 1}
-            except Exception as e:
-                # Direct URL fetches can hit bot protection / auth walls
-                # (e.g. eBay 403). Treat that as a tool failure the model can
-                # reason around, not an uncaught chat-stream 500.
-                return {"error": f"web_fetch: {url}: {e}", "exit_code": 1}
-            err = result.get("error")
-            text = (result.get("content") or "").strip()
-            title = result.get("title") or ""
-
-            if not text:
-                if err:
-                    return {"error": f"web_fetch: {url}: {err}", "exit_code": 1}
-                # No extractable text: non-HTML body, or a pure client-rendered
-                # shell. The agent can fall back to the builtin_browser tool.
-                return {"error": f"web_fetch: {url}: no readable text content (not HTML, or the page needs JS/login)", "exit_code": 1}
-
-            header = (f"# {title}\n" if title else "") + f"Source: {url}\n\n"
-            output = header + text
-            if len(output) > MAX_OUTPUT_CHARS:
-                output = output[:MAX_OUTPUT_CHARS] + "\n\n[...truncated]"
-            return {"output": output, "exit_code": 0}
-
-        # manage_memory / generate_image still live as MCP servers
-        # (mcp_servers/{memory,image_gen}_server.py); the MCP path above
-        # handles them.
     except Exception as e:
         return {"error": f"{tool}: {e}", "exit_code": 1}
 
+    return None
+
+
+async def _document_tool_dispatch(
+    tool: str,
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    document_id: Optional[str] = None,
+    document_version: Optional[int] = None,
+    document_digest: Optional[str] = None,
+) -> Optional[Dict]:
+    """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
+    from src.agent_tools import TOOL_HANDLERS
+    ctx = {
+        "session_id": session_id,
+        "owner": owner,
+        "doc_id": document_id,
+        "expected_document_version": document_version,
+        "expected_document_digest": document_digest,
+    }
+    if tool in TOOL_HANDLERS:
+        return await TOOL_HANDLERS[tool](content, ctx)
     return None
 
 
@@ -1118,10 +811,167 @@ async def execute_tool_block(
     block: Any,
     session_id: Optional[str] = None,
     disabled_tools: Optional[set] = None,
-    tool_policy: Optional[ToolPolicy] = None,
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
+    tool_policy: Optional[Any] = None,
+    security_context: (
+        ToolRunSecurityContext
+        | _NoToolSecurityContext
+        | _MissingToolSecurityContext
+    ) = _MISSING_TOOL_SECURITY_CONTEXT,
+    exact_approval: Optional[ExactToolApproval] = None,
+) -> Tuple[str, Dict]:
+    """Execute a single tool block. Returns (description, result_dict).
+
+    Thin wrapper: bind the per-turn workspace (so the path resolvers + subprocess
+    cwd confine to it) for the duration of this call, then delegate. Reset on the
+    way out so the binding never leaks to the next tool call.
+    """
+    if security_context is _MISSING_TOOL_SECURITY_CONTEXT:
+        raise TypeError(
+            "execute_tool_block requires security_context; pass a "
+            "ToolRunSecurityContext or NO_TOOL_SECURITY_CONTEXT explicitly"
+        )
+    if (
+        not isinstance(security_context, ToolRunSecurityContext)
+        and security_context is not NO_TOOL_SECURITY_CONTEXT
+    ):
+        raise TypeError(
+            "security_context must be a ToolRunSecurityContext or "
+            "NO_TOOL_SECURITY_CONTEXT"
+        )
+
+    approval_claimed = False
+    if exact_approval is not None:
+        if (
+            not isinstance(security_context, ToolRunSecurityContext)
+            or not security_context.external_untrusted_context_seen
+            or not exact_approval.pending.external_untrusted_context_seen
+        ):
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": "Exact-action approval requires an armed run security context.",
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
+        if (
+            exact_approval.pending.tool_name
+            in {"edit_document", "suggest_document", "update_document"}
+            and (
+                not exact_approval.pending.document_id
+                or exact_approval.pending.document_version is None
+                or not exact_approval.pending.document_digest
+            )
+        ):
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": (
+                        "The approved document action has no sealed target and "
+                        "cannot be executed."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
+        sealed_workspace = exact_approval.pending.workspace
+        if sealed_workspace and vet_workspace(sealed_workspace) != sealed_workspace:
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": (
+                        "The approved workspace is no longer a valid safe "
+                        "directory. Review the action again."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
+        approval_claimed = exact_approval.claim(
+            owner=owner,
+            session_id=session_id,
+            tool_name=getattr(block, "tool_type", None),
+            content=getattr(block, "content", None),
+            workspace=workspace,
+        )
+        if not approval_claimed:
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": "The exact-action approval did not match this tool request.",
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
+
+    if isinstance(security_context, ToolRunSecurityContext) and not approval_claimed:
+        decision = security_context.decision_for(
+            getattr(block, "tool_type", None),
+            getattr(block, "content", None),
+        )
+        if not decision.allowed:
+            logger.warning(
+                "External-context policy blocked tool=%r",
+                getattr(block, "tool_type", None),
+            )
+            return blocked_tool_result(
+                getattr(block, "tool_type", None),
+                decision.reason or "Tool blocked by external-context policy.",
+            )
+
+    token = _active_workspace.set(workspace or None)
+    try:
+        output = await _execute_tool_block_impl(
+            block,
+            session_id=session_id,
+            disabled_tools=disabled_tools,
+            owner=owner,
+            progress_cb=progress_cb,
+            tool_policy=tool_policy,
+            approved_document_id=(
+                exact_approval.pending.document_id
+                if approval_claimed
+                else None
+            ),
+            approved_document_version=(
+                exact_approval.pending.document_version
+                if approval_claimed
+                else None
+            ),
+            approved_document_digest=(
+                exact_approval.pending.document_digest
+                if approval_claimed
+                else None
+            ),
+        )
+        if isinstance(security_context, ToolRunSecurityContext):
+            security_context.observe_tool_result(
+                getattr(block, "tool_type", None),
+                output[1],
+                getattr(block, "content", None),
+            )
+        return output
+    finally:
+        _active_workspace.reset(token)
+
+
+async def _execute_tool_block_impl(
+    block: Any,
+    session_id: Optional[str] = None,
+    disabled_tools: Optional[set] = None,
+    owner: Optional[str] = None,
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    tool_policy: Optional[Any] = None,
+    approved_document_id: Optional[str] = None,
+    approved_document_version: Optional[int] = None,
+    approved_document_digest: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1130,11 +980,8 @@ async def execute_tool_block(
     events while the command is in flight. Ignored by other tools.
     """
     from src.tool_implementations import (
-        do_create_document, do_update_document, do_edit_document,
-        do_suggest_document, do_search_chats, do_manage_tasks,
-        do_manage_skills, do_api_call, do_manage_endpoints,
-        do_manage_mcp, do_manage_webhooks, do_manage_tokens,
-        do_manage_documents, do_manage_settings, do_manage_notes,
+        do_search_chats, do_manage_tasks,
+        do_manage_skills, do_api_call, do_manage_notes,
         do_manage_calendar,
         do_download_model, do_serve_model, do_list_served_models, do_stop_served_model,
         do_tail_serve_output,
@@ -1147,8 +994,30 @@ async def execute_tool_block(
         do_app_api,
     )
 
+    # HACK:
+    # This is a temporary workaround for a circular dependency between
+    # tool_execution.py and agent_tools.__init__.py.
+    #
+    # See issue #4277:
+    # refactor(tools): Move the registry from __init__.py into a
+    # dedicated registry.py module.
+    #
+    # Do not copy this pattern elsewhere. This import should be removed
+    # once the registry refactor is completed.
+    try:
+        agent_tools_mod = __import__("src.agent_tools", fromlist=["TOOL_HANDLERS"])
+        dynamic_handlers = getattr(agent_tools_mod, "TOOL_HANDLERS", {})
+    except ImportError:
+        dynamic_handlers = {}
+
     tool = block.tool_type
     content = block.content
+
+    # The block/disable gates below must match every policy-equivalent
+    # spelling of the tool name (bare email names alias their mcp__email__
+    # form — see email_tool_policy_names), not just the spelling the model
+    # happened to emit.
+    policy_names = email_tool_policy_names(tool)
 
     # Misformatted tool call detection: model put JSON inside ```python``` (or
     # similar) without naming the tool. Common with MiniMax-style outputs.
@@ -1177,16 +1046,19 @@ async def execute_tool_block(
             pass
 
     # Reject tools that the user has disabled for this request
-    if tool_policy and tool_policy.blocks(tool):
-        desc = f"{tool}: BLOCKED"
-        result = {"error": tool_policy.reason_for(tool), "exit_code": 1}
-        logger.info("Tool blocked by policy: %s", tool)
-        return desc, result
-
-    if disabled_tools and tool in disabled_tools:
+    if disabled_tools and not policy_names.isdisjoint(disabled_tools):
         desc = f"{tool}: BLOCKED"
         result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
+        return desc, result
+
+    if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
+        desc = f"{tool}: BLOCKED"
+        result = {
+            "error": f"Execution of tool '{tool}' is forbade by the active guide-only policy.",
+            "exit_code": 1,
+        }
+        logger.warning("Tool policy blocked tool=%s", tool)
         return desc, result
 
     if tool in _ADMIN_TOOLS and not _owner_is_admin(owner):
@@ -1207,86 +1079,6 @@ async def execute_tool_block(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
-    # ask_user: the agent poses a multiple-choice question to the user to get a
-    # decision/clarification. This is a pure UI-control marker — no subprocess,
-    # no filesystem. It returns an `ask_user` payload that the agent loop turns
-    # into an `ask_user` SSE event and then ENDS the turn, so the chat waits for
-    # the user's selection (their choice arrives as the next message).
-    if tool == "ask_user":
-        question, options, multi = "", [], False
-        raw = (content or "").strip()
-        try:
-            parsed = json.loads(raw) if raw else {}
-        except (ValueError, TypeError):
-            parsed = {}
-        if isinstance(parsed, dict):
-            question = str(parsed.get("question", "")).strip()
-            multi = bool(parsed.get("multi") or parsed.get("multiSelect"))
-            for opt in (parsed.get("options") or []):
-                if isinstance(opt, dict):
-                    label = str(opt.get("label", "")).strip()
-                    descr = str(opt.get("description", "")).strip()
-                elif isinstance(opt, str):
-                    label, descr = opt.strip(), ""
-                else:
-                    continue
-                if label:
-                    options.append({"label": label, "description": descr})
-        else:
-            question = raw
-        if not question or len(options) < 2:
-            return "ask_user: invalid", {
-                "error": (
-                    "ask_user needs a non-empty `question` and at least 2 `options` "
-                    "(each an object with a `label`, optional `description`)."
-                ),
-                "exit_code": 1,
-            }
-        options = options[:6]  # keep the choice list sane
-        desc = f"ask_user: {question[:80]}"
-        labels = ", ".join(o["label"] for o in options)
-        result = {
-            "ask_user": {"question": question, "options": options, "multi": multi},
-            "output": f"Asked the user: {question}\nOptions: {labels}\nAwaiting their selection.",
-            "exit_code": 0,
-        }
-        logger.info("Tool executed: %s (%d options, multi=%s)", desc, len(options), multi)
-        return desc, result
-
-    # update_plan: the agent writes back to the active plan — tick an item done
-    # or revise steps (e.g. when the user asks to change something). Pure UI
-    # marker: returns a `plan_update` payload the agent loop turns into a
-    # `plan_update` SSE event; the frontend replaces the stored plan and refreshes
-    # the docked plan window. Does NOT end the turn.
-    if tool == "update_plan":
-        import json as _json
-        raw = (content or "").strip()
-        plan = ""
-        try:
-            parsed = _json.loads(raw) if raw else {}
-        except (ValueError, TypeError):
-            parsed = {}
-        if isinstance(parsed, dict) and parsed.get("plan"):
-            plan = str(parsed.get("plan", "")).strip()
-        else:
-            # Plain-string call (raw checklist) or JSON without a usable `plan`.
-            plan = raw
-        if not plan:
-            return "update_plan: invalid", {
-                "error": "update_plan needs a non-empty `plan` (the full updated checklist as markdown).",
-                "exit_code": 1,
-            }
-        plan = plan[:8192]
-        done = plan.count("- [x]") + plan.count("- [X]")
-        total = done + plan.count("- [ ]")
-        desc = f"update_plan: {done}/{total} done" if total else "update_plan"
-        result = {
-            "plan_update": {"plan": plan},
-            "output": f"Plan updated ({done}/{total} steps complete)." if total else "Plan updated.",
-            "exit_code": 0,
-        }
-        logger.info("Tool executed: %s", desc)
-        return desc, result
 
     # Background execution: a `bash` block whose first line is the `#!bg`
     # marker runs DETACHED — returns a job id immediately so the chat stream
@@ -1296,15 +1088,18 @@ async def execute_tool_block(
         _is_bg, _bg_cmd = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
-            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=workspace or _AGENT_WORKDIR)
+            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
             short = _bg_cmd.strip().split(chr(10))[0][:80]
             desc = f"bash (background): {short}"
             result = {
                 "output": (
-                    f"Started background job `{rec['id']}`. It is running detached — "
+                    f"Started background job `{rec['id']}`. It is running detached; "
                     f"do NOT wait for it or poll it. You will be automatically re-invoked "
                     f"with its full output when it finishes. Continue with other work, or "
-                    f"end your turn now and resume when the result arrives."
+                    f"end your turn now and resume when the result arrives. If the user "
+                    f"later asks to check progress or stop it, call the manage_bg_jobs "
+                    f"tool yourself (output or kill); do not tell them to run a tool "
+                    f"command, and do not surface raw tool syntax in your reply."
                 ),
                 "exit_code": 0,
                 "bg_job_id": rec["id"],
@@ -1318,35 +1113,60 @@ async def execute_tool_block(
     if tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
-        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb, workspace=workspace)
-    elif tool in ("grep", "glob", "ls"):
+        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
+    elif tool in ("grep", "glob", "ls", "get_workspace"):
         # Code-navigation tools — no MCP server; run the direct implementation.
-        # Confined to the workspace when one is set (same policy as read_file).
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
-        result = await _direct_fallback(tool, content, progress_cb=progress_cb, workspace=workspace) \
+        result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
-    elif tool == "create_document":
-        title = content.split("\n")[0].strip()[:60]
-        desc = f"create_document: {title}"
-        result = await do_create_document(content, session_id=session_id, owner=owner)
-    elif tool == "update_document":
-        desc = f"update_document: {content.split(chr(10))[0][:60]}"
-        result = await do_update_document(content, owner=owner)
-    elif tool == "edit_document":
-        result = await do_edit_document(content, owner=owner)
-        desc = f"edit_document: {result.get('title', '')}"
-    elif tool == "suggest_document":
-        result = await do_suggest_document(content, owner=owner)
-        desc = f"suggest_document: {result.get('count', 0)} suggestions"
+    elif tool in ("apply_patch", "todowrite"):
+        first_line = content.split(chr(10))[0][:80]
+        desc = f"{tool}: {first_line}" if first_line else tool
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+            or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool == "manage_bg_jobs":
+        # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
+        desc = f"manage_bg_jobs: {content.split(chr(10))[0][:80]}"
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+            or {"error": "manage_bg_jobs: execution failed", "exit_code": 1}
+    elif tool in ("create_document", "update_document", "edit_document",
+                  "suggest_document", "manage_documents"):
+        desc = f"{tool}: {content.split(chr(10))[0][:80]}"
+        result = await _document_tool_dispatch(
+            tool,
+            content,
+            session_id,
+            owner,
+            document_id=approved_document_id,
+            document_version=approved_document_version,
+            document_digest=approved_document_digest,
+        ) \
+            or {"error": f"{tool}: execution failed", "exit_code": 1}
+        if tool in ("edit_document", "suggest_document") and "title" in (result or {}):
+            desc = f"{tool}: {result.get('title', '')}"
     elif tool == "search_chats":
         query = content.split("\n")[0].strip()
         desc = f"search_chats: {query[:80]}"
         result = await do_search_chats(query, owner=owner)
-    elif tool in ("chat_with_model", "create_session", "list_sessions",
-                  "send_to_session", "pipeline",
-                  "manage_session", "manage_memory", "list_models",
-                  "ui_control", "ask_teacher"):
+    elif tool in ("chat_with_model", "ask_teacher", "list_models"):
+        # Migrated to the agent_tools registry (#3629): dispatched through
+        # TOOL_HANDLERS with the owner/session ctx these tools need, instead
+        # of the legacy dispatch_ai_tool elif. The impls live in
+        # src/agent_tools/model_interaction_tools.py.
+        first_line = content.split(chr(10))[0].strip()[:60]
+        desc = f"{tool}: {first_line}" if first_line else tool
+        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+            or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):
+        # Migrated to the agent_tools registry (#3629): dispatched through
+        # TOOL_HANDLERS with the owner/session ctx these tools need. The impls
+        # live in src/agent_tools/session_tools.py.
+        first_line = content.split(chr(10))[0].strip()[:60]
+        desc = f"{tool}: {first_line}" if first_line else tool
+        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+            or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
     elif tool == "manage_tasks":
@@ -1359,24 +1179,11 @@ async def execute_tool_block(
         first_line = content.split("\n")[0].strip()[:60]
         desc = f"api_call: {first_line}"
         result = await do_api_call(content)
-    elif tool == "manage_endpoints":
-        desc = "manage_endpoints"
-        result = await do_manage_endpoints(content, owner=owner)
-    elif tool == "manage_mcp":
-        desc = "manage_mcp"
-        result = await do_manage_mcp(content, owner=owner)
-    elif tool == "manage_webhooks":
-        desc = "manage_webhooks"
-        result = await do_manage_webhooks(content, owner=owner)
-    elif tool == "manage_tokens":
-        desc = "manage_tokens"
-        result = await do_manage_tokens(content, owner=owner)
-    elif tool == "manage_documents":
-        desc = "manage_documents"
-        result = await do_manage_documents(content, owner=owner)
-    elif tool == "manage_settings":
-        desc = "manage_settings"
-        result = await do_manage_settings(content, owner=owner)
+    elif tool in ("manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "manage_settings"):
+        # Registry-dispatched (agent_tools.admin_tools); owner threaded for ownership/admin checks.
+        desc = tool
+        result = await _direct_fallback(tool, content, owner=owner) \
+            or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_notes":
         desc = "manage_notes"
         result = await do_manage_notes(content, owner=owner)
@@ -1429,7 +1236,7 @@ async def execute_tool_block(
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner)
     elif tool == "edit_file":
-        result = await _do_edit_file(content, workspace=workspace)
+        result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"
     elif tool == "trigger_research":
         desc = "trigger_research"
@@ -1452,22 +1259,85 @@ async def execute_tool_block(
     elif tool == "vault_unlock":
         desc = "vault_unlock"
         result = await do_vault_unlock(content, owner=owner)
+    elif tool in BUILTIN_EMAIL_TOOLS:
+        # Bare email tool name from fenced-block models (e.g. Ollama) — route to MCP email server.
+        # Non-admin owners never reach here: BUILTIN_EMAIL_TOOLS ⊆ NON_ADMIN_BLOCKED_TOOLS,
+        # so is_public_blocked_tool() above already rejected them.
+        mcp = get_mcp_manager()
+        qualified = f"mcp__email__{tool}"
+        desc = f"email: {tool}"
+        if mcp:
+            _raw = content.strip()
+            args = {}
+            _args_error = None
+            if _raw:
+                # A non-empty body is always meant to be the call's arguments,
+                # and every email tool takes a JSON object. Anything that
+                # isn't one is a correctable error — NOT a silent empty-args
+                # call, which would read the DEFAULT mailbox/folder instead of
+                # the one the model meant (#3966 class). Only an EMPTY body
+                # keeps the no-arg path (e.g. ```list_email_accounts```).
+                try:
+                    parsed = json.loads(_raw)
+                except (json.JSONDecodeError, TypeError) as _je:
+                    # Covers both `{account: "work"}` (looks like JSON, bad)
+                    # and `account: work` (not JSON at all).
+                    _args_error = (
+                        f"'{tool}' arguments are not valid JSON ({_je}). "
+                        'Send a JSON object, e.g. {"account": "work"} — '
+                        "keys and string values need double quotes."
+                    )
+                else:
+                    if isinstance(parsed, dict):
+                        args = parsed
+                    else:
+                        _args_error = (
+                            f"'{tool}' arguments must be a JSON object, "
+                            'e.g. {"uid": "..."} — got a JSON array/value instead.'
+                        )
+            if _args_error is not None:
+                result = {"error": _args_error, "exit_code": 1}
+            else:
+                if owner:
+                    args = dict(args)
+                    args[_EMAIL_MCP_OWNER_ARG] = owner
+                result = await mcp.call_tool(qualified, args)
+        else:
+            result = {"error": "MCP manager not available", "exit_code": 1}
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
         mcp = get_mcp_manager()
         if mcp:
-            try:
-                args = json.loads(content) if content.strip().startswith("{") else {}
-            except (json.JSONDecodeError, TypeError):
-                args = {}
             desc = f"mcp: {tool}"
-            result = await mcp.call_tool(tool, args)
+            args, parse_error = _parse_qualified_mcp_args(tool, content)
+            if parse_error:
+                result = {"error": parse_error, "exit_code": 1}
+            else:
+                if tool.startswith("mcp__email__") and owner:
+                    args = dict(args)
+                    args[_EMAIL_MCP_OWNER_ARG] = owner
+                result = await mcp.call_tool(tool, args)
         else:
             desc = f"mcp: {tool}"
             result = {"error": "MCP manager not available", "exit_code": 1}
+
+
+    elif tool in dynamic_handlers:
+        first_line = content.split(chr(10))[0][:80]
+        desc = f"registry: {tool} {first_line}".strip()
+        res = await _direct_fallback(tool, content, progress_cb=progress_cb)
+
+        if isinstance(res, tuple):
+            desc, result = res
+        else:
+            result = res or {"error": f"{tool}: execution failed", "exit_code": 1}
+
     else:
         desc = f"unknown: {tool}"
-        result = {"error": f"Unknown tool type: {tool}", "exit_code": 1}
+        result = {
+            "error": f"Unknown tool: {tool}",
+            "exit_code": 1
+        }
 
     logger.info(f"Tool executed: {desc} -> exit_code={result.get('exit_code', 'n/a')}")
     return desc, result

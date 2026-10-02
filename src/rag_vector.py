@@ -14,6 +14,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Set
 
 from src.constants import CHROMA_DIR
+from src.index_walk import prune_index_dirs, is_indexable_file
 from pathlib import Path
 
 from src.embedding_lanes import (
@@ -34,6 +35,10 @@ DEFAULT_FILE_EXTENSIONS: Set[str] = {
     '.csv', '.html', '.css', '.js', '.pdf'
 }
 
+# Tool-internal directories that match DEFAULT_FILE_EXTENSIONS but are never
+# Directory-walk pruning is single-sourced in src.index_walk so the vector and
+# keyword indexers apply the same hidden/junk policy and cannot drift (#5559).
+
 VECTOR_WEIGHT = 0.7
 KEYWORD_WEIGHT = 0.3
 
@@ -48,6 +53,23 @@ def _generate_doc_id(text: str, owner: str = "") -> str:
     # index keeps its existing ids and isn't re-churned.
     key = f"{owner}\x00{text}" if owner else text
     return f"doc_{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _rewrite_owner_path(value: str, path_map: Dict[str, str], path_prefixes: List[tuple]) -> str:
+    if not isinstance(value, str) or not value:
+        return value
+    abs_value = os.path.abspath(value)
+    mapped = path_map.get(abs_value)
+    if mapped:
+        return mapped
+    for old_prefix, new_prefix in path_prefixes:
+        old_abs = os.path.abspath(old_prefix)
+        new_abs = os.path.abspath(new_prefix)
+        if abs_value == old_abs:
+            return new_abs
+        if abs_value.startswith(old_abs + os.sep):
+            return new_abs + abs_value[len(old_abs):]
+    return value
 
 
 class VectorRAG:
@@ -250,6 +272,75 @@ class VectorRAG:
             "failed_count": len(docs) - len(valid),
         }
 
+    def rename_owner(
+        self,
+        old_owner: str,
+        new_owner: str,
+        *,
+        path_map: Optional[Dict[str, str]] = None,
+        path_prefixes: Optional[List[tuple]] = None,
+    ) -> Dict[str, Any]:
+        """Rewrite existing RAG metadata after an auth username rename."""
+        if not self.healthy:
+            return {"success": False, "updated_count": 0, "message": "Collection not initialized"}
+
+        old_owner = (old_owner or "").strip().lower()
+        new_owner = (new_owner or "").strip().lower()
+        if not old_owner or not new_owner or old_owner == new_owner:
+            return {"success": True, "updated_count": 0, "message": "No owner rename needed"}
+
+        path_map = {os.path.abspath(k): os.path.abspath(v) for k, v in (path_map or {}).items()}
+        path_prefixes = path_prefixes or []
+        updated_ids = set()
+        failed_count = 0
+
+        for lane_name, collection in self._collections_for_delete():
+            try:
+                results = collection.get(
+                    where={"owner": old_owner},
+                    include=["metadatas"],
+                )
+            except Exception as e:
+                logger.warning("rename_owner metadata scan failed in %s lane: %s", lane_name, e)
+                failed_count += 1
+                continue
+
+            ids = results.get("ids") or []
+            metadatas = results.get("metadatas") or []
+            if not ids:
+                continue
+
+            new_metas = []
+            selected_ids = []
+            for doc_id, meta in zip(ids, metadatas):
+                if not isinstance(meta, dict):
+                    continue
+                next_meta = dict(meta)
+                if str(next_meta.get("owner", "")).strip().lower() == old_owner:
+                    next_meta["owner"] = new_owner
+                for key in ("source", "directory"):
+                    next_meta[key] = _rewrite_owner_path(next_meta.get(key), path_map, path_prefixes)
+                selected_ids.append(doc_id)
+                new_metas.append(next_meta)
+
+            if not selected_ids:
+                continue
+
+            try:
+                collection.update(ids=selected_ids, metadatas=new_metas)
+                updated_ids.update(selected_ids)
+            except Exception as e:
+                logger.warning("rename_owner metadata update failed in %s lane: %s", lane_name, e)
+                failed_count += len(selected_ids)
+
+        success = failed_count == 0
+        return {
+            "success": success,
+            "updated_count": len(updated_ids),
+            "failed_count": failed_count,
+            "message": f"Updated {len(updated_ids)} RAG chunk(s)",
+        }
+
     # ------------------------------------------------------------------
     # Search — hybrid: vector similarity + keyword overlap
     # ------------------------------------------------------------------
@@ -411,8 +502,15 @@ class VectorRAG:
         failed = 0
 
         try:
-            for root, _, files in os.walk(directory):
+            for root, dirs, files in os.walk(directory):
+                # Prune in place so os.walk never descends into hidden or junk
+                # directories (#5559), via the shared index_walk policy. The
+                # passed-in root is exempt: a user who deliberately targets a
+                # hidden directory gets it.
+                prune_index_dirs(dirs)
                 for fname in files:
+                    if not is_indexable_file(fname):
+                        continue
                     fpath = os.path.join(root, fname)
                     ext = Path(fname).suffix.lower()
                     if ext not in file_extensions:

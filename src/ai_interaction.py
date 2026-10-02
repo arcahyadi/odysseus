@@ -1,20 +1,28 @@
 """
 ai_interaction.py
 
-AI-to-AI interaction tools: chat_with_model, create_session, list_sessions,
-send_to_session, pipeline.
+AI-to-AI interaction tools: pipeline and manage_memory, plus shared model
+resolution (_resolve_model), the session-manager singleton, and dispatch_ai_tool.
+
+As part of the tool -> registry migration (#3629), chat_with_model, ask_teacher
+and list_models moved to src/agent_tools/model_interaction_tools.py, and
+create_session, list_sessions, send_to_session and manage_session moved to
+src/agent_tools/session_tools.py. Those modules reuse get_session_manager /
+_resolve_model / AI_CHAT_TIMEOUT from here.
 
 These are agent tools — the LLM writes fenced code blocks and they execute
 through the standard agent_tools.py pipeline.
 """
 
+import asyncio
 import json
 import logging
 import uuid
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from src.constants import GENERATED_IMAGES_DIR
+from src.memory import MemoryStoreUnreadable
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +32,9 @@ MAX_PIPELINE_STEPS = 10
 
 # ---------------------------------------------------------------------------
 # Global managers (set from app.py, same pattern as _mcp_manager)
-# ---------------------------------------------------------------------------
+# _session_manager is kept as a local cache for performance (avoiding
+# repeated get_session_manager_instance() calls). It's synced with
+# the authoritative singleton in core.models.
 _session_manager = None
 _memory_manager = None
 _memory_vector = None
@@ -33,11 +43,15 @@ _personal_docs_manager = None
 
 
 def set_session_manager(mgr):
+    """Set the global session manager. Syncs local cache + core singleton."""
     global _session_manager
     _session_manager = mgr
+    from core.models import set_session_manager_instance
+    set_session_manager_instance(mgr)
 
 
 def get_session_manager():
+    """Get the global session manager."""
     return _session_manager
 
 
@@ -58,9 +72,10 @@ def set_rag_manager(rag_mgr, personal_docs_mgr=None):
 # ---------------------------------------------------------------------------
 
 from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime
+from src.image_model_ids import looks_like_image_generation_model, model_id_leaf
 
 
-def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Dict]:
+def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[str] = None) -> Tuple[str, str, Dict]:
     """Resolve a model specifier to (endpoint_url, model_id, headers).
 
     Accepts:
@@ -84,9 +99,29 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
     else:
         model_name = spec
 
+    def _json_list(value) -> list[str]:
+        try:
+            data = json.loads(value or "[]")
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [str(x) for x in data if isinstance(x, (str, int, float)) and str(x)]
+
+    def _image_like(name: str) -> bool:
+        n = (name or "").lower()
+        if looks_like_image_generation_model(n):
+            return True
+        return any(k in n for k in (
+            "qwen-image", "qwen/image", "z-image", "flux", "stable-diffusion",
+            "sdxl", "hidream", "boogu", "krea-2", "image-edit",
+        ))
+
     db = SessionLocal()
     try:
         query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if model_type:
+            query = query.filter(ModelEndpoint.model_type == model_type)
         if target_endpoint_name:
             query = query.filter(ModelEndpoint.name.ilike(f"%{target_endpoint_name}%"))
         if owner:
@@ -116,13 +151,16 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                     return build_chat_url(base), matched, headers
             else:
                 # OpenAI-compatible and native Ollama: probe the provider's model list.
+                endpoint_reachable = False
                 try:
                     models_url = build_models_url(base)
                     if models_url:
                         r = httpx.get(models_url, headers=headers, timeout=5)
                         r.raise_for_status()
+                        endpoint_reachable = True
                         data = r.json()
-                        model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+                        items = data if isinstance(data, list) else (data.get("data") or [])
+                        model_ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
                         if not model_ids:
                             model_ids = [
                                 m.get("name") or m.get("model")
@@ -130,9 +168,20 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                                 if m.get("name") or m.get("model")
                             ]
                     else:
+                        endpoint_reachable = True
                         model_ids = json.loads(ep.cached_models or "[]")
                 except Exception:
                     model_ids = []
+
+                # Manual/local image endpoints are often registered with pinned
+                # model ids, while /models may return a runtime alias or only the
+                # served internal id. Include pinned/cached ids in the match set
+                # so chat sessions using the HF repo id still resolve. Do not use
+                # stale cached aliases when the endpoint itself is unreachable.
+                if model_type == "image" and endpoint_reachable:
+                    for extra in _json_list(getattr(ep, "pinned_models", None)) + _json_list(getattr(ep, "cached_models", None)):
+                        if extra not in model_ids:
+                            model_ids.append(extra)
 
                 # Exact match first
                 for mid in model_ids:
@@ -144,6 +193,13 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                     if model_name.lower() in mid.lower() or mid.lower() in model_name.lower():
                         return build_chat_url(base), mid, headers
 
+                # Last resort for local image endpoints: if the requested model
+                # name is clearly an image model, use the endpoint's first known
+                # image model id. This prevents a harmless alias mismatch from
+                # blocking image generation.
+                if model_type == "image" and _image_like(model_name) and model_ids:
+                    return build_chat_url(base), model_ids[0], headers
+
         raise ValueError(f"Model '{spec}' not found on any configured endpoint")
     finally:
         db.close()
@@ -153,440 +209,6 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-async def do_chat_with_model(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Send a message to a specific model and return its response.
-
-    Content format:
-      Line 1: model_name (or model_name@endpoint_name)
-      Line 2+: the message to send
-    """
-    from src.llm_core import llm_call_async
-
-    lines = content.strip().split("\n", 1)
-    if not lines or not lines[0].strip():
-        return {"error": "First line must be the model name"}
-
-    model_spec = lines[0].strip()
-    message = lines[1].strip() if len(lines) > 1 else ""
-    if not message:
-        return {"error": "No message provided (line 2+ is the message)"}
-
-    try:
-        url, model, headers = _resolve_model(model_spec, owner=owner)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    try:
-        response = await llm_call_async(
-            url, model,
-            [{"role": "user", "content": message}],
-            headers=headers,
-            timeout=AI_CHAT_TIMEOUT,
-        )
-        # Truncate very long responses
-        if len(response) > 10000:
-            response = response[:10000] + "\n... (truncated)"
-        return {"model": model, "response": response}
-    except Exception as e:
-        logger.error(f"chat_with_model failed: {e}")
-        return {"error": f"Failed to get response from {model_spec}: {e}"}
-
-
-_TEACHER_SYSTEM_PROMPT = (
-    "You are a senior AI mentor. A less capable model is stuck on a problem and asking for help. "
-    "Provide clear, actionable guidance:\n"
-    "1. Brief analysis of the problem\n"
-    "2. Recommended approach (step by step)\n"
-    "3. Key things to watch out for\n\n"
-    "Be concise and practical. No preamble."
-)
-
-
-async def do_ask_teacher(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Ask a more capable model for help.
-
-    Content format:
-      Line 1: model_name (or 'auto')
-      Line 2+: the problem description
-    """
-    from src.llm_core import llm_call_async
-    from src.settings import get_setting
-
-    lines = content.strip().split("\n", 1)
-    model_spec = lines[0].strip() if lines else "auto"
-    problem = lines[1].strip() if len(lines) > 1 else ""
-
-    if not problem:
-        return {"error": "No problem description provided"}
-
-    if model_spec.lower() in ("auto", ""):
-        model_spec = get_setting("teacher_model", "")
-        if not model_spec:
-            return {"error": "No teacher model configured. Specify a model name or set teacher_model in settings."}
-
-    try:
-        url, model, headers = _resolve_model(model_spec, owner=owner)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    try:
-        response = await llm_call_async(
-            url, model,
-            [
-                {"role": "system", "content": _TEACHER_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Problem:\n{problem}"},
-            ],
-            headers=headers,
-            timeout=AI_CHAT_TIMEOUT,
-        )
-        if len(response) > 8000:
-            response = response[:8000] + "\n... (truncated)"
-        return {"model": model, "response": response, "teacher": True}
-    except Exception as e:
-        logger.error(f"ask_teacher failed: {e}")
-        return {"error": f"Teacher call failed ({model_spec}): {e}"}
-
-
-async def do_second_opinion(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Get a second opinion from another model, then have the original model
-    evaluate the feedback and produce a unified version.
-
-    Content format:
-      Line 1: model_name (or model_name@endpoint_name)
-      Line 2+ (optional): specific question or focus area
-
-    Flow:
-      1. Pull recent conversation context
-      2. Send to reviewer model → get honest feedback
-      3. Send feedback back to the session's own model → evaluate & unify
-      4. Return both the review and the unified response
-    """
-    from src.llm_core import llm_call_async
-
-    lines = content.strip().split("\n", 1)
-    if not lines or not lines[0].strip():
-        return {"error": "First line must be the model name"}
-
-    model_spec = lines[0].strip()
-    focus = lines[1].strip() if len(lines) > 1 else ""
-
-    try:
-        reviewer_url, reviewer_model, reviewer_headers = _resolve_model(model_spec, owner=owner)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    # Pull recent conversation context from current session
-    context_text = ""
-    sess = None
-    if session_id and _session_manager:
-        sess = _session_manager.get_session(session_id)
-        if sess:
-            messages = sess.get_context_messages()
-            recent = messages[-15:] if len(messages) > 15 else messages
-            parts = []
-            for m in recent:
-                role = m.get("role", "unknown").upper()
-                text = m.get("content", "")
-                if isinstance(text, list):
-                    text = " ".join(
-                        p.get("text", "") for p in text if isinstance(p, dict)
-                    )
-                if text:
-                    parts.append(f"[{role}]: {text[:2000]}")
-            context_text = "\n\n".join(parts)
-
-    if not context_text:
-        return {"error": "No conversation context found to review"}
-
-    # ── Step 1: Get the reviewer's feedback ──
-    reviewer_system = (
-        "You are giving a second opinion on a conversation between a user and an AI assistant. "
-        "Your job is to be genuinely helpful and honest — not a yes-man, but not a contrarian either.\n\n"
-        "Guidelines:\n"
-        "- If the plan/idea is solid, say so clearly. Don't manufacture problems that aren't there.\n"
-        "- If you spot a real flaw, blind spot, or simpler approach — call it out directly.\n"
-        "- Be practical. Don't over-engineer or over-analyze. Real-world tradeoffs matter.\n"
-        "- If there's a meaningfully better way to do something, suggest it concretely.\n"
-        "- Give credit where it's due — highlight what's working well.\n"
-        "- Keep it concise and actionable. No fluff.\n"
-        "- You're a second pair of eyes, not a professor grading a paper."
-    )
-
-    reviewer_message = f"Here's the conversation so far:\n\n{context_text}"
-    if focus:
-        reviewer_message += f"\n\n---\nSpecifically, I want your take on: {focus}"
-    else:
-        reviewer_message += "\n\n---\nGive me your honest second opinion on what's being discussed."
-
-    try:
-        review = await llm_call_async(
-            reviewer_url, reviewer_model,
-            [
-                {"role": "system", "content": reviewer_system},
-                {"role": "user", "content": reviewer_message},
-            ],
-            headers=reviewer_headers,
-            timeout=AI_CHAT_TIMEOUT,
-        )
-        if len(review) > 8000:
-            review = review[:8000] + "\n... (truncated)"
-    except Exception as e:
-        logger.error(f"second_opinion reviewer call failed: {e}")
-        return {"error": f"Failed to get second opinion from {model_spec}: {e}"}
-
-    # ── Step 2: Send review back to session's own model for evaluation ──
-    unified = ""
-    original_model = "unknown"
-    if sess:
-        original_url = sess.endpoint_url
-        original_model = sess.model
-        original_headers = getattr(sess, "headers", None) or {}
-
-        unify_system = (
-            "Another AI model just reviewed the conversation you've been having with the user. "
-            "Read their feedback carefully, then respond with:\n\n"
-            "1. **What you agree with** — acknowledge valid points honestly.\n"
-            "2. **What you disagree with** — explain why, briefly.\n"
-            "3. **Unified version** — produce an updated/refined version of whatever was being discussed, "
-            "incorporating the feedback you found valid. Don't accept every note blindly — "
-            "use your judgment on what actually improves things vs what's unnecessary.\n\n"
-            "Be concise and practical. The user wants a better result, not a meta-discussion."
-        )
-
-        unify_message = (
-            f"Here's the conversation context:\n\n{context_text}\n\n"
-            f"---\n\n"
-            f"**Review from {reviewer_model}:**\n\n{review}\n\n"
-            f"---\n\n"
-            f"Evaluate this feedback and produce a unified improved version."
-        )
-
-        try:
-            unified = await llm_call_async(
-                original_url, original_model,
-                [
-                    {"role": "system", "content": unify_system},
-                    {"role": "user", "content": unify_message},
-                ],
-                headers=original_headers,
-                timeout=AI_CHAT_TIMEOUT,
-            )
-            if len(unified) > 10000:
-                unified = unified[:10000] + "\n... (truncated)"
-        except Exception as e:
-            logger.error(f"second_opinion unify call failed: {e}")
-            unified = f"(Failed to get unified response: {e})"
-
-    # Build combined result
-    combined = (
-        f"## Second Opinion from {reviewer_model}\n\n{review}"
-        f"\n\n---\n\n"
-        f"## {original_model}'s Response\n\n{unified}"
-    )
-
-    return {
-        "model": reviewer_model,
-        "response": combined,
-        "instruction": "Present these results to the user exactly as they are. Do NOT call second_opinion again. The user can continue the conversation from here.",
-    }
-
-
-async def do_create_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Create a new chat session.
-
-    Content format:
-      Line 1: session name
-      Line 2: model_name (or model_name@endpoint_name)
-    """
-    if not _session_manager:
-        return {"error": "Session manager not available"}
-
-    lines = content.strip().split("\n")
-    if len(lines) < 2:
-        return {"error": "Need 2 lines: session name, then model spec"}
-
-    name = lines[0].strip()
-    model_spec = lines[1].strip()
-
-    if not name:
-        return {"error": "Session name cannot be empty"}
-
-    try:
-        url, model, headers = _resolve_model(model_spec, owner=owner)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    sid = str(uuid.uuid4())[:8]
-    try:
-        _session_manager.create_session(
-            session_id=sid,
-            name=name,
-            endpoint_url=url,
-            model=model,
-            rag=False,
-            owner=owner,
-        )
-        # Store headers on session for future calls
-        sess = _session_manager.get_session(sid)
-        if sess and headers:
-            sess.headers = headers
-        try:
-            from src.event_bus import fire_event
-            fire_event("session_created", owner)
-        except Exception:
-            logger.debug("session_created event dispatch failed", exc_info=True)
-
-        return {"session_id": sid, "name": name, "model": model, "endpoint_url": url}
-    except Exception as e:
-        logger.error(f"create_session failed: {e}")
-        return {"error": f"Failed to create session: {e}"}
-
-
-async def do_list_sessions(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """List sessions sorted by most-recently-active first.
-
-    Output includes a relative "last active" timestamp per row so the
-    agent can answer "open my last chat" without guessing from titles.
-    The most-recent session is always first in the list.
-
-    Content = optional filter keyword (matches session name).
-    """
-    if not _session_manager:
-        return {"error": "Session manager not available"}
-
-    keyword = content.strip().lower() if content.strip() else None
-
-    try:
-        from core.database import SessionLocal, Session as DbSession
-        from datetime import datetime, timezone
-
-        # Pull every session's last_accessed from the DB so we can sort
-        # by recency. In-memory sessions hold name + model + msg_count;
-        # the DB row holds the timestamps.
-        db = SessionLocal()
-        try:
-            db_rows = {r.id: r for r in db.query(DbSession).all()}
-        finally:
-            db.close()
-
-        # SECURITY: scope to the caller's sessions. Passing None returned
-        # every user's sessions, which the agent tool then exposed via the
-        # "list my chats" reply.
-        sessions = _session_manager.get_sessions_for_user(owner)
-        rows = []
-        for sid, sess in sessions.items():
-            if keyword and keyword not in (sess.name or "").lower():
-                continue
-            db_row = db_rows.get(sid)
-            # Prefer last_accessed; fall back to updated_at, then created_at.
-            ts = None
-            if db_row:
-                ts = getattr(db_row, 'last_accessed', None) or getattr(db_row, 'updated_at', None) or getattr(db_row, 'created_at', None)
-            rows.append((ts, sid, sess))
-
-        # Sort by timestamp DESC; rows without a timestamp sink to the bottom.
-        rows.sort(key=lambda r: r[0] or datetime.min, reverse=True)
-
-        def _rel(ts):
-            if not ts:
-                return 'never'
-            now = datetime.utcnow()
-            try:
-                if ts.tzinfo is not None:
-                    now = datetime.now(timezone.utc)
-                diff = (now - ts).total_seconds()
-            except Exception:
-                return 'unknown'
-            if diff < 60: return 'just now'
-            if diff < 3600: return f'{int(diff / 60)}m ago'
-            if diff < 86400: return f'{int(diff / 3600)}h ago'
-            if diff < 86400 * 7: return f'{int(diff / 86400)}d ago'
-            return ts.strftime('%Y-%m-%d')
-
-        lines = []
-        for i, (ts, sid, sess) in enumerate(rows):
-            if i >= 50:
-                lines.append(f"... and {len(rows) - 50} more (showing first 50)")
-                break
-            safe_name = (sess.name or "Untitled").replace("[", "\\[").replace("]", "\\]")
-            msg_count = getattr(sess, "message_count", 0) or 0
-            model = getattr(sess, "model", "unknown")
-            marker = " ← most recent" if i == 0 else ""
-            lines.append(f"- **[{safe_name}](#session-{sid})** (id: `{sid}`, model: {model}, {msg_count} msgs, last active {_rel(ts)}){marker}")
-
-        if not lines:
-            return {"results": "No sessions found" + (f" matching '{keyword}'" if keyword else "") + "."}
-
-        return {
-            "results": (
-                f"Found {len(rows)} session(s), sorted most-recent first:\n"
-                + "\n".join(lines)
-                + "\n\nAssistant: when replying to the user, preserve the chat-title markdown links exactly as shown, e.g. `[Chat](#session-id)`. Do not rewrite this as a plain, non-clickable table."
-            )
-        }
-    except Exception as e:
-        logger.error(f"list_sessions failed: {e}")
-        return {"error": str(e)}
-
-
-async def do_send_to_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Send a message to an existing session and get a response.
-
-    Content format:
-      Line 1: session_id
-      Line 2+: message
-    """
-    from src.llm_core import llm_call_async
-    from core.models import ChatMessage
-
-    if not _session_manager:
-        return {"error": "Session manager not available"}
-
-    lines = content.strip().split("\n", 1)
-    if len(lines) < 2:
-        return {"error": "Need 2 lines: session_id, then message"}
-
-    target_sid = lines[0].strip()
-    message = lines[1].strip()
-
-    sess = _session_manager.get_session(target_sid)
-    if not sess:
-        return {"error": f"Session '{target_sid}' not found"}
-
-    # Owner-scope: reject access to another user's session
-    if owner and getattr(sess, "owner", None) and sess.owner != owner:
-        return {"error": f"Session '{target_sid}' not found"}
-
-    if not message:
-        return {"error": "No message provided"}
-
-    try:
-        # Build context from session history
-        context = sess.get_context_messages()
-        context.append({"role": "user", "content": message})
-
-        response = await llm_call_async(
-            sess.endpoint_url, sess.model, context,
-            headers=sess.headers,
-            timeout=AI_CHAT_TIMEOUT,
-        )
-
-        # Save both messages to session
-        sess.add_message(ChatMessage("user", message))
-        sess.add_message(ChatMessage("assistant", response))
-
-        # Truncate for tool output
-        if len(response) > 10000:
-            response = response[:10000] + "\n... (truncated)"
-
-        return {
-            "session_id": target_sid,
-            "session_name": sess.name,
-            "response": response,
-        }
-    except Exception as e:
-        logger.error(f"send_to_session failed: {e}")
-        return {"error": f"Failed to send to session: {e}"}
 
 
 async def stream_ai_tool(tool: str, content: str, session_id: Optional[str] = None, owner: Optional[str] = None):
@@ -650,7 +272,7 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
         if not model_spec or not instruction:
             return {"error": f"Step {i + 1}: both 'model' and 'instruction' are required"}
         try:
-            url, model, headers = _resolve_model(model_spec, owner=owner)
+            url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
             resolved.append((url, model, headers, instruction))
         except ValueError as e:
             return {"error": f"Step {i + 1}: {e}"}
@@ -702,235 +324,15 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
         }
     except Exception as e:
         logger.error(f"pipeline failed at step {len(step_outputs) + 1}: {e}")
-        return {"error": f"Pipeline failed at step {len(step_outputs) + 1}: {e}"}
+        return {
+            "error": f"Pipeline failed at step {len(step_outputs) + 1}: {e}",
+            "untrusted_content": True,
+        }
 
 
 # ---------------------------------------------------------------------------
 # Session management tool
 # ---------------------------------------------------------------------------
-
-async def do_manage_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Manage sessions: rename, archive, delete, important, truncate, fork.
-
-    Content format:
-      Line 1: action (rename|archive|unarchive|delete|important|unimportant|truncate|fork)
-      Line 2: target session_id (or "current" to use the active session)
-      Line 3+: action-specific params (e.g. new name for rename, keep_count for truncate)
-    """
-    if not _session_manager:
-        return {"error": "Session manager not available"}
-
-    from src.database import SessionLocal, Session as DbSession
-
-    # Accept BOTH the structured JSON args the tool schema advertises
-    # ({action, session_id, value}) AND the legacy line-based format
-    # (line1=action, line2=session_id, line3=value). Native function-calling
-    # models send JSON; fenced-block callers send lines. Previously only the
-    # line format was parsed, so a model that followed the schema (JSON) got
-    # "Need at least 2 lines" / "Rename needs line 3" and couldn't drive it.
-    _raw = (content or "").strip()
-    action = ""
-    target_sid = ""
-    value = None      # the action param: new name (rename) / keep_count (truncate, fork)
-    _list_filter = ""
-    _parsed = None
-    if _raw.startswith("{"):
-        try:
-            _parsed = json.loads(_raw)
-        except Exception:
-            _parsed = None
-    if isinstance(_parsed, dict):
-        action = str(_parsed.get("action") or "").strip().lower()
-        target_sid = str(_parsed.get("session_id") or _parsed.get("session") or _parsed.get("id") or "").strip()
-        _v = _parsed.get("value")
-        if _v is None:
-            _v = (_parsed.get("name") or _parsed.get("new_name")
-                  or _parsed.get("title") or _parsed.get("keep_count"))
-        value = None if _v is None else str(_v).strip()
-        _list_filter = str(_parsed.get("filter") or "").strip()
-    else:
-        lines = _raw.split("\n")
-        if not lines or not lines[0].strip():
-            return {"error": "Missing action (rename|archive|delete|important|truncate|fork|list|switch)"}
-        action = lines[0].strip().lower()
-        target_sid = lines[1].strip() if len(lines) >= 2 else ""
-        value = lines[2].strip() if len(lines) >= 3 else None
-        _list_filter = "\n".join(lines[1:]).strip()
-
-    if not action:
-        return {"error": "Missing action (rename|archive|delete|important|truncate|fork|list|switch)"}
-
-    # `list` alias — dispatch to do_list_sessions so the agent's natural
-    # first guess (every other manage_* tool has a `list` action) works.
-    if action == "list":
-        return await do_list_sessions(_list_filter, session_id, owner=owner)
-
-    if not target_sid:
-        return {"error": "Need a session_id (or 'current' for the active chat)"}
-
-    # Allow "current" to refer to the active session
-    if target_sid.lower() == "current" and session_id:
-        target_sid = session_id
-
-    # `switch` / `open` / `select` / `view` — the agent reaches for
-    # these when the user asks to "open" or "switch to" a session.
-    # There's no server-side way to make the browser navigate, so we
-    # just return a clickable anchor link the user can click. The
-    # frontend's chat-history click delegate routes `#session-<id>`
-    # to selectSession(). The agent's reply naturally embeds this
-    # result so the user sees a single clickable line.
-    def _session_query(db):
-        query = db.query(DbSession).filter(DbSession.id == target_sid)
-        if owner is not None:
-            query = query.filter(DbSession.owner == owner)
-        return query
-
-    if action in ("switch", "open", "select", "view"):
-        db = SessionLocal()
-        try:
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            name = db_sess.name or target_sid
-        finally:
-            db.close()
-        return {
-            "action": action,
-            "session_id": target_sid,
-            "name": name,
-            "results": f"[{name}](#session-{target_sid}) — click to open.",
-        }
-
-    db = SessionLocal()
-    try:
-        if action == "rename":
-            if not value:
-                return {"error": "rename needs a new name (the `value` arg, or line 3 in the legacy format)"}
-            new_name = value
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            db_sess.name = new_name
-            db.commit()
-            _session_manager.update_session_name(target_sid, new_name)
-            return {"action": "rename", "session_id": target_sid, "name": new_name,
-                    "results": f"Session renamed to '{new_name}'"}
-
-        elif action == "archive":
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            db_sess.archived = True
-            db.commit()
-            return {"action": "archive", "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' archived"}
-
-        elif action == "unarchive":
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            db_sess.archived = False
-            db.commit()
-            return {"action": "unarchive", "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' unarchived"}
-
-        elif action == "delete":
-            if target_sid == session_id:
-                return {"error": "Cannot delete the current session while chatting in it. Delete other sessions first."}
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Refusing to delete an unknown chat id; use the exact id from list_sessions."}
-            if db_sess and db_sess.is_important:
-                return {"error": f"Session '{db_sess.name}' is starred/favorited. Unstar it first before deleting."}
-            try:
-                ok = _session_manager.delete_session(target_sid)
-                if not ok:
-                    return {"error": f"Session '{target_sid}' was not deleted because it no longer exists."}
-                return {"action": "delete", "session_id": target_sid,
-                        "results": f"Session '{db_sess.name or target_sid}' deleted"}
-            except Exception as e:
-                return {"error": f"Failed to delete session: {e}"}
-
-        elif action in ("important", "unimportant"):
-            is_important = action == "important"
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            # Prevent AI from unstarring sessions — only the user can do that manually
-            if not is_important and db_sess.is_important:
-                return {"error": f"Session '{db_sess.name}' is starred by the user. Only the user can unstar sessions manually."}
-            db_sess.is_important = is_important
-            db.commit()
-            status = "marked as important" if is_important else "unmarked as important"
-            return {"action": action, "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' {status}"}
-
-        elif action == "truncate":
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            keep_count = 10
-            if value:
-                try:
-                    keep_count = int(value)
-                except ValueError:
-                    pass
-            success = _session_manager.truncate_messages(target_sid, keep_count)
-            if success:
-                return {"action": "truncate", "session_id": target_sid,
-                        "results": f"Session truncated to last {keep_count} messages"}
-            return {"error": f"Failed to truncate session '{target_sid}'"}
-
-        elif action == "fork":
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            keep_count = 0  # 0 = all messages
-            if value:
-                try:
-                    keep_count = int(value)
-                except ValueError:
-                    pass
-
-            source = _session_manager.get_session(target_sid)
-            if not source:
-                return {"error": f"Session '{target_sid}' not found"}
-
-            new_sid = str(uuid.uuid4())[:8]
-            _session_manager.create_session(
-                session_id=new_sid,
-                name=f"Fork: {source.name}",
-                endpoint_url=source.endpoint_url,
-                model=source.model,
-                rag=False,
-                owner=owner,
-            )
-            # Copy messages
-            history = source.get_context_messages()
-            if keep_count > 0:
-                history = history[:keep_count]
-            from core.models import ChatMessage as InMemoryMsg
-            new_sess = _session_manager.get_session(new_sid)
-            for msg in history:
-                new_sess.add_message(InMemoryMsg(msg["role"], msg["content"]))
-            try:
-                from src.event_bus import fire_event
-                fire_event("session_created", owner)
-            except Exception:
-                logger.debug("session_created event dispatch failed", exc_info=True)
-
-            return {"action": "fork", "session_id": new_sid,
-                    "source_session": target_sid, "messages_copied": len(history),
-                    "results": f"Forked session '{source.name}' -> new session {new_sid} ({len(history)} messages)"}
-
-        else:
-            return {"error": f"Unknown action '{action}'. Use: list, switch, rename, archive, unarchive, delete, important, unimportant, truncate, fork"}
-    except Exception as e:
-        logger.error(f"manage_session failed: {e}")
-        return {"error": str(e)}
-    finally:
-        db.close()
-
 
 # ---------------------------------------------------------------------------
 # Memory management tool
@@ -966,16 +368,15 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             memories = [m for m in memories if m.get("category", "").lower() == category_filter]
         if not memories:
             return {"results": "No memories found" + (f" in category '{category_filter}'" if category_filter else "") + "."}
+
         result_lines = [f"Found {len(memories)} memory entries:\n"]
-        for m in memories[:100]:
+        for m in memories:
             cat = m.get("category", "fact")
             mid = m.get("id", "?")[:8]
             text = m.get("text", "")
             if len(text) > 150:
                 text = text[:150] + "..."
             result_lines.append(f"- [{cat}] `{mid}` — {text}")
-        if len(memories) > 100:
-            result_lines.append(f"... and {len(memories) - 100} more")
         return {"results": "\n".join(result_lines)}
 
     elif action == "add":
@@ -987,7 +388,15 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             return {"error": "Memory text cannot be empty"}
 
         entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
-        memories = _memory_manager.load_all()
+        # Strict load: this is a read-modify-write, and it is the path an
+        # ordinary "remember that I prefer X" takes. Degrading to [] here would
+        # save just this one entry over a store we only failed to read,
+        # atomically destroying every memory in it (issue #5673).
+        try:
+            memories = _memory_manager.load_all_for_update()
+        except MemoryStoreUnreadable as e:
+            logger.error("Refusing to add memory, store unreadable: %s", e)
+            return {"error": "Memory store is temporarily unreadable — nothing was saved."}
         memories.append(entry)
         _memory_manager.save(memories)
 
@@ -1011,6 +420,8 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             return {"error": "Edit needs line 2: memory_id, line 3: new text"}
         memory_id = lines[1].strip()
         new_text = lines[2].strip()
+        if not memory_id:
+            return {"error": "Edit needs line 2: memory_id"}
         if not new_text:
             return {"error": "New text cannot be empty"}
 
@@ -1044,6 +455,8 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         if len(lines) < 2:
             return {"error": "Delete needs line 2: memory_id"}
         memory_id = lines[1].strip()
+        if not memory_id:
+            return {"error": "Delete needs line 2: memory_id"}
 
         memories = _memory_manager.load_all()
         original_len = len(memories)
@@ -1077,13 +490,23 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             return {"error": "Search needs line 2: query"}
         query = lines[1].strip()
         memories = _memory_manager.load(owner=owner)
+        query_lower = query.lower()
+        exact_results = [m for m in memories if query_lower in (m.get("text", "").lower())]
 
         if hasattr(_memory_manager, 'get_relevant_memories'):
-            results = _memory_manager.get_relevant_memories(query, memories, threshold=0.05, max_items=20)
+            vector_results = _memory_manager.get_relevant_memories(query, memories, threshold=0.05, max_items=20)
         else:
-            # Fallback: simple text search
-            query_lower = query.lower()
-            results = [m for m in memories if query_lower in m.get("text", "").lower()][:20]
+            vector_results = []
+        seen = set()
+        results = []
+        for m in [*exact_results, *vector_results]:
+            mid = m.get("id")
+            if mid in seen:
+                continue
+            seen.add(mid)
+            results.append(m)
+            if len(results) >= 20:
+                break
 
         if not results:
             return {"results": f"No memories found matching '{query}'."}
@@ -1097,85 +520,6 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 
     else:
         return {"error": f"Unknown action '{action}'. Use: list, add, edit, delete, search"}
-
-
-# ---------------------------------------------------------------------------
-# List models tool
-# ---------------------------------------------------------------------------
-
-async def do_list_models(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """List all available models across configured endpoints.
-
-    Content = optional filter keyword.
-    """
-    import httpx
-    from src.database import SessionLocal, ModelEndpoint
-    from src.llm_core import _detect_provider, ANTHROPIC_MODELS
-    from src.auth_helpers import owner_filter
-
-    keyword = content.strip().lower() if content.strip() else None
-
-    db = SessionLocal()
-    try:
-        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-        if owner:
-            query = owner_filter(query, ModelEndpoint, owner)
-        endpoints = query.all()
-        if not endpoints:
-            return {"results": "No enabled model endpoints configured."}
-
-        result_lines = []
-        total_models = 0
-
-        for ep in endpoints:
-            try:
-                base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-            except Exception:
-                continue
-            provider = _detect_provider(base)
-            headers = build_headers(api_key, base)
-
-            model_ids = []
-            if provider == "anthropic":
-                model_ids = list(ANTHROPIC_MODELS)
-            else:
-                try:
-                    models_url = build_models_url(base)
-                    if models_url:
-                        r = httpx.get(models_url, headers=headers, timeout=5)
-                        r.raise_for_status()
-                        data = r.json()
-                        model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-                        if not model_ids:
-                            model_ids = [
-                                m.get("name") or m.get("model")
-                                for m in (data.get("models") or [])
-                                if m.get("name") or m.get("model")
-                            ]
-                    else:
-                        model_ids = json.loads(ep.cached_models or "[]")
-                except Exception:
-                    model_ids = ["(endpoint offline)"]
-
-            if keyword:
-                model_ids = [m for m in model_ids if keyword in m.lower() or keyword in (ep.name or "").lower()]
-
-            if model_ids:
-                result_lines.append(f"\n**{ep.name or base}** ({provider}):")
-                for mid in model_ids:
-                    result_lines.append(f"  - `{mid}`")
-                    total_models += 1
-
-        if not result_lines:
-            return {"results": "No models found" + (f" matching '{keyword}'" if keyword else "") + "."}
-
-        header = f"Available models ({total_models} total):"
-        return {"results": header + "\n".join(result_lines)}
-    except Exception as e:
-        logger.error(f"list_models failed: {e}")
-        return {"error": str(e)}
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1287,7 +631,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
       set_theme <preset>      — Apply a built-in theme preset (dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
       create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
       open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook)
-      open_email_reply <uid> [folder] [reply|reply-all|ai-reply] — Open a reply draft document for an email; does not send
+      open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text] — Open a reply draft document for an email; does not send. ALWAYS append the body text when the user told you what to say (one-shot draft); only omit body when the user just asked to "open a reply" without content.
       get_toggles             — Return current toggle states (server-side knowledge)
     """
     lines = content.strip().split("\n")
@@ -1348,7 +692,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
 
         # Resolve the model to validate it exists
         try:
-            url, model_id, headers = _resolve_model(model_spec, owner=owner)
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
         except ValueError as e:
             return {"error": str(e)}
 
@@ -1531,21 +875,54 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         }
 
     elif action == "open_email_reply":
-        reply_parts = lines[0].strip().split()
-        uid = reply_parts[1].strip() if len(reply_parts) > 1 else ""
-        folder = reply_parts[2].strip() if len(reply_parts) > 2 else "INBOX"
-        mode = reply_parts[3].strip().lower() if len(reply_parts) > 3 else "reply"
+        # Two forms supported:
+        #   open_email_reply <uid> [folder] [reply|reply-all|ai-reply]
+        #   open_email_reply <uid> [folder] [reply|reply-all|ai-reply]
+        #     <body text on subsequent lines or after the mode token>
+        # The body text (if any) gets pre-filled into the reply draft so the
+        # agent can compose-and-open in one tool call instead of opening an
+        # empty draft and leaving the user to wonder what happened.
+        first_line = lines[0].strip()
+        parts = first_line.split(maxsplit=4)
+        uid = parts[1].strip() if len(parts) > 1 else ""
+        folder = parts[2].strip() if len(parts) > 2 else "INBOX"
+        mode = parts[3].strip().lower() if len(parts) > 3 else "reply"
+        # Body: everything on the first line after the mode token, plus any
+        # subsequent lines. Allows multi-line bodies.
+        inline_body = parts[4] if len(parts) > 4 else ""
+        rest_lines = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+        body = (inline_body + ("\n" + rest_lines if rest_lines else "")).strip()
         if not uid:
-            return {"error": "open_email_reply needs: open_email_reply <uid> [folder] [reply|reply-all|ai-reply]"}
+            return {"error": "open_email_reply needs: open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text]"}
         if mode not in ("reply", "reply-all", "ai-reply"):
             mode = "reply"
-        return {
+        # Body is REQUIRED for the agent path. Opening an empty draft is what
+        # users do by clicking the Reply button — they don't ask the agent
+        # for that. Every agent invocation of open_email_reply MUST include
+        # the body. Reject empty so the agent retries with the content the
+        # user asked for. Exception: ai-reply mode triggers the existing
+        # AI-Reply path on the frontend which generates its own body.
+        if not body and mode != "ai-reply":
+            return {
+                "error": (
+                    "open_email_reply called without body. The agent path REQUIRES a body — "
+                    "opening an empty draft is the wrong response when the user asked you to write. "
+                    "Re-call with the reply text included: "
+                    f"`open_email_reply {uid} {folder or 'INBOX'} {mode} <your reply text here>`. "
+                    "Compose the reply now based on the open email's content and the user's request, "
+                    "then call this tool again with the body. Do NOT call create_document instead."
+                ),
+            }
+        result = {
             "ui_event": "open_email_reply",
             "uid": uid,
             "folder": folder or "INBOX",
             "mode": mode,
-            "results": f"Opening reply draft for email UID {uid}",
+            "results": f"Opening reply draft for email UID {uid}" + (" with pre-filled body" if body else ""),
         }
+        if body:
+            result["body"] = body
+        return result
 
     elif action == "get_toggles":
         return {
@@ -1575,7 +952,9 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     """
     import base64
     import httpx
+    import os
     from pathlib import Path
+    from src.url_safety import check_outbound_url
 
     lines = content.strip().split("\n")
     prompt = lines[0].strip() if lines else ""
@@ -1603,7 +982,7 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     if not model_spec:
         for candidate in ("gpt-image-1.5", "gpt-image-1", "dall-e-3"):
             try:
-                _resolve_model(candidate, owner=owner)
+                await asyncio.to_thread(_resolve_model, candidate, owner=owner)
                 model_spec = candidate
                 break
             except ValueError:
@@ -1630,7 +1009,9 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                         try:
                             _r = _req.get(_ibase + "/models", timeout=3)
                             _r.raise_for_status()
-                            _mids = [m.get("id") for m in (_r.json().get("data") or []) if m.get("id")]
+                            _data = _r.json()
+                            _ditems = _data if isinstance(_data, list) else (_data.get("data") or [])
+                            _mids = [m.get("id") for m in _ditems if isinstance(m, dict) and m.get("id")]
                             if _mids:
                                 model_spec = _mids[0]
                                 break
@@ -1643,16 +1024,36 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
         if not model_spec:
             return {"error": "No image model found. Configure one in Admin → Image Generation."}
 
+    async def _resolve_image_model(model_name: str):
+        def _call():
+            try:
+                return _resolve_model(model_name, owner=owner, model_type="image")
+            except TypeError as exc:
+                if "model_type" not in str(exc):
+                    raise
+                return _resolve_model(model_name, owner=owner)
+        return await asyncio.to_thread(_call)
+
     # Resolve the model to find the right endpoint
     try:
-        url, model_id, headers = _resolve_model(model_spec, owner=owner)
+        try:
+            url, model_id, headers = await _resolve_image_model(model_spec)
+        except ValueError:
+            _lower_model_spec = model_spec.lower()
+            if not (
+                any(_name in _lower_model_spec for _name in ("gpt-image", "dall-e"))
+                or looks_like_image_generation_model(_lower_model_spec)
+            ):
+                raise
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
     except ValueError:
         return {"error": f"No endpoint found with image model '{model_spec}'. "
                 "Configure an OpenAI-compatible endpoint with image generation support."}
 
     # Detect if this is a GPT image model vs DALL-E vs local diffusion
-    is_gpt_image = "gpt-image" in model_id.lower()
-    is_dalle = "dall-e" in model_id.lower()
+    _model_leaf = model_id_leaf(model_id)
+    is_gpt_image = _model_leaf.startswith("gpt-image") or (_model_leaf.startswith("gpt-") and "-image" in _model_leaf)
+    is_dalle = _model_leaf.startswith("dall-e")
     is_local_diffusion = not is_gpt_image and not is_dalle
 
     # Build the images endpoint URL from the chat completions URL
@@ -1695,7 +1096,10 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                     error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
                 except Exception:
                     pass
-                return {"error": f"Image generation failed ({resp.status_code}): {error_text}"}
+                return {
+                    "error": f"Image generation failed ({resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
 
             data = resp.json()
             images = data.get("data", [])
@@ -1741,8 +1145,15 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
 
             elif img.get("url"):
                 # Download external URL and save locally (DALL-E returns temp URLs)
+                result_url = img["url"]
+                ok, reason = check_outbound_url(
+                    result_url,
+                    block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+                )
+                if not ok:
+                    return {"error": f"Image API returned unsafe image URL: {reason}"}
                 try:
-                    dl_resp = httpx.get(img["url"], timeout=60)
+                    dl_resp = httpx.get(result_url, timeout=60)
                     if dl_resp.status_code == 200:
                         img_dir = Path(GENERATED_IMAGES_DIR)
                         img_dir.mkdir(parents=True, exist_ok=True)
@@ -1752,10 +1163,10 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                         image_url = f"/api/generated-image/{filename}"
                         image_id = _save_to_gallery(filename)
                     else:
-                        image_url = img["url"]  # fallback to external URL
+                        image_url = result_url  # fallback to external URL
                 except Exception as _dl_e:
                     logger.warning(f"Failed to download DALL-E image: {_dl_e}")
-                    image_url = img["url"]  # fallback to external URL
+                    image_url = result_url  # fallback to external URL
             else:
                 return {"error": "Image API returned unexpected format (no b64_json or url)"}
 
@@ -1772,7 +1183,280 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     except httpx.TimeoutException:
         return {"error": "Image generation timed out (300s). The model may be overloaded — try again or use quality=low."}
     except Exception as e:
-        return {"error": f"Image generation error: {str(e)}"}
+        return {
+            "error": f"Image generation error: {str(e)}",
+            "untrusted_content": True,
+        }
+
+
+async def do_edit_image(
+    prompt: str,
+    image_path: str,
+    model_spec: str = "",
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    size: str = "1024x1024",
+    quality: str = "medium",
+    progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+) -> Dict:
+    """Edit an uploaded image using the configured image endpoint."""
+    import base64
+    import httpx
+    import mimetypes
+    import os
+    from pathlib import Path
+    from src.url_safety import check_outbound_url
+
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return {"error": "Image edit prompt is required"}
+    path = Path(image_path)
+    if not path.exists() or not path.is_file():
+        return {"error": "Attached image file was not found"}
+
+    try:
+        from src.settings import load_settings
+        _settings = load_settings()
+    except Exception:
+        _settings = {}
+
+    if not model_spec:
+        model_spec = _settings.get("image_model", "")
+    if quality == "medium" and _settings.get("image_quality"):
+        quality = _settings["image_quality"]
+    if not model_spec:
+        return {"error": "No image model selected for image editing"}
+
+    try:
+        try:
+            def _call():
+                try:
+                    return _resolve_model(model_spec, owner=owner, model_type="image")
+                except TypeError as exc:
+                    if "model_type" not in str(exc):
+                        raise
+                    return _resolve_model(model_spec, owner=owner)
+            url, model_id, headers = await asyncio.to_thread(_call)
+        except ValueError:
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+    except ValueError:
+        return {"error": f"No endpoint found with image model '{model_spec}'."}
+
+    base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
+    edits_url = base_url + "/images/edits"
+    mime = mimetypes.guess_type(str(path))[0] or "image/png"
+    payload = {
+        "model": model_id,
+        "prompt": prompt,
+        "n": "1",
+        "size": size,
+        "quality": quality if quality in ("low", "medium", "high", "auto") else "medium",
+        "response_format": "b64_json",
+    }
+    request_id = uuid.uuid4().hex
+    payload["request_id"] = request_id
+
+    logger.info("Image edit: model=%s, size=%s, quality=%s, image=%s, prompt=%s", model_id, size, quality, path.name, prompt[:80])
+
+    def _save_edited_image_to_gallery(filename: str) -> str:
+        try:
+            from src.database import SessionLocal as _GallerySL, GalleryImage
+            new_id = str(uuid.uuid4())
+            _gdb = _GallerySL()
+            _gdb.add(GalleryImage(
+                id=new_id,
+                filename=filename,
+                prompt=prompt,
+                model=model_id,
+                size=size,
+                quality=payload.get("quality", "medium"),
+                session_id=session_id,
+                owner=owner,
+            ))
+            _gdb.commit()
+            _gdb.close()
+            return new_id
+        except Exception as _ge:
+            logger.warning("Failed to save edited image gallery record: %s", _ge)
+            return ""
+
+    def _save_image_bytes(image_bytes: bytes, suffix: str = ".png") -> tuple[str, str]:
+        img_dir = Path(GENERATED_IMAGES_DIR)
+        img_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex[:12]}{suffix}"
+        (img_dir / filename).write_bytes(image_bytes)
+        return f"/api/generated-image/{filename}", _save_edited_image_to_gallery(filename)
+
+    async def _try_local_img2img_fallback(client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
+        """Try Odysseus' local diffusion img2img endpoint.
+
+        Some self-hosted SD/SDXL endpoints expose text-to-image plus
+        `/images/harmonize`/img2img, but not OpenAI's multipart
+        `/images/edits`. For chat uploads ("image + prompt"), this gives the
+        expected instruction-edit behavior instead of stopping at a 400.
+        """
+        harmonize_url = base_url + "/images/harmonize"
+        try:
+            image_bytes = path.read_bytes()
+            image_b64 = base64.b64encode(image_bytes).decode()
+            fallback_payload = {
+                "image": image_b64,
+                "prompt": prompt,
+                "strength": 0.35,
+                "steps": 0,
+                "max_side": 1024,
+            }
+            if progress_callback:
+                await progress_callback({
+                    "status": "running",
+                    "message": "Trying image-to-image fallback",
+                    "step": 0,
+                    "total": 0,
+                })
+            fallback_resp = await client.post(harmonize_url, json=fallback_payload, headers=headers)
+            if fallback_resp.status_code == 404:
+                return None
+            if fallback_resp.status_code != 200:
+                error_text = fallback_resp.text[:500]
+                try:
+                    err_json = fallback_resp.json()
+                    error_text = err_json.get("detail") or err_json.get("error") or error_text
+                except Exception:
+                    pass
+                return {
+                    "error": f"Image edit fallback failed ({fallback_resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
+            fallback_data = fallback_resp.json()
+            image_b64 = fallback_data.get("image")
+            if not image_b64:
+                return {"error": "Image edit fallback returned no image"}
+            image_url, image_id = _save_image_bytes(base64.b64decode(image_b64))
+            return {
+                "results": f"Edited image for: {prompt[:100]}",
+                "image_url": image_url,
+                "image_id": image_id,
+                "image_prompt": prompt,
+                "image_model": model_id,
+                "image_size": size,
+                "image_quality": payload.get("quality", "medium"),
+                "edit_route": "img2img",
+            }
+        except httpx.TimeoutException:
+            return {"error": "Image edit fallback timed out. The model may still be loading or overloaded."}
+        except Exception as fallback_error:
+            logger.warning("Image edit fallback failed: %s", fallback_error)
+            return {"error": f"Image edit fallback error: {fallback_error}"}
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=60.0, pool=30.0)) as client:
+            progress_task = None
+            if progress_callback:
+                progress_url = base_url + f"/images/progress/{request_id}"
+
+                async def _poll_progress():
+                    last_sig = None
+                    while True:
+                        try:
+                            pr = await client.get(progress_url, headers=headers, timeout=5.0)
+                            if pr.status_code == 404:
+                                return
+                            if pr.status_code == 200:
+                                data = pr.json()
+                                sig = (data.get("status"), data.get("step"), data.get("total"), data.get("percent"))
+                                if sig != last_sig:
+                                    last_sig = sig
+                                    await progress_callback(data)
+                                if data.get("status") in {"done", "error"}:
+                                    return
+                        except Exception:
+                            return
+                        await asyncio.sleep(1)
+
+                progress_task = asyncio.create_task(_poll_progress())
+            try:
+                with path.open("rb") as f:
+                    files = {"image": (path.name, f, mime)}
+                    resp = await client.post(edits_url, data=payload, files=files, headers=headers)
+            finally:
+                if progress_task:
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except asyncio.CancelledError:
+                        pass
+
+            if resp.status_code != 200:
+                error_text = resp.text[:500]
+                try:
+                    err_json = resp.json()
+                    err = err_json.get("error")
+                    error_text = (
+                        err.get("message", error_text)
+                        if isinstance(err, dict)
+                        else str(err or err_json.get("detail") or error_text)
+                    )
+                except Exception:
+                    pass
+                if resp.status_code in (400, 404, 405, 422):
+                    fallback = await _try_local_img2img_fallback(client)
+                    if fallback:
+                        return fallback
+                    if resp.status_code == 404:
+                        return {
+                            "error": (
+                                f"Image model '{model_id}' is reachable, but this endpoint does not expose image editing. "
+                                "Use it without an attached image for text-to-image generation, or serve an edit/img2img "
+                                "model for attached-image prompts."
+                            )
+                        }
+                return {
+                    "error": f"Image edit failed ({resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
+
+            data = resp.json()
+            images = data.get("data", [])
+            if not images:
+                return {"error": "No image returned from edit API"}
+
+            img = images[0]
+            image_url = None
+            image_id = None
+
+            if img.get("b64_json"):
+                image_url, image_id = _save_image_bytes(base64.b64decode(img.get("b64_json")))
+            elif img.get("url"):
+                result_url = img["url"]
+                ok, reason = check_outbound_url(
+                    result_url,
+                    block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+                )
+                if not ok:
+                    return {"error": f"Image edit API returned unsafe image URL: {reason}"}
+                dl_resp = httpx.get(result_url, timeout=60)
+                if dl_resp.status_code != 200:
+                    return {"error": f"Could not download edited image ({dl_resp.status_code})"}
+                image_url, image_id = _save_image_bytes(dl_resp.content)
+            else:
+                return {"error": "Image edit API returned unexpected format (no b64_json or url)"}
+
+            return {
+                "results": f"Edited image for: {prompt[:100]}",
+                "image_url": image_url,
+                "image_id": image_id,
+                "image_prompt": prompt,
+                "image_model": model_id,
+                "image_size": size,
+                "image_quality": payload.get("quality", "medium"),
+            }
+    except httpx.TimeoutException:
+        return {"error": "Image edit timed out. The model may still be loading or overloaded."}
+    except Exception as e:
+        return {
+            "error": f"Image edit error: {str(e)}",
+            "untrusted_content": True,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1784,54 +1468,19 @@ async def dispatch_ai_tool(
 ) -> Tuple[str, Dict]:
     """Dispatch an AI interaction tool. Returns (description, result_dict)."""
 
-    if tool == "chat_with_model":
-        model_spec = content.split("\n")[0].strip()[:60]
-        desc = f"chat_with_model: {model_spec}"
-        result = await do_chat_with_model(content, session_id, owner=owner)
-
-    elif tool == "create_session":
-        name = content.split("\n")[0].strip()[:60]
-        desc = f"create_session: {name}"
-        result = await do_create_session(content, session_id, owner=owner)
-
-    elif tool == "list_sessions":
-        keyword = content.strip()[:40]
-        desc = f"list_sessions{': ' + keyword if keyword else ''}"
-        result = await do_list_sessions(content, session_id, owner=owner)
-
-    elif tool == "send_to_session":
-        sid = content.split("\n")[0].strip()[:20]
-        desc = f"send_to_session: {sid}"
-        result = await do_send_to_session(content, session_id, owner=owner)
-
-    elif tool == "pipeline":
+    if tool == "pipeline":
         desc = "pipeline: running steps"
         result = await do_pipeline(content, session_id, owner=owner)
-
-    elif tool == "manage_session":
-        action = content.split("\n")[0].strip()[:40]
-        desc = f"manage_session: {action}"
-        result = await do_manage_session(content, session_id, owner=owner)
 
     elif tool == "manage_memory":
         action = content.split("\n")[0].strip()[:40]
         desc = f"manage_memory: {action}"
         result = await do_manage_memory(content, session_id, owner=owner)
 
-    elif tool == "list_models":
-        keyword = content.strip()[:40]
-        desc = f"list_models{': ' + keyword if keyword else ''}"
-        result = await do_list_models(content, session_id, owner=owner)
-
     elif tool == "ui_control":
         action = content.split("\n")[0].strip()[:60]
         desc = f"ui_control: {action}"
         result = await do_ui_control(content, session_id, owner=owner)
-
-    elif tool == "ask_teacher":
-        problem = content.split("\n", 1)[-1].strip()[:60]
-        desc = f"ask_teacher: {problem}"
-        result = await do_ask_teacher(content, session_id, owner=owner)
 
     else:
         desc = f"unknown ai tool: {tool}"

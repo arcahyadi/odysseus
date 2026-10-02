@@ -2,18 +2,18 @@
 
 import copy
 import io
-import ipaddress
 import json
 import os
 import re
 import logging
-import socket
 from datetime import datetime, timedelta
 from typing import List
-from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+
+from src.constants import WEB_FETCH_SOFT_MAX_BYTES, WEB_FETCH_HARD_MAX_BYTES, WEB_FETCH_USER_AGENT
+from src import outbound_fetch as _outbound_fetch
 
 from .analytics import RateLimitError, error_logger
 from .cache import (
@@ -25,83 +25,39 @@ from .cache import (
 
 logger = logging.getLogger(__name__)
 
-_PRIVATE_NETWORKS = (
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-)
+def _is_private_address(addr):
+    return _outbound_fetch._is_private_address(addr)
 
 
-def _is_private_address(addr: ipaddress._BaseAddress) -> bool:
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    return (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_reserved
-        or addr.is_multicast
-        or addr.is_unspecified
-        or any(addr in net for net in _PRIVATE_NETWORKS)
+def _resolve_hostname_ips(hostname):
+    return _outbound_fetch._resolve_hostname_ips(hostname)
+
+
+def _public_http_url(url):
+    return _outbound_fetch._public_http_url(url, resolver=_resolve_hostname_ips)
+
+
+def _resolve_public_ips(url):
+    return _outbound_fetch._resolve_public_ips(url, resolver=_resolve_hostname_ips)
+
+
+_PinnedBackend = _outbound_fetch._PinnedBackend
+_PinnedTransport = _outbound_fetch._PinnedTransport
+BodyTooLargeError = _outbound_fetch.BodyTooLargeError
+_CappedFetch = _outbound_fetch._CappedFetch
+
+
+def _get_public_url(url, headers, timeout, max_redirects=5, max_bytes=None):
+    return _outbound_fetch._get_public_url(
+        url,
+        headers=headers,
+        timeout=timeout,
+        max_redirects=max_redirects,
+        max_bytes=max_bytes,
+        resolve_public_ips=_resolve_public_ips,
+        transport_factory=_PinnedTransport,
     )
 
-
-def _resolve_hostname_ips(hostname: str) -> list[ipaddress._BaseAddress]:
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except Exception:
-        return []
-    out = []
-    for info in infos:
-        try:
-            out.append(ipaddress.ip_address(info[4][0]))
-        except Exception:
-            continue
-    return out
-
-
-def _public_http_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        host = (parsed.hostname or "").strip()
-        if not host:
-            return False
-        lower = host.lower()
-        if lower in ("localhost", "metadata", "metadata.google.internal"):
-            return False
-        if lower.endswith((".local", ".localhost", ".internal", ".lan", ".intranet")):
-            return False
-        try:
-            return not _is_private_address(ipaddress.ip_address(host))
-        except ValueError:
-            pass
-        addrs = _resolve_hostname_ips(host)
-        return bool(addrs) and not any(_is_private_address(a) for a in addrs)
-    except Exception:
-        return False
-
-
-def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 5) -> httpx.Response:
-    current = url
-    for _ in range(max_redirects + 1):
-        if not _public_http_url(current):
-            raise httpx.RequestError("Blocked private/internal URL", request=httpx.Request("GET", current))
-        response = httpx.get(current, headers=headers, timeout=timeout, follow_redirects=False)
-        if response.status_code not in (301, 302, 303, 307, 308):
-            return response
-        location = response.headers.get("location")
-        if not location:
-            return response
-        current = urljoin(str(response.url), location)
-    raise httpx.RequestError("Too many redirects", request=httpx.Request("GET", current))
 
 # PDF extraction (optional dependency)
 try:
@@ -222,9 +178,19 @@ def _empty_result(url: str, error: str = "") -> dict:
 # ----------------------------------------------------------------------
 # Main content fetcher
 # ----------------------------------------------------------------------
-def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) -> dict:
-    """Fetch and extract meaningful content from a webpage with caching."""
-    cache_key = generate_cache_key(url)
+def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
+                          max_bytes: int = None) -> dict:
+    """Fetch and extract meaningful content from a webpage with caching.
+
+    ``max_bytes`` raises the download budget per call (clamped to the hard
+    cap); the default is the soft cap. When the body is cut short the result
+    carries ``truncated``/``fetched_bytes``/``total_bytes`` so callers can
+    tell the model the content is partial (#3812).
+    """
+    effective_cap = min(max_bytes or WEB_FETCH_SOFT_MAX_BYTES, WEB_FETCH_HARD_MAX_BYTES)
+    # The cap is part of the cache identity: a truncated soft-cap fetch must
+    # not be served to a later full-budget request for the same URL.
+    cache_key = generate_cache_key(f"{url}#cap={effective_cap}")
     cache_file = CONTENT_CACHE_DIR / f"{cache_key}.cache"
 
     # Check cache
@@ -247,18 +213,24 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) ->
     # Fetch
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "User-Agent": WEB_FETCH_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
+            # identity so the streamed size cap in _get_public_url stays honest
+            # (a compressed body can decode to far more than Content-Length).
+            "Accept-Encoding": "identity",
             "Connection": "keep-alive",
         }
-        response = _get_public_url(url, headers=headers, timeout=timeout)
+        response = _get_public_url(url, headers=headers, timeout=timeout,
+                                   max_bytes=effective_cap)
 
         if response.status_code == 429:
             raise RateLimitError(f"Rate limit hit for {url} (attempt {retry_attempt})")
 
         response.raise_for_status()
+    except BodyTooLargeError as e:
+        error_logger.warning(f"Refused oversized body for {url}: {e}")
+        return _empty_result(url, f"TooLarge: {e}")
     except httpx.HTTPStatusError as e:
         error_logger.warning(f"HTTP {e.response.status_code} fetching {url}: {e}")
         return _empty_result(url, f"HTTP {e.response.status_code}: {e}")
@@ -269,9 +241,27 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) ->
         error_logger.error(str(e))
         return _empty_result(url, str(e))
 
+    # Size bookkeeping shared by every content branch below. getattr keeps
+    # plain httpx.Response stand-ins (tests) working without the cap fields.
+    _size_fields = {
+        "truncated": getattr(response, "truncated", False),
+        "fetched_bytes": len(response.content),
+        "total_bytes": getattr(response, "declared_bytes", None),
+    }
+
     # PDF handling
     content_type = response.headers.get("Content-Type", "").lower()
     if "application/pdf" in content_type or url.lower().endswith(".pdf"):
+        if _size_fields["truncated"]:
+            # A PDF cut mid-stream is not parseable; unlike text there is no
+            # useful partial result, so report the budget problem instead.
+            _declared = _size_fields["total_bytes"]
+            return _empty_result(
+                url,
+                f"TooLarge: PDF exceeds the {effective_cap:,}-byte fetch budget"
+                + (f" (size {_declared:,} bytes)" if _declared else "")
+                + "; retry with a larger budget if it fits under the hard cap",
+            )
         if pdf_extract_text is None:
             logger.error("pdfminer.six is not installed; cannot extract PDF text.")
             pdf_text = ""
@@ -295,6 +285,42 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) ->
             "js_message": "",
             "success": bool(pdf_text),
             "error": "" if pdf_text else "Failed to extract PDF text",
+            **_size_fields,
+        }
+        _cache_result(cache_file, cache_key, result, url)
+        return result
+
+    # Plain-text / Markdown / JSON handling. Sources like
+    # raw.githubusercontent.com serve Markdown as `text/plain`, JSON APIs and
+    # raw config files serve `application/json`, and a lot of code and tool
+    # docs live in `.md` / `.txt`. These have no HTML structure, so the HTML
+    # branch below would extract nothing and report "no readable text content".
+    # Return the body verbatim instead. The `is_html` guard keeps real HTML
+    # (including `application/xhtml+xml`) on the parsing path; the `json` check
+    # covers `application/json` and `+json` suffixes; the URL-suffix fallback
+    # catches servers that mislabel text files as `application/octet-stream`.
+    is_html = "html" in content_type
+    is_json = "json" in content_type
+    url_path = url.lower().split("?", 1)[0].split("#", 1)[0]
+    looks_like_text_file = url_path.endswith(
+        (".md", ".markdown", ".txt", ".text", ".json", ".jsonl")
+    )
+    if not is_html and (content_type.startswith("text/") or is_json or looks_like_text_file):
+        text_body = (response.text or "").strip()
+        result = {
+            "url": url,
+            "title": os.path.basename(url_path) or url,
+            "content": text_body,
+            "lists": [],
+            "tables": [],
+            "code_blocks": [],
+            "meta_description": "",
+            "meta_keywords": "",
+            "js_rendered": False,
+            "js_message": "",
+            "success": bool(text_body),
+            "error": "" if text_body else "Empty response body",
+            **_size_fields,
         }
         _cache_result(cache_file, cache_key, result, url)
         return result
@@ -357,6 +383,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) ->
         "js_message": js_message,
         "success": True,
         "error": "",
+        **_size_fields,
     }
     _cache_result(cache_file, cache_key, result, url)
     return result

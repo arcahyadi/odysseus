@@ -26,6 +26,7 @@
  *   openFxPopup:                     (layer: object, anchor: HTMLElement) => void,
  *   editAdjLayer:                    (layer: object, adj: object, anchor: HTMLElement) => void,
  *   createLayer:                     (name: string, w: number, h: number) => object,
+ *   renderLayer?:                    (layer: object) => HTMLCanvasElement,
  *   lassoToMask:                     () => void,
  *   wandToMask:                      () => void,
  *   getActiveMaskLayer:              () => object | null,
@@ -54,7 +55,7 @@ export function createLayerPanelRenderer(deps) {
   const {
     composite, saveState, showLayerThumb, hideLayerThumb,
     loadLayerAlphaAsSelection, openFxPopup, editAdjLayer,
-    createLayer, lassoToMask, wandToMask, getActiveMaskLayer,
+    createLayer, renderLayer, lassoToMask, wandToMask, getActiveMaskLayer,
     syncFxPanelToActiveLayerIfPresent,
     dragSortModule, uiModule,
   } = deps;
@@ -336,7 +337,7 @@ export function createLayerPanelRenderer(deps) {
         mergeDownBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           saveState(`Merge "${layer.name}" down`);
-          mergeLayerDownAtIndex(i);
+          mergeLayerDownAtIndex(i, renderLayer);
           composite();
           render();
           uiModule.showToast('Layer merged down');

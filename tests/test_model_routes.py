@@ -48,12 +48,16 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
         _ping_endpoint,
         _parse_model_list,
         _normalize_refresh_mode,
+        _normalize_endpoint_refresh_mode,
+        _endpoint_refresh_mode,
+        _is_google_api_base,
         _truthy,
         _speech_settings_using_endpoint,
         _clear_speech_settings_for_endpoint,
         _endpoint_settings_using_endpoint,
         _clear_endpoint_settings_for_endpoint,
         _clear_user_pref_endpoint_refs,
+        _default_endpoint_needs_assignment,
         _PROVIDER_CURATED,
     )
     from src.llm_core import ANTHROPIC_MODELS
@@ -86,13 +90,16 @@ def test_clear_speech_endpoint_settings_resets_tts_and_stt():
     }
 
 
-def test_endpoint_cleanup_removes_primary_and_fallback_references():
+def test_endpoint_cleanup_preserves_legacy_default_fallback_data():
     settings = {
         "default_endpoint_id": "dead",
         "default_model": "primary",
         "default_model_fallbacks": [
             {"endpoint_id": "dead", "model": "fallback-a"},
             {"endpoint_id": "keep", "model": "fallback-b"},
+        ],
+        "foreground_model_fallbacks": [
+            {"endpoint_id": "dead", "model": "foreground"},
         ],
         "utility_model_fallbacks": [{"endpoint_id": "dead", "model": "utility"}],
         "vision_model_fallbacks": [{"endpoint_id": "dead", "model": "vision"}],
@@ -102,14 +109,14 @@ def test_endpoint_cleanup_removes_primary_and_fallback_references():
 
     assert _endpoint_settings_using_endpoint(settings, "dead", include_speech=True) == [
         "Default Model",
-        "Default Model Fallbacks",
+        "Foreground Model Fallbacks",
         "Utility Model Fallbacks",
         "Vision Model Fallbacks",
         "Speech to Text",
     ]
     assert _clear_endpoint_settings_for_endpoint(settings, "dead", include_speech=True) == [
         "Default Model",
-        "Default Model Fallbacks",
+        "Foreground Model Fallbacks",
         "Utility Model Fallbacks",
         "Vision Model Fallbacks",
         "Speech to Text",
@@ -117,20 +124,31 @@ def test_endpoint_cleanup_removes_primary_and_fallback_references():
     assert settings["default_endpoint_id"] == ""
     assert settings["default_model"] == ""
     assert settings["default_model_fallbacks"] == [
+        {"endpoint_id": "dead", "model": "fallback-a"},
         {"endpoint_id": "keep", "model": "fallback-b"},
     ]
+    assert settings["foreground_model_fallbacks"] == []
     assert settings["utility_model_fallbacks"] == []
     assert settings["vision_model_fallbacks"] == []
     assert settings["stt_provider"] == "disabled"
     assert settings["stt_model"] == "base"
 
 
-def test_endpoint_cleanup_updates_scoped_and_legacy_user_prefs():
+def test_endpoint_cleanup_updates_active_scoped_prefs_but_preserves_legacy_data():
     scoped = {
+        "foreground_model_fallbacks": [
+            {"endpoint_id": "dead", "model": "ownerless"},
+        ],
+        "default_model_fallbacks": [
+            {"endpoint_id": "dead", "model": "legacy-ownerless"},
+        ],
         "_users": {
             "alice": {
                 "utility_endpoint_id": "dead",
                 "utility_model": "utility",
+                "foreground_model_fallbacks": [
+                    {"endpoint_id": "dead", "model": "foreground"},
+                ],
                 "vision_model_fallbacks": [{"endpoint_id": "dead", "model": "vision"}],
             },
             "bob": {
@@ -139,10 +157,15 @@ def test_endpoint_cleanup_updates_scoped_and_legacy_user_prefs():
             },
         },
     }
-    assert _clear_user_pref_endpoint_refs(scoped, "dead") == 1
+    assert _clear_user_pref_endpoint_refs(scoped, "dead") == 2
+    assert scoped["foreground_model_fallbacks"] == []
+    assert scoped["default_model_fallbacks"] == [
+        {"endpoint_id": "dead", "model": "legacy-ownerless"},
+    ]
     assert scoped["_users"]["alice"] == {
         "utility_endpoint_id": "",
         "utility_model": "",
+        "foreground_model_fallbacks": [],
         "vision_model_fallbacks": [],
     }
     assert scoped["_users"]["bob"]["default_endpoint_id"] == "keep"
@@ -150,8 +173,30 @@ def test_endpoint_cleanup_updates_scoped_and_legacy_user_prefs():
     legacy = {
         "default_model_fallbacks": [{"endpoint_id": "dead", "model": "chat"}],
     }
-    assert _clear_user_pref_endpoint_refs(legacy, "dead") == 1
-    assert legacy["default_model_fallbacks"] == []
+    assert _clear_user_pref_endpoint_refs(legacy, "dead") == 0
+    assert legacy["default_model_fallbacks"] == [
+        {"endpoint_id": "dead", "model": "chat"}
+    ]
+
+
+# ── _default_endpoint_needs_assignment (add-endpoint auto-default) ──
+
+def test_default_assignment_when_none_configured():
+    # Nothing configured yet → first added endpoint should become the default.
+    assert _default_endpoint_needs_assignment("", {"a", "b"}) is True
+
+
+def test_default_assignment_when_current_default_disabled():
+    # #3586: the configured default points at an endpoint that is no longer
+    # enabled (the user disabled it). Adding a new endpoint must reassign the
+    # default — otherwise Memory → Tidy keeps failing with "No default model
+    # configured" even though an enabled endpoint exists.
+    assert _default_endpoint_needs_assignment("disabled-ep", {"new-ep"}) is True
+
+
+def test_default_preserved_when_current_default_enabled():
+    # Normal case: the configured default is still enabled → leave it alone.
+    assert _default_endpoint_needs_assignment("live-ep", {"live-ep", "new-ep"}) is False
 
 
 # ── _match_provider_curated ──
@@ -183,6 +228,9 @@ class TestMatchProviderCurated:
 
     def test_ollama_url(self):
         assert _match_provider_curated("https://ollama.com/api", "openai") == "ollama"
+
+    def test_kimi_code_url(self):
+        assert _match_provider_curated("https://api.kimi.com/coding/v1", "openai") == "kimi-code"
 
     def test_no_url_match_returns_provider(self):
         assert _match_provider_curated("https://localhost:1234", "openai") == "openai"
@@ -291,6 +339,12 @@ class TestCurateModels:
         assert curated == models
         assert extra == []
 
+    def test_kimi_code_partitions(self):
+        models = ["kimi-for-coding", "other-model"]
+        curated, extra = _curate_models(models, "kimi-code")
+        assert "kimi-for-coding" in curated
+        assert "other-model" in extra
+
     def test_curated_sorted_by_priority(self):
         models = ["gpt-4o-mini", "gpt-4o", "o3"]
         curated, _ = _curate_models(models, "openai")
@@ -347,6 +401,8 @@ class TestIsChatModel:
         "gpt-4o", "gpt-4o-mini", "claude-sonnet-4", "llama-3.3-70b",
         "deepseek-chat", "gemini-2.0-flash", "o3",
         "llama-4-scout-17b-16e-instruct",
+        "gemma-2b-it", "google/gemma-2b-it",
+        "bigcode/starcoder2-15b-instruct",
     ])
     def test_chat_models(self, model_id):
         assert _is_chat_model(model_id) is True
@@ -371,6 +427,12 @@ class TestIsChatModel:
     def test_legacy_openai_instruct_is_not_chat(self):
         assert _is_chat_model("gpt-3.5-turbo-instruct") is False
 
+    @pytest.mark.parametrize("bad", [None, 123, 4.5, ["x"], {"a": 1}])
+    def test_non_string_id_is_treated_as_chat(self, bad):
+        # Defensive boundary: a non-compliant upstream can yield a non-string
+        # model id; it must not crash on .lower() (treated as chat-capable).
+        assert _is_chat_model(bad) is True
+
 
 # ── _classify_endpoint ──
 
@@ -387,8 +449,19 @@ class TestClassifyEndpoint:
     def test_private_10(self):
         assert _classify_endpoint("http://10.0.0.5:8000") == "local"
 
+    @pytest.mark.parametrize("host", [
+        "10.example-cloud.com",
+        "172.16.example-cloud.com",
+        "192.168.example-cloud.com",
+    ])
+    def test_private_prefix_dns_names_are_api(self, host):
+        assert _classify_endpoint(f"https://{host}/v1") == "api"
+
     def test_public_api(self):
         assert _classify_endpoint("https://api.openai.com/v1") == "api"
+
+    def test_openrouter_api(self):
+        assert _classify_endpoint("https://openrouter.ai/api/v1") == "api"
 
     def test_empty_string(self):
         assert _classify_endpoint("") == "api"
@@ -417,6 +490,28 @@ class TestClassifyEndpoint:
         assert _normalize_refresh_mode("auto", "proxy") == "manual"
         assert _normalize_refresh_mode("manual", "proxy") == "manual"
         assert _normalize_refresh_mode("auto", "api") == "auto"
+
+    def test_google_refresh_mode_defaults_manual_unless_explicit(self):
+        base = "https://generativelanguage.googleapis.com/v1beta/openai"
+        assert _normalize_endpoint_refresh_mode("", "api", base) == "manual"
+        assert _normalize_endpoint_refresh_mode(None, "auto", base) == "manual"
+        assert _normalize_endpoint_refresh_mode("auto", "api", base) == "auto"
+
+    def test_only_gemini_native_host_uses_google_models_api(self):
+        assert _is_google_api_base("https://generativelanguage.googleapis.com/v1beta/openai") is True
+        assert _is_google_api_base(
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints/openapi"
+        ) is False
+
+    def test_existing_google_endpoint_refresh_mode_defaults_manual(self):
+        ep = SimpleNamespace(
+            model_refresh_mode=None,
+            endpoint_kind="api",
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        )
+        assert _endpoint_refresh_mode(ep, "api") == "manual"
+        ep.model_refresh_mode = "auto"
+        assert _endpoint_refresh_mode(ep, "api") == "auto"
 
     def test_parse_model_list_accepts_json_and_text(self):
         assert _parse_model_list('["a", "b", "a"]') == ["a", "b"]
@@ -522,6 +617,83 @@ class TestSetupProbeSafety:
 
         assert _probe_endpoint("https://api.groq.com/openai/v1") == _PROVIDER_CURATED["groq"]
 
+    def test_google_probe_uses_native_paginated_models_api(self, monkeypatch):
+        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
+        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        seen = []
+
+        def fake_get(url, headers=None, params=None, timeout=None, verify=None, **kwargs):
+            seen.append((url, headers, params, timeout, verify))
+            request = httpx.Request("GET", url)
+            page_token = (params or {}).get("pageToken")
+            if page_token:
+                return httpx.Response(
+                    200,
+                    request=request,
+                    json={
+                        "models": [{
+                            "name": "models/gemini-page-two",
+                            "supportedGenerationMethods": ["generateContent"],
+                        }]
+                    },
+                )
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "models": [
+                        {
+                            "name": "models/gemini-page-one",
+                            "supportedGenerationMethods": ["generateContent"],
+                        },
+                        {
+                            "baseModelId": "gemini-base-id",
+                            "name": "models/ignored-version",
+                            "supportedGenerationMethods": ["generateText"],
+                        },
+                        {
+                            "name": "models/imagen-4.0-generate-001",
+                            "supportedGenerationMethods": ["predict"],
+                        },
+                        {
+                            "name": "models/text-embedding-example",
+                            "supportedGenerationMethods": ["embedContent"],
+                        },
+                        {"name": "models/missing-method-metadata"},
+                    ],
+                    "nextPageToken": "next-page",
+                },
+            )
+
+        monkeypatch.setattr(model_routes.httpx, "get", fake_get)
+
+        assert _probe_endpoint("https://generativelanguage.googleapis.com/v1beta/openai", "google-key") == [
+            "gemini-page-one",
+            "gemini-base-id",
+            "gemini-page-two",
+        ]
+        assert [call[0] for call in seen] == [
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            "https://generativelanguage.googleapis.com/v1beta/models",
+        ]
+        assert seen[0][1] == {"Accept": "application/json", "x-goog-api-key": "google-key"}
+        assert seen[0][2] == {"pageSize": 1000}
+        assert seen[1][1] == {"Accept": "application/json", "x-goog-api-key": "google-key"}
+        assert seen[1][2] == {"pageSize": 1000, "pageToken": "next-page"}
+
+    def test_google_probe_does_not_use_curated_fallback_on_failure(self, monkeypatch):
+        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
+        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+
+        def fake_get(url, headers=None, params=None, timeout=None, verify=None, **kwargs):
+            request = httpx.Request("GET", url)
+            response = httpx.Response(401, request=request)
+            raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
+
+        monkeypatch.setattr(model_routes.httpx, "get", fake_get)
+
+        assert _probe_endpoint("https://generativelanguage.googleapis.com/v1beta/openai", "bad-key") == []
+
     def test_keyed_anthropic_probe_does_not_fallback_on_failure(self, monkeypatch):
         monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
         monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
@@ -602,7 +774,39 @@ def test_generic_endpoint_error_message_preserves_probe_error():
         {"error": "HTTP 401"},
     )
 
-    assert msg == "No models found for that provider/key. Last probe error: HTTP 401."
+    # Issue #25: the message must include the probed URL so the user can
+    # self-diagnose (was opaque "No models found for that provider/key").
+    assert "No models found for that provider/key" in msg
+    assert "HTTP 401" in msg
+    assert "https://api.example.com/v1/models" in msg
+
+
+def test_lmstudio_endpoint_error_message_includes_hint_and_probed_url():
+    # Issue #25: when the user pastes an LM Studio URL, surface a port-aware
+    # hint and the URL we actually probed (not the bare base URL).
+    msg = model_routes._model_endpoint_error_message(
+        "http://localhost:1234/v1",
+        {"error": "HTTP 200"},  # 200-with-empty-list is the LM Studio trap
+    )
+
+    assert "LM Studio" in msg
+    assert "port 1234" in msg
+    assert "http://localhost:1234/v1/models" in msg
+    assert "Developer Server" in msg
+
+
+def test_lmstudio_error_for_bare_host_port_probes_v1_models(monkeypatch):
+    # Regression: build_models_url must add /v1 for path-less LM Studio URLs
+    # (the OpenAI-compatible branch lands on /v1/models for LM Studio).
+    # _is_ollama_native_url would otherwise match localhost+empty path and
+    # route to /api/tags, masking the LM Studio URL we want to assert on.
+    monkeypatch.setattr("src.llm_core._is_ollama_native_url", lambda url: False)
+    msg = model_routes._model_endpoint_error_message(
+        "http://localhost:1234",
+        {"error": "HTTP 200"},
+    )
+    assert "LM Studio" in msg
+    assert "http://localhost:1234/v1/models" in msg
 
 
 # ── _rewrite_loopback_for_docker (issue #25: LM Studio on host loopback) ──
@@ -830,6 +1034,44 @@ def test_patch_models_pinned_does_not_clobber_hidden(monkeypatch):
     assert json.loads(ep.pinned_models) == ["deploy-1"]
 
 
+def test_patch_api_hidden_payload_converts_to_pinned(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://openrouter.ai/api/v1",
+        cached_models=json.dumps(["m1", "m2", "m3"]),
+        pinned_models=None,
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "PATCH")
+
+    result = asyncio.run(endpoint("ep1", _PinnedFakeRequest(body={"hidden": ["m2"]})))
+
+    assert result["pinned_count"] == 2
+    assert result["hidden_count"] == 0
+    assert json.loads(ep.pinned_models) == ["m1", "m3"]
+    assert ep.hidden_models is None
+
+
+def test_patch_api_hidden_empty_pins_all_cached_models(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://openrouter.ai/api/v1",
+        cached_models=json.dumps(["m1", "m2", "m3"]),
+        pinned_models=None,
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "PATCH")
+
+    result = asyncio.run(endpoint("ep1", _PinnedFakeRequest(body={"hidden": []})))
+
+    assert result["pinned_count"] == 3
+    assert result["hidden_count"] == 0
+    assert json.loads(ep.pinned_models) == ["m1", "m2", "m3"]
+    assert ep.hidden_models is None
+
+
 def test_get_models_returns_pinned_when_probe_empty(monkeypatch):
     ep = _make_endpoint(pinned_models=json.dumps(["deploy-1"]))
     db = _PinnedFakeDb([ep])
@@ -843,6 +1085,67 @@ def test_get_models_returns_pinned_when_probe_empty(monkeypatch):
     ids = [row["id"] for row in result]
     assert ids == ["deploy-1"]
     assert result[0]["is_pinned"] is True
+
+
+def test_get_api_models_marks_picker_as_pinned_only(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
+        pinned_models=json.dumps(["openai/gpt-image-1"]),
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+
+    result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
+
+    by_id = {row["id"]: row for row in result}
+    assert by_id["openai/gpt-image-1"]["picker_requires_pinning"] is True
+    assert by_id["openai/gpt-image-1"]["is_pinned"] is True
+    assert by_id["anthropic/claude-sonnet-4"]["picker_requires_pinning"] is True
+    assert by_id["anthropic/claude-sonnet-4"]["is_pinned"] is False
+
+
+def test_get_fresh_api_models_marks_cached_inventory_as_pinned(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
+        pinned_models=None,
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+
+    result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
+
+    assert [row["id"] for row in result] == [
+        "openai/gpt-image-1",
+        "anthropic/claude-sonnet-4",
+    ]
+    assert all(row["picker_requires_pinning"] is True for row in result)
+    assert all(row["is_pinned"] is True for row in result)
+
+
+def test_get_legacy_api_models_preserves_hidden_selection_as_pinned(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["m1", "m2", "m3"]),
+        hidden_models=json.dumps(["m2"]),
+        pinned_models=None,
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+
+    result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
+
+    by_id = {row["id"]: row for row in result}
+    assert by_id["m1"]["is_pinned"] is True
+    assert by_id["m2"]["is_pinned"] is False
+    assert by_id["m3"]["is_pinned"] is True
 
 
 def test_reprobe_preserves_pinned_models(monkeypatch):
@@ -964,16 +1267,21 @@ def _create_form_kwargs(**overrides):
     return kwargs
 
 
-def _patch_create_deps(monkeypatch, db):
+def _patch_create_deps(monkeypatch, db, settings=None):
     import src.auth_helpers as auth_helpers
+    # Shared, in-memory settings so the auto-default write path stays hermetic
+    # (no real settings.json). Returned so tests can assert what was persisted.
+    settings = {"default_endpoint_id": "exists"} if settings is None else settings
     monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
     monkeypatch.setattr(model_routes, "ModelEndpoint", _RecordingEndpoint)
     monkeypatch.setattr(model_routes, "_normalize_base", lambda b: b)
     monkeypatch.setattr(model_routes, "_rewrite_loopback_for_docker", lambda b, **k: b)
-    monkeypatch.setattr(model_routes, "_load_settings", lambda: {"default_endpoint_id": "exists"})
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: settings)
+    monkeypatch.setattr(model_routes, "_save_settings", lambda s: settings.update(s))
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda u: u)
     monkeypatch.setattr(auth_helpers, "get_current_user", lambda req: None)
+    return settings
 
 
 def test_list_model_endpoints_returns_key_fingerprint(monkeypatch):
@@ -999,6 +1307,98 @@ def test_list_model_endpoints_returns_key_fingerprint(monkeypatch):
     assert result[1]["api_key_fingerprint"] == ""
 
 
+def test_list_api_endpoint_defaults_inventory_to_visible_when_none_pinned(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
+        pinned_models=None,
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints", "GET")
+
+    result = endpoint(_PinnedFakeRequest())
+
+    assert result[0]["models"] == [
+        "openai/gpt-image-1",
+        "anthropic/claude-sonnet-4",
+    ]
+    assert result[0]["pinned_models"] == result[0]["models"]
+    assert result[0]["model_count"] == 2
+    assert result[0]["picker_requires_pinning"] is True
+    assert result[0]["status"] == "online"
+
+
+def test_api_picker_preserves_explicit_empty_selection():
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
+        pinned_models=json.dumps([]),
+    )
+
+    models, pinned = model_routes._picker_models_for_endpoint(
+        ep, ep.base_url, ep.endpoint_kind
+    )
+
+    assert models == []
+    assert pinned == []
+
+
+def test_list_api_endpoint_returns_pinned_picker_models(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
+        pinned_models=json.dumps(["openai/gpt-image-1"]),
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints", "GET")
+
+    result = endpoint(_PinnedFakeRequest())
+
+    assert result[0]["models"] == ["openai/gpt-image-1"]
+    assert result[0]["pinned_models"] == ["openai/gpt-image-1"]
+    assert result[0]["model_count"] == 2
+
+
+def test_list_api_endpoint_pinned_models_ignore_stale_hidden_state(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
+        hidden_models=json.dumps(["openai/gpt-image-1"]),
+        pinned_models=json.dumps(["openai/gpt-image-1"]),
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints", "GET")
+
+    result = endpoint(_PinnedFakeRequest())
+
+    assert result[0]["models"] == ["openai/gpt-image-1"]
+
+
+def test_list_api_endpoint_derives_pins_from_legacy_hidden_state(monkeypatch):
+    ep = _make_endpoint(
+        base_url="https://openrouter.ai/api/v1",
+        cached_models=json.dumps(["m1", "m2", "m3"]),
+        hidden_models=json.dumps(["m2"]),
+        pinned_models=None,
+    )
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    endpoint = _get_route("/api/model-endpoints", "GET")
+
+    result = endpoint(_PinnedFakeRequest())
+
+    assert result[0]["models"] == ["m1", "m3"]
+    assert result[0]["pinned_models"] == ["m1", "m3"]
+    assert json.loads(ep.pinned_models) == ["m1", "m3"]
+
+
 def test_post_creates_endpoint_with_pinned_models(monkeypatch):
     db = _PinnedFakeDb([])  # no existing row → fresh create path
     _patch_create_deps(monkeypatch, db)
@@ -1016,6 +1416,26 @@ def test_post_creates_endpoint_with_pinned_models(monkeypatch):
     # Persisted onto the created row.
     assert len(db.added) == 1
     assert json.loads(db.added[0].pinned_models) == ["deploy-1", "deploy-2"]
+
+
+def test_post_google_endpoint_defaults_to_manual_refresh_when_mode_omitted(monkeypatch):
+    db = _PinnedFakeDb([])
+    _patch_create_deps(monkeypatch, db)
+    monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *args, **kwargs: ["gemini-test"])
+    create = _get_route("/api/model-endpoints", "POST")
+
+    create(
+        _PinnedFakeRequest(),
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        **_create_form_kwargs(
+            api_key="google-key",
+            endpoint_kind="api",
+            model_refresh_mode="",
+        ),
+    )
+
+    assert len(db.added) == 1
+    assert db.added[0].model_refresh_mode == "manual"
 
 
 def test_post_dedupe_existing_merges_and_returns_pinned(monkeypatch):
@@ -1087,6 +1507,48 @@ def test_post_same_base_url_different_api_key_creates_distinct_endpoint(monkeypa
     assert len(db.added) == 1
     assert db.added[0].base_url == "https://api.example.test/v1"
     assert db.added[0].api_key == "key-two"
+
+
+def test_post_reassigns_default_when_current_default_disabled(monkeypatch):
+    # #3586: the configured default points at a now-disabled endpoint. Adding a
+    # new endpoint must promote it to the default, otherwise raw-setting readers
+    # (Memory → Tidy) keep failing with "No default model configured".
+    disabled = _make_endpoint(id="dead", base_url="http://old-host/v1", is_enabled=False)
+    db = _PinnedFakeDb([disabled])
+    settings = _patch_create_deps(
+        monkeypatch, db, settings={"default_endpoint_id": "dead", "default_model": "stale"}
+    )
+    create = _get_route("/api/model-endpoints", "POST")
+
+    create(
+        _PinnedFakeRequest(),
+        base_url="http://new-host:1234/v1",
+        **_create_form_kwargs(),
+    )
+
+    new_id = db.added[0].id
+    assert settings["default_endpoint_id"] == new_id
+    assert settings["default_endpoint_id"] != "dead"
+
+
+def test_post_keeps_default_when_current_default_enabled(monkeypatch):
+    # Counter-case: an enabled default must be left untouched when another
+    # endpoint is added.
+    live = _make_endpoint(id="live", base_url="http://live-host/v1", is_enabled=True)
+    db = _PinnedFakeDb([live])
+    settings = _patch_create_deps(
+        monkeypatch, db, settings={"default_endpoint_id": "live", "default_model": "live-model"}
+    )
+    create = _get_route("/api/model-endpoints", "POST")
+
+    create(
+        _PinnedFakeRequest(),
+        base_url="http://another-host:1234/v1",
+        **_create_form_kwargs(),
+    )
+
+    assert settings["default_endpoint_id"] == "live"
+    assert settings["default_model"] == "live-model"
 
 
 def test_post_same_base_url_same_api_key_still_dedupes(monkeypatch):
@@ -1175,6 +1637,14 @@ class _ImmediateThread:
         self.target()
 
 
+class _NoopThread:
+    def __init__(self, target, daemon=None):
+        self.target = target
+
+    def start(self):
+        return None
+
+
 def _wait_for(predicate, timeout=2.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1202,6 +1672,7 @@ def _route_ep(
     pinned_models=None,
     refresh_mode="auto",
     refresh_timeout=None,
+    owner=None,
 ):
     return SimpleNamespace(
         id=id,
@@ -1218,7 +1689,7 @@ def _route_ep(
         model_refresh_interval=None,
         model_refresh_timeout=refresh_timeout,
         supports_tools=None,
-        owner=None,
+        owner=owner,
         created_at=None,
         updated_at=None,
     )
@@ -1231,11 +1702,78 @@ def _route_request():
     )
 
 
-def test_api_models_returns_cached_proxy_models_without_refresh_probe(monkeypatch):
+def test_api_models_rejects_api_token_without_chat_scope(monkeypatch):
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    def fail_session():
+        raise AssertionError("model DB should not be queried without chat scope")
+
+    monkeypatch.setattr(model_routes, "SessionLocal", fail_session)
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            current_user="api",
+            api_token=True,
+            api_token_owner="alice",
+            api_token_scopes=["documents:read"],
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                auth_manager=SimpleNamespace(is_configured=True, is_admin=lambda user: False),
+            ),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        _route_endpoint(router, "/api/models")(request)
+
+    assert exc.value.status_code == 403
+    assert "chat" in str(exc.value.detail)
+
+
+def test_api_models_scopes_api_token_to_token_owner(monkeypatch):
+    rows = [
+        _route_ep("alice", "http://alice.example/v1", cached_models=["alice-model"], owner="alice"),
+        _route_ep("shared", "http://shared.example/v1", cached_models=["shared-model"], owner=None),
+        _route_ep("bob", "http://bob.example/v1", cached_models=["bob-model"], owner="bob"),
+    ]
+    db = _RouteDb(rows)
+    router = model_routes.setup_model_routes(model_discovery=None)
+    admin_checks = []
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(threading, "Thread", _NoopThread)
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            current_user="api",
+            api_token=True,
+            api_token_owner="alice",
+            api_token_scopes=["chat"],
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                auth_manager=SimpleNamespace(
+                    is_configured=True,
+                    is_admin=lambda user: admin_checks.append(user) or False,
+                ),
+            ),
+        ),
+    )
+
+    result = _route_endpoint(router, "/api/models")(request)
+
+    assert [item["endpoint_name"] for item in result["items"]] == ["alice", "shared"]
+    assert admin_checks == ["alice"]
+
+
+def test_api_models_returns_only_pinned_proxy_models_without_refresh_probe(monkeypatch):
     row = _route_ep(
         "proxy",
         "http://100.117.136.97:34521/v1",
-        cached_models=["cached-model"],
+        cached_models=["cached-model", "other-model"],
+        pinned_models=["cached-model"],
         endpoint_kind="proxy",
         api_key="fake-key",
         refresh_mode="manual",
@@ -1257,10 +1795,59 @@ def test_api_models_returns_cached_proxy_models_without_refresh_probe(monkeypatc
     result = _route_endpoint(router, "/api/models")(_route_request())
 
     assert result["items"][0]["models"] == ["cached-model"]
+    assert result["items"][0]["models_extra"] == []
     assert result["items"][0]["category"] == "api"
     assert result["items"][0]["endpoint_kind"] == "proxy"
     assert "offline" not in result["items"][0]
-    assert json.loads(row.cached_models) == ["cached-model"]
+    assert json.loads(row.cached_models) == ["cached-model", "other-model"]
+
+
+def test_api_models_openrouter_uses_pinned_models_not_hidden(monkeypatch):
+    row = _route_ep(
+        "openrouter",
+        "https://openrouter.ai/api/v1",
+        cached_models=["openai/gpt-image-1", "anthropic/claude-sonnet-4"],
+        pinned_models=["openai/gpt-image-1"],
+        api_key="fake-key",
+    )
+    row.hidden_models = json.dumps(["openai/gpt-image-1"])
+    db = _RouteDb([row])
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
+    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    monkeypatch.setattr(threading, "Thread", _NoopThread)
+
+    result = _route_endpoint(router, "/api/models")(_route_request())
+
+    assert result["items"][0]["endpoint_name"] == "openrouter"
+    assert result["items"][0]["category"] == "api"
+    assert result["items"][0]["models"] == ["openai/gpt-image-1"]
+
+
+def test_api_models_openrouter_defaults_cached_models_visible(monkeypatch):
+    row = _route_ep(
+        "openrouter",
+        "https://openrouter.ai/api/v1",
+        cached_models=["m1", "m2", "m3"],
+        pinned_models=None,
+        api_key="fake-key",
+    )
+    db = _RouteDb([row])
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
+    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    monkeypatch.setattr(threading, "Thread", _NoopThread)
+
+    result = _route_endpoint(router, "/api/models")(_route_request())
+
+    assert result["items"][0]["endpoint_name"] == "openrouter"
+    assert result["items"][0]["models"] == ["m1", "m2", "m3"]
 
 
 @pytest.mark.asyncio

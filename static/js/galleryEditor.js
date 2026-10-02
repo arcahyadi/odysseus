@@ -54,12 +54,12 @@ import {
   buildThumbnail as _buildThumbnailImpl,
   buildMergedMaskCanvas as _buildMergedMaskCanvasImpl,
 } from './editor/composite-helpers.js';
-import { buildToolbar as _buildToolbar } from './editor/build/toolbar.js';
+import { buildToolbar as _buildToolbar } from './editor/build/toolbar.js?v=20260708sam3';
 import { buildTopbar as _buildTopbar } from './editor/build/topbar.js';
 import {
   controlsHTML as _controlsHTML,
   layerPanelHTML as _layerPanelHTML,
-} from './editor/build/controls.js';
+} from './editor/build/controls.js?v=20260708match1';
 import {
   transformPopupHTML as _transformPopupHTML,
   attachSpinRepeat as _attachSpinRepeat,
@@ -96,14 +96,14 @@ import { createShortcutsPopover } from './editor/shortcuts-popover.js';
 import { wireKeyboardShortcuts } from './editor/keyboard-shortcuts.js';
 import { wireClipboardAndDrop } from './editor/clipboard-and-drop.js';
 import { wireAIModelSelectors } from './editor/ai-models.js';
-import { wireInpaintButtons } from './editor/ai-inpaint.js';
+import { wireInpaintButtons } from './editor/ai-inpaint.js?v=20260708match1';
 import { wireAIToolsMisc } from './editor/ai-tools-misc.js';
 import { wireRembgAndSharpen } from './editor/ai-rembg.js';
 import { wireStrokeToolSliders } from './editor/stroke-tool-sliders.js';
 import { wireImport } from './editor/wire-import.js';
 import { wireMergeButtons } from './editor/wire-merge-buttons.js';
 import { wireSelectionControls } from './editor/wire-selection-controls.js';
-import { wireInpaintControls } from './editor/wire-inpaint-controls.js';
+import { wireInpaintControls } from './editor/wire-inpaint-controls.js?v=20260708match1';
 import { wireTopbar, closeOtherTopbarMenus as _closeOtherTopbarMenus } from './editor/wire-topbar.js';
 import { wireTopbarOverflow } from './editor/wire-topbar-overflow.js';
 import { wireTopbarMenus } from './editor/wire-topbar-menus.js';
@@ -125,6 +125,14 @@ function _syncTransformOverlay() { _syncTransformOverlayImpl(_TRANSFORM_OVERLAY_
 // the inpaint tool for the first time in this editor session we bump
 // the slider to this value (without touching other tools).
 const _INPAINT_DEFAULT_BRUSH = 100;
+let _samAbortController = null;
+
+function _cancelSamQuery(showToast = true) {
+  if (!_samAbortController) return false;
+  try { _samAbortController.abort(); } catch {}
+  if (showToast && uiModule) uiModule.showToast('SAM query cancelled');
+  return true;
+}
 
 function _galleryEditMounted() {
   return !!document.querySelector('#gallery-editor-container .gallery-editor');
@@ -133,6 +141,15 @@ function _galleryEditMounted() {
 if (!window.__galleryEditEscHardGuardInstalled) {
   window.__galleryEditEscHardGuardInstalled = true;
   window.addEventListener('keydown', (e) => {
+    const isSamCancel = !!_samAbortController
+      && (e.key === 'Escape' || ((e.ctrlKey || e.metaKey) && String(e.key || '').toLowerCase() === 'c'));
+    if (isSamCancel) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      _cancelSamQuery();
+      return;
+    }
     if (e.key !== 'Escape') return;
     if (window.__galleryEditLive || _galleryEditMounted()) {
       e.preventDefault();
@@ -264,6 +281,296 @@ const _applyImageTool = createApplyImageTool({
   spinnerModule,
   uiModule,
 });
+
+function _setAiCommandStatus(text, kind = '') {
+  const el = document.getElementById('ge-ai-command-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.dataset.kind = kind || '';
+}
+
+function _escapeAiCommandText(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+}
+
+function _clickToolButton(toolId) {
+  const btn = state.container?.querySelector(`.ge-tool-btn[data-tool="${toolId}"]`);
+  if (btn) btn.click();
+}
+
+function _runExistingButton(id, status) {
+  const btn = document.getElementById(id);
+  if (!btn) {
+    _setAiCommandStatus('That edit is not available in this editor state.', 'error');
+    return false;
+  }
+  if (status) _setAiCommandStatus(status, 'running');
+  btn.click();
+  return true;
+}
+
+function _openSamPrompt() {
+  if (state.tool !== 'sam') {
+    _clickToolButton('sam');
+  } else {
+    const controls = document.getElementById('ge-controls') || document.querySelector('.ge-controls');
+    controls?.classList.remove('dismissed');
+    document.getElementById('ge-sam-section')?.style.removeProperty('display');
+  }
+  requestAnimationFrame(() => {
+    const input = document.getElementById('ge-sam-query');
+    input?.focus();
+    input?.select?.();
+  });
+}
+
+function _buildAiCommandBox() {
+  const wrap = document.createElement('div');
+  wrap.className = 'ge-ai-command ge-ai-command-collapsed';
+  wrap.id = 'ge-ai-command';
+  wrap.innerHTML = `
+    <button type="button" class="ge-ai-command-toggle" id="ge-ai-command-toggle" aria-expanded="false">
+      <span class="ge-btn-ai-mark" aria-hidden="true">✦</span>
+      <span>Quick Edit</span>
+      <svg class="ge-ai-command-toggle-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="6 15 12 9 18 15"></polyline>
+      </svg>
+    </button>
+    <form class="ge-ai-command-form" id="ge-ai-command-form">
+      <input type="text" class="ge-ai-command-input" id="ge-ai-command-input" autocomplete="off" />
+      <button type="submit" class="ge-ai-command-run" id="ge-ai-command-run" title="Run AI edit" aria-label="Run AI edit">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="12" y1="19" x2="12" y2="5"></line>
+          <polyline points="5 12 12 5 19 12"></polyline>
+        </svg>
+      </button>
+      <button type="button" class="ge-ai-command-close" id="ge-ai-command-close" title="Collapse AI edit" aria-label="Collapse AI edit">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+    </form>
+    <div class="ge-ai-command-suggestions" id="ge-ai-command-suggestions" hidden></div>
+    <div class="ge-ai-command-status" id="ge-ai-command-status" aria-live="polite"></div>
+  `;
+  return wrap;
+}
+
+const _AI_COMMAND_SUGGESTIONS = [
+  { label: 'Rotate 90', insert: 'rotate 90', hint: 'Turn the image clockwise', aliases: ['ro', 'rotate', 'right', 'clockwise', 'turn'] },
+  { label: 'Rotate left', insert: 'rotate left', hint: 'Turn the image counter-clockwise', aliases: ['rotate left', 'left', 'counter clockwise', 'ccw'] },
+  { label: 'Rotate 180', insert: 'rotate 180', hint: 'Flip the canvas upside down', aliases: ['rotate 180', 'upside down'] },
+  { label: 'Flip horizontal', insert: 'flip horizontal', hint: 'Mirror left to right', aliases: ['flip', 'mirror', 'horizontal'] },
+  { label: 'Flip vertical', insert: 'flip vertical', hint: 'Mirror top to bottom', aliases: ['flip vertical', 'vertical'] },
+  { label: 'Remove background', insert: 'remove background', hint: 'Make the background transparent', aliases: ['remove bg', 'background', 'transparent', 'cut out'] },
+  { label: 'Upscale', insert: 'upscale 2x', hint: 'Increase image resolution', aliases: ['upscale', 'bigger', 'larger', '2x', '4x'] },
+  { label: 'Denoise', insert: 'denoise', hint: 'Reduce grain and noise', aliases: ['denoise', 'noise', 'grain', 'clean up'] },
+  { label: 'Sharpen', insert: 'sharpen', hint: 'Make details crisper', aliases: ['sharpen', 'sharp', 'clearer', 'crisp', 'enhance'] },
+  { label: 'Enhance face', insert: 'enhance face', hint: 'Restore portrait and skin detail', aliases: ['face', 'portrait', 'skin', 'selfie', 'restore'] },
+  { label: 'Style edit', insert: 'style: ', hint: 'Run a full-image prompt edit', aliases: ['style', 'paint', 'anime', 'photo', 'prompt'] },
+];
+
+function _matchAiCommandSuggestions(query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return [];
+  return _AI_COMMAND_SUGGESTIONS
+    .map((item) => {
+      const hay = [item.label, item.insert, ...(item.aliases || [])].map(v => String(v || '').toLowerCase());
+      const starts = hay.some(v => v.startsWith(q));
+      const contains = hay.some(v => v.includes(q));
+      if (!starts && !contains) return null;
+      return { item, score: starts ? 0 : 1 };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.score - b.score || a.item.label.localeCompare(b.item.label))
+    .slice(0, 6)
+    .map(hit => hit.item);
+}
+
+function _wireAiCommandBox() {
+  const wrap = document.getElementById('ge-ai-command');
+  const toggle = document.getElementById('ge-ai-command-toggle');
+  const closeBtn = document.getElementById('ge-ai-command-close');
+  const form = document.getElementById('ge-ai-command-form');
+  const input = document.getElementById('ge-ai-command-input');
+  const runBtn = document.getElementById('ge-ai-command-run');
+  const suggestions = document.getElementById('ge-ai-command-suggestions');
+  if (!wrap || !form || !input || !runBtn) return;
+  let suggestionItems = [];
+  let suggestionIndex = 0;
+  const hideSuggestions = () => {
+    suggestionItems = [];
+    suggestionIndex = 0;
+    if (suggestions) {
+      suggestions.hidden = true;
+      suggestions.innerHTML = '';
+    }
+  };
+  const renderSuggestions = () => {
+    if (!suggestions || wrap.classList.contains('ge-ai-command-collapsed')) return;
+    suggestionItems = _matchAiCommandSuggestions(input.value);
+    suggestionIndex = Math.min(suggestionIndex, Math.max(0, suggestionItems.length - 1));
+    if (!suggestionItems.length) {
+      hideSuggestions();
+      return;
+    }
+    suggestions.hidden = false;
+    suggestions.innerHTML = suggestionItems.map((item, idx) => `
+      <button type="button" class="ge-ai-command-suggestion${idx === suggestionIndex ? ' active' : ''}" data-ai-command-suggestion="${idx}">
+        <span class="ge-ai-command-suggestion-main">${_escapeAiCommandText(item.label)}</span>
+        <span class="ge-ai-command-suggestion-hint">${_escapeAiCommandText(item.hint || item.insert)}</span>
+      </button>
+    `).join('');
+  };
+  const pickSuggestion = (idx, run = false) => {
+    const item = suggestionItems[idx];
+    if (!item) return false;
+    input.value = item.insert;
+    hideSuggestions();
+    input.focus();
+    if (run) form.requestSubmit();
+    return true;
+  };
+  wrap.addEventListener('pointerdown', (e) => e.stopPropagation());
+  wrap.addEventListener('click', (e) => e.stopPropagation());
+  suggestions?.addEventListener('pointerdown', (e) => e.preventDefault());
+  suggestions?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-ai-command-suggestion]');
+    if (!btn) return;
+    pickSuggestion(Number(btn.dataset.aiCommandSuggestion), true);
+  });
+  const setOpen = (open) => {
+    wrap.classList.toggle('ge-ai-command-collapsed', !open);
+    toggle?.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) requestAnimationFrame(() => {
+      input.focus();
+      renderSuggestions();
+    });
+    else hideSuggestions();
+  };
+  toggle?.addEventListener('click', () => setOpen(wrap.classList.contains('ge-ai-command-collapsed')));
+  closeBtn?.addEventListener('click', () => setOpen(false));
+  input.addEventListener('input', renderSuggestions);
+  input.addEventListener('keydown', (e) => {
+    const open = suggestions && !suggestions.hidden && suggestionItems.length;
+    if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      suggestionIndex = e.key === 'ArrowDown'
+        ? (suggestionIndex + 1) % suggestionItems.length
+        : (suggestionIndex - 1 + suggestionItems.length) % suggestionItems.length;
+      renderSuggestions();
+      return;
+    }
+    if (open && e.key === 'Enter') {
+      e.preventDefault();
+      pickSuggestion(suggestionIndex, true);
+      return;
+    }
+    if (open && e.key === 'Tab') {
+      e.preventDefault();
+      pickSuggestion(suggestionIndex, false);
+      return;
+    }
+    if (open && e.key === 'Escape') {
+      e.preventDefault();
+      hideSuggestions();
+    }
+  });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideSuggestions();
+    const prompt = input.value.trim();
+    if (!prompt) {
+      _setAiCommandStatus('Type what you want changed.', 'error');
+      input.focus();
+      return;
+    }
+    const p = prompt.toLowerCase();
+    try {
+      if (/\brotate\b.*\b180\b|\bupside\s*down\b/.test(p)) {
+        _saveState('Rotate 180');
+        _rotateAllLayers(180);
+        _setAiCommandStatus('Rotated 180.', 'done');
+        return;
+      }
+      if (/\brotate\b.*\b(left|ccw|counter)\b|\bturn\s+left\b/.test(p)) {
+        _saveState('Rotate left');
+        _rotateAllLayers(270);
+        _setAiCommandStatus('Rotated left.', 'done');
+        return;
+      }
+      if (/\brotate\b|\bturn\s+right\b|\bclockwise\b/.test(p)) {
+        _saveState('Rotate 90');
+        _rotateAllLayers(90);
+        _setAiCommandStatus('Rotated 90.', 'done');
+        return;
+      }
+      if (/\bflip\b.*\b(vertical|v)\b|\bmirror\b.*\b(vertical|v)\b/.test(p)) {
+        _saveState('Flip vertical');
+        _flipAllLayers('v');
+        _setAiCommandStatus('Flipped vertical.', 'done');
+        return;
+      }
+      if (/\bflip\b|\bmirror\b/.test(p)) {
+        _saveState('Flip horizontal');
+        _flipAllLayers('h');
+        _setAiCommandStatus('Flipped horizontal.', 'done');
+        return;
+      }
+      if (/\b(remove|erase|cut\s*out|transparent)\b.*\b(bg|background)\b|\b(bg|background)\b.*\b(remove|erase|transparent)\b/.test(p)) {
+        _clickToolButton('rembg');
+        _runExistingButton('ge-rembg-run', 'Removing background...');
+        return;
+      }
+      if (/\b(upscale|higher\s*res|increase\s*resolution|bigger|2x|4x)\b/.test(p)) {
+        _clickToolButton('upscale');
+        _runExistingButton('ge-upscale-ai', 'Upscaling image...');
+        return;
+      }
+      if (/\b(denoise|noise|grain|grainy|clean\s*up)\b/.test(p)) {
+        _setAiCommandStatus('Denoising image...', 'running');
+        await _applyImageTool('/api/image/denoise', { strength: 0.55 }, 'Denoised', runBtn, { busyLabel: 'Denoising...' });
+        _setAiCommandStatus('Added denoised layer.', 'done');
+        return;
+      }
+      if (/\b(face|portrait|skin|selfie|restore)\b/.test(p)) {
+        _setAiCommandStatus('Enhancing face/portrait...', 'running');
+        await _applyImageTool('/api/image/enhance-face', {}, 'Enhanced Face', runBtn, { busyLabel: 'Enhancing...' });
+        _setAiCommandStatus('Added enhanced layer.', 'done');
+        return;
+      }
+      if (/\b(sharpen|sharp|crisp|clearer|make it look better|enhance|improve|better)\b/.test(p)) {
+        const amount = document.getElementById('ge-sharpen-amount');
+        if (amount) {
+          amount.value = '65';
+          amount.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        _clickToolButton('sharpen');
+        _runExistingButton('ge-sharpen-run', 'Sharpening image...');
+        return;
+      }
+
+      const stylePrompt = document.getElementById('ge-style-prompt');
+      const styleStrength = document.getElementById('ge-style-strength');
+      if (stylePrompt) stylePrompt.value = prompt;
+      if (styleStrength) {
+        styleStrength.value = /\b(subtle|slight|small)\b/.test(p) ? '35' : '55';
+        styleStrength.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      _clickToolButton('style');
+      _runExistingButton('ge-style-run', 'Running full-image AI edit...');
+    } catch (err) {
+      console.error('[ge-ai-command] failed', err);
+      _setAiCommandStatus(err?.message || 'AI edit failed', 'error');
+    }
+  });
+}
 
 // Layer offsets for move tool
 
@@ -1092,6 +1399,7 @@ function _beginDraw(e) {
   // it doesn't mutate the layer until an action (Erase/Copy) is taken.
   // Full implementation in editor/tools/wand.js.
   if (state.tool === 'wand') return _wandTool.click(e);
+  if (state.tool === 'sam') return _runSamSelection(e);
   // Inpaint can create its own layer + mask on the fly, so skip the
   // "no active layer → bail" gate for it specifically.
   if (state.tool !== 'inpaint' && (!layer || layer.locked)) return;
@@ -1612,6 +1920,146 @@ function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
   _syncToolClearIndicators();
 }
 
+async function _runSamSelection(e) {
+  const layer = activeLayer();
+  if (!layer || layer.locked) {
+    if (uiModule) uiModule.showToast('Select an unlocked layer');
+    return;
+  }
+  const coords = _canvasCoords(e, state.mainCanvas);
+  const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
+  const lx = Math.floor(coords.x - off.x);
+  const ly = Math.floor(coords.y - off.y);
+  if (lx < 0 || ly < 0 || lx >= layer.canvas.width || ly >= layer.canvas.height) return;
+
+  let mode = state.wandMode || 'replace';
+  if (e.shiftKey) mode = 'add';
+  else if (e.altKey) mode = 'subtract';
+
+  _cancelSamQuery(false);
+  const controller = new AbortController();
+  _samAbortController = controller;
+  const cleanup = _showWandLoading();
+  try {
+    await _requestAndApplySamMask(layer, {
+      points: [{ x: lx, y: ly, label: 1 }],
+    }, mode, { x: coords.x, y: coords.y }, { signal: controller.signal });
+  } catch (err) {
+    if (err?.name !== 'AbortError' && uiModule) {
+      uiModule.showToast(err.message || String(err), 7000);
+    }
+  } finally {
+    cleanup();
+    if (_samAbortController === controller) _samAbortController = null;
+  }
+}
+
+async function _runSamTextSelection() {
+  const layer = activeLayer();
+  if (!layer || layer.locked) {
+    if (uiModule) uiModule.showToast('Select an unlocked layer');
+    return;
+  }
+  const input = document.getElementById('ge-sam-query');
+  const text = (input?.value || '').trim();
+  if (!text) {
+    if (uiModule) uiModule.showToast('Type an object to find');
+    input?.focus();
+    return;
+  }
+  const btn = document.getElementById('ge-sam-find');
+  const old = btn?.innerHTML;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="ge-btn-ai-mark" aria-hidden="true">✦</span>Finding…';
+  }
+  _cancelSamQuery(false);
+  const controller = new AbortController();
+  _samAbortController = controller;
+  const cleanup = _showWandLoading();
+  try {
+    await _requestAndApplySamMask(layer, { text }, state.wandMode || 'replace', null, { signal: controller.signal });
+  } catch (err) {
+    if (err?.name !== 'AbortError' && uiModule) {
+      uiModule.showToast(err.message || String(err), 7000);
+    }
+  } finally {
+    cleanup();
+    if (_samAbortController === controller) _samAbortController = null;
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = old || '<span class="ge-btn-ai-mark" aria-hidden="true">✦</span>Find';
+    }
+  }
+}
+
+async function _requestAndApplySamMask(layer, payload, mode, seedPoint, opts = {}) {
+  const res = await fetch('/api/image/mask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: opts.signal,
+      body: JSON.stringify({
+        image: layer.canvas.toDataURL('image/png').split(',')[1],
+        ...payload,
+      }),
+    });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.mask) {
+    throw new Error(data.detail || data.error || `Mask failed (${res.status})`);
+  }
+  if (!data.bbox) {
+    throw new Error(data.grounding ? `Found ${data.grounding.label || 'object'}, but SAM returned an empty mask` : 'SAM returned an empty mask');
+  }
+
+  const img = new Image();
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error('Failed to decode mask'));
+    img.src = 'data:image/png;base64,' + data.mask;
+  });
+  const mask = document.createElement('canvas');
+  mask.width = layer.canvas.width;
+  mask.height = layer.canvas.height;
+  const mctx = mask.getContext('2d');
+  mctx.drawImage(img, 0, 0, mask.width, mask.height);
+  const maskData = mctx.getImageData(0, 0, mask.width, mask.height);
+  const md = maskData.data;
+  for (let i = 0; i < md.length; i += 4) {
+    const alpha = md[i]; // server mask is white selected / black unselected
+    md[i] = 255;
+    md[i + 1] = 255;
+    md[i + 2] = 255;
+    md[i + 3] = alpha;
+  }
+  mctx.putImageData(maskData, 0, 0);
+
+  _saveState();
+  const compatible = state.wandMask && state.wandLayerId === layer.id &&
+    state.wandMask.width === mask.width && state.wandMask.height === mask.height;
+  if (compatible && mode === 'add') {
+    state.wandMask.getContext('2d').drawImage(mask, 0, 0);
+  } else if (compatible && mode === 'subtract') {
+    const ec = state.wandMask.getContext('2d');
+    ec.save();
+    ec.globalCompositeOperation = 'destination-out';
+    ec.drawImage(mask, 0, 0);
+    ec.restore();
+  } else {
+    state.wandMask = mask;
+    state.wandLayerId = layer.id;
+  }
+  state.wandLastSeed = seedPoint
+    ? { x: seedPoint.x, y: seedPoint.y, mode, source: 'sam' }
+    : { x: 0, y: 0, mode, source: 'sam-text' };
+  state.wandMaskVisible = true;
+  composite();
+  _syncToolClearIndicators();
+  if (data.grounding && uiModule) {
+    const pct = Math.round((data.grounding.score || 0) * 100);
+    uiModule.showToast(`Selected ${data.grounding.label || 'object'}${pct ? ` (${pct}%)` : ''}`, 2500);
+  }
+}
+
 function _showWandLoading() {
   const area = state.container?.querySelector('.ge-canvas-area');
   if (!area) return () => {};
@@ -1853,12 +2301,108 @@ function _wandToMask() {
   state.wandMask = null;
   state.wandLayerId = null;
   state.wandLastSeed = null;
+  mask.visible = true;
+  layer.activeMaskId = mask.id;
+  state.maskVisible = true;
   composite();
   _renderLayerPanel();
   if (uiModule) uiModule.showToast('Selection added to mask');
 }
 
-// Reveal/hide the small "X" badge on the Lasso and Wand tool buttons
+function _autoMatchLastInpaintLayer() {
+  const layer = state.layers.find(l => l.id === state.lastInpaintLayerId);
+  const src = layer?.inpaintSource;
+  if (!layer || !src?.base || !src?.mask) {
+    if (uiModule) uiModule.showToast('Run inpaint first');
+    return;
+  }
+  const w = state.imgWidth;
+  const h = state.imgHeight;
+  let baseData, resultData, maskData;
+  try {
+    baseData = src.base.getContext('2d').getImageData(0, 0, w, h).data;
+    resultData = layer.canvas.getContext('2d').getImageData(0, 0, w, h).data;
+    maskData = src.mask.getContext('2d').getImageData(0, 0, w, h).data;
+  } catch (err) {
+    if (uiModule) uiModule.showToast('Auto match failed: cannot read pixels');
+    return;
+  }
+
+  const inside = { r: 0, g: 0, b: 0, y: 0, n: 0 };
+  const outside = { r: 0, g: 0, b: 0, y: 0, n: 0 };
+  const step = Math.max(1, Math.round(Math.max(w, h) / 900));
+  const radius = Math.max(2, Math.round(Math.min(w, h) * 0.006));
+  const sample = (bucket, data, idx) => {
+    const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+    bucket.r += r; bucket.g += g; bucket.b += b;
+    bucket.y += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    bucket.n++;
+  };
+  const isMasked = (x, y) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return false;
+    return maskData[(y * w + x) * 4 + 3] > 24;
+  };
+  for (let y = radius; y < h - radius; y += step) {
+    for (let x = radius; x < w - radius; x += step) {
+      const idx = (y * w + x) * 4;
+      const m = maskData[idx + 3] > 24;
+      let touchesOther = false;
+      for (let dy = -radius; dy <= radius && !touchesOther; dy += radius) {
+        for (let dx = -radius; dx <= radius; dx += radius) {
+          if (!dx && !dy) continue;
+          if (isMasked(x + dx, y + dy) !== m) {
+            touchesOther = true;
+            break;
+          }
+        }
+      }
+      if (!touchesOther) continue;
+      if (m && resultData[idx + 3] > 24) sample(inside, resultData, idx);
+      else if (!m && baseData[idx + 3] > 24) sample(outside, baseData, idx);
+    }
+  }
+  if (inside.n < 20 || outside.n < 20) {
+    if (uiModule) uiModule.showToast('Auto match needs a larger mask edge');
+    return;
+  }
+  for (const b of [inside, outside]) {
+    b.r /= b.n; b.g /= b.n; b.b /= b.n; b.y /= b.n;
+  }
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const dr = clamp((outside.r - inside.r) * 0.55, -55, 55);
+  const dg = clamp((outside.g - inside.g) * 0.55, -55, 55);
+  const db = clamp((outside.b - inside.b) * 0.55, -55, 55);
+  const dy = clamp((outside.y - inside.y) * 0.35, -35, 35);
+  if (!layer.adjLayers) layer.adjLayers = [];
+  layer.adjLayers = layer.adjLayers.filter(a => a.id !== 'auto-match-color' && a.id !== 'auto-match-light');
+  layer.adjLayers.push({
+    id: 'auto-match-light',
+    type: 'brightness-contrast',
+    params: {
+      brightness: clamp(1 + (dy / 255), 0.75, 1.25),
+      contrast: 1,
+    },
+    opacity: 0.7,
+    visible: true,
+  });
+  layer.adjLayers.push({
+    id: 'auto-match-color',
+    type: 'color-balance',
+    params: {
+      shadows: { r: dr * 0.45, g: dg * 0.45, b: db * 0.45 },
+      midtones: { r: dr, g: dg, b: db },
+      highlights: { r: dr * 0.35, g: dg * 0.35, b: db * 0.35 },
+    },
+    opacity: 0.75,
+    visible: true,
+  });
+  _saveState('Auto match inpaint color');
+  composite();
+  _renderLayerPanel();
+  if (uiModule) uiModule.showToast('Auto matched color');
+}
+
+// Reveal/hide the small "X" badge on the Lasso, Wand, and SAM tool buttons
 // based on whether each tool currently holds a selection. Called from
 // anywhere selection state mutates (wand click, lasso close, undo, etc.).
 function _syncToolClearIndicators() {
@@ -1898,9 +2442,11 @@ function _syncToolClearIndicators() {
   if (!state.container) return;
   const lassoBtn = state.container.querySelector('.ge-tool-btn[data-tool="lasso"]');
   const wandBtn  = state.container.querySelector('.ge-tool-btn[data-tool="wand"]');
+  const samBtn   = state.container.querySelector('.ge-tool-btn[data-tool="sam"]');
   const inpaintBtn = state.container.querySelector('.ge-tool-btn[data-tool="inpaint"]');
   if (lassoBtn) lassoBtn.classList.toggle('has-selection', state.lassoPoints.length >= 3 && !state.lassoActive);
   if (wandBtn)  wandBtn.classList.toggle('has-selection', !!state.wandMask);
+  if (samBtn)   samBtn.classList.toggle('has-selection', !!state.wandMask);
   // Inpaint no longer carries a clear-X badge; masks live as sub-layers
   // in the layer panel and are deleted from there.
   if (inpaintBtn) inpaintBtn.classList.remove('has-selection');
@@ -2342,6 +2888,7 @@ function _wireInpaintPopoverWindow() {
 // ── Build DOM ──
 
 function _buildEditor(container) {
+  document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
   container.innerHTML = '';
   container.className = 'gallery-editor';
 
@@ -2356,6 +2903,9 @@ function _buildEditor(container) {
         composite();
       } else if (which === 'wand') {
         _wandClear();
+      } else if (which === 'sam') {
+        _openSamPrompt();
+        return;
       }
       _syncToolClearIndicators();
     },
@@ -2377,7 +2927,7 @@ function _buildEditor(container) {
       // panel auto-minimises the layers sheet so the controls aren't
       // covered. Swiping the layers handle back up restores it.
       const isMobile = window.innerWidth <= 820;
-      const hasToolControls = ['brush', 'eraser', 'clone', 'inpaint'].includes(toolId);
+      const hasToolControls = ['brush', 'eraser', 'clone', 'inpaint', 'sam'].includes(toolId);
       const controlsVisible = controls && !controls.classList.contains('dismissed');
       if (isMobile && hasToolControls && controlsVisible) {
         const rp = document.querySelector('.ge-right-panel');
@@ -2412,6 +2962,8 @@ function _buildEditor(container) {
       if (lassoSection) lassoSection.style.display = state.tool === 'lasso' ? '' : 'none';
       const wandSection = document.getElementById('ge-wand-section');
       if (wandSection) wandSection.style.display = state.tool === 'wand' ? '' : 'none';
+      const samSection = document.getElementById('ge-sam-section');
+      if (samSection) samSection.style.display = state.tool === 'sam' ? '' : 'none';
       const inpaintSection = document.getElementById('ge-inpaint-section');
       if (inpaintSection) {
         if (state.tool === 'inpaint') {
@@ -2433,6 +2985,13 @@ function _buildEditor(container) {
       // Generate cleared it, but on re-entry the user expects to see
       // their mask again.
       if (state.tool === 'inpaint') {
+        // If the user just made a SAM/Wand selection and then moves to
+        // Inpaint, do the obvious thing: bake that selection into the
+        // inpaint mask. Otherwise Generate says "draw the area first"
+        // even though a red selection is visible on screen.
+        if (state.wandMask && state.wandLayerId) {
+          _wandToMask();
+        }
         // First inpaint entry per session: bump the brush size to the
         // mask-friendly default (other tools keep their own size).
         if (!state.inpaintBrushInitialised) {
@@ -2551,6 +3110,7 @@ function _buildEditor(container) {
   state.transformOverlay.className = 'ge-transform-overlay';
   state.transformOverlayCtx = state.transformOverlay.getContext('2d');
   canvasArea.appendChild(state.transformOverlay);
+  canvasArea.appendChild(_buildAiCommandBox());
   // Keep the transform handles glued to the photo while the canvas-area
   // scrolls (the overlay is anchored to the canvas's live rect, so a
   // re-draw on scroll re-reads its position).
@@ -2794,6 +3354,7 @@ function _buildEditor(container) {
   wireInpaintControls({
     composite,
     applyInpaintFeather: _applyInpaintFeather,
+    autoMatchInpaint: _autoMatchLastInpaintLayer,
     syncToolClearIndicators: () => _syncToolClearIndicators(),
     attachColorPicker,
     uiModule,
@@ -2879,6 +3440,28 @@ function _buildEditor(container) {
     applyImageTool: _applyImageTool,
     uiModule,
   });
+  document.getElementById('ge-sam-find')?.addEventListener('click', () => _runSamTextSelection());
+  document.getElementById('ge-sam-query')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      _runSamTextSelection();
+    }
+  });
+  document.getElementById('ge-sam-clear')?.addEventListener('click', () => _wandClear());
+  document.getElementById('ge-sam-mask')?.addEventListener('click', () => _wandToMask());
+  document.getElementById('ge-sam-vis')?.addEventListener('click', () => {
+    state.wandMaskVisible = !state.wandMaskVisible;
+    const btn = document.getElementById('ge-sam-vis');
+    if (btn) {
+      btn.innerHTML = state.wandMaskVisible
+        ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
+        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C5 20 1 12 1 12a20.29 20.29 0 0 1 5.06-5.94"/><path d="M9.9 4.24A10.45 10.45 0 0 1 12 4c7 0 11 8 11 8a20.65 20.65 0 0 1-2.16 3.19"/><path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/><path d="M1 1l22 22"/></svg>';
+      btn.title = state.wandMaskVisible ? 'Hide selection overlay' : 'Show selection overlay';
+      btn.classList.toggle('visible', state.wandMaskVisible);
+    }
+    composite();
+  });
+  _wireAiCommandBox();
 
   // Merge / Flatten buttons (layer-panel footer) — full
   // implementation in editor/wire-merge-buttons.js.
@@ -2887,6 +3470,7 @@ function _buildEditor(container) {
     createLayer,
     renderLayerPanel: () => _renderLayerPanel(),
     composite,
+    renderLayer: (layer) => _renderLayerWithAdjLayers(layer),
     uiModule,
   });
 
@@ -2977,6 +3561,7 @@ const _layerPanelRenderer = createLayerPanelRenderer({
   openFxPopup: (layer, anchor) => _openFxPopup(layer, anchor),
   editAdjLayer: (layer, adj, anchor) => _editAdjLayer(layer, adj, anchor),
   createLayer,
+  renderLayer: (layer) => _renderLayerWithAdjLayers(layer),
   lassoToMask: () => _lassoToMask(),
   wandToMask: () => _wandToMask(),
   getActiveMaskLayer: () => _getActiveMaskLayer(),
@@ -3007,7 +3592,7 @@ function flatten() {
     if (!layer.visible) continue;
     ctx.globalAlpha = layer.opacity;
     const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
-    ctx.drawImage(layer.canvas, off.x, off.y);
+    ctx.drawImage(_renderLayerWithAdjLayers(layer), off.x, off.y);
   }
   ctx.globalAlpha = 1;
   return out;
@@ -3750,6 +4335,9 @@ export function closeEditor() {
       }
       el.remove();
     });
+  } catch {}
+  try {
+    document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
   } catch {}
   // Belt-and-suspenders: scrub any minimized-dock chip + modalManager
   // entry whose id matches our ephemeral popups (in case the DOM node

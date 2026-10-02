@@ -207,11 +207,30 @@ def _search_like(
     )
     if not include_archived:
         q = q.filter(DBSession.archived == False)
+    q = q.filter(~DBSession.name.like("SFT trace batch%"))
     if restrict_owner:
         q = _owner_filter(q, owner, include_legacy_owner)
     rows = q.order_by(DBChatMessage.timestamp.desc()).limit(limit).all()
     shaped = ((msg, session_name, _snippet(msg.content or "", query)) for msg, session_name in rows)
     return _rows_to_results(db, shaped, query, context_messages)
+
+
+def _fetch_messages_by_id(db, message_ids):
+    """Fetch (message, session_name) for many message ids in a single query.
+
+    The FTS search returns a list of hit ids; fetching each row on its own was an
+    N+1 query (one SELECT per hit). Batch them with one IN(...) query and return
+    a lookup so the caller can reassemble results in hit (relevance) order.
+    """
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(DBChatMessage, DBSession.name)
+        .join(DBSession, DBChatMessage.session_id == DBSession.id)
+        .filter(DBChatMessage.id.in_(message_ids))
+        .all()
+    )
+    return {msg.id: (msg, session_name) for msg, session_name in rows}
 
 
 def _search_fts(
@@ -252,6 +271,7 @@ def _search_fts(
         WHERE chat_messages_fts MATCH :fts_query
           {archived_clause}
           {owner_clause}
+          AND s.name NOT LIKE 'SFT trace batch%'
           AND m.role IN ('user', 'assistant')
         ORDER BY bm25(chat_messages_fts), m.timestamp DESC
         LIMIT :limit
@@ -267,19 +287,13 @@ def _search_fts(
     if not hits:
         return None
 
+    by_id = _fetch_messages_by_id(db, [hit[0] for hit in hits])
     rows = []
     for hit in hits:
-        message_id = hit[0]
-        snippet = hit[1] or ""
-        row = (
-            db.query(DBChatMessage, DBSession.name)
-            .join(DBSession, DBChatMessage.session_id == DBSession.id)
-            .filter(DBChatMessage.id == message_id)
-            .first()
-        )
-        if row:
-            msg, session_name = row
-            rows.append((msg, session_name, snippet))
+        found = by_id.get(hit[0])
+        if found:
+            msg, session_name = found
+            rows.append((msg, session_name, hit[1] or ""))
     return _rows_to_results(db, rows, query, context_messages)
 
 

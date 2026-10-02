@@ -10,7 +10,29 @@ let results = [];
 
 function el(id) { return document.getElementById(id); }
 
+function hideMobileSidebarForSearch() {
+  if (window.innerWidth >= 768) return;
+  const sidebar = el('sidebar');
+  const rail = el('icon-rail');
+  const backdrop = el('sidebar-backdrop');
+  let changed = false;
+  if (sidebar && !sidebar.classList.contains('hidden')) {
+    sidebar.classList.add('hidden');
+    changed = true;
+  }
+  if (rail && rail.classList.contains('mobile-mini')) {
+    rail.classList.remove('mobile-mini');
+    rail.style.cssText = '';
+    changed = true;
+  }
+  if (backdrop) backdrop.classList.remove('visible');
+  if (changed && typeof window.syncRailSide === 'function') {
+    try { window.syncRailSide(); } catch (_) {}
+  }
+}
+
 export function openSearch() {
+  hideMobileSidebarForSearch();
   const overlay = el('search-overlay');
   if (!overlay) return;
   overlay.classList.remove('hidden');

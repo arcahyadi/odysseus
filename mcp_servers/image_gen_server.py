@@ -73,7 +73,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not model_spec:
             for candidate in ("gpt-image-1.5", "gpt-image-1", "dall-e-3"):
                 try:
-                    _resolve_model(candidate)
+                    await asyncio.to_thread(_resolve_model, candidate)
                     model_spec = candidate
                     break
                 except ValueError:
@@ -81,7 +81,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if not model_spec:
                 return [TextContent(type="text", text="Error: No image model found. Configure one in Admin.")]
 
-        url, model_id, headers = _resolve_model(model_spec)
+        try:
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, model_type="image")
+        except ValueError:
+            _lower_model_spec = model_spec.lower()
+            if not any(_name in _lower_model_spec for _name in ("gpt-image", "dall-e")):
+                raise
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec)
 
         is_gpt_image = "gpt-image" in model_id.lower()
         base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")

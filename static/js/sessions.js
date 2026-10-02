@@ -2,11 +2,10 @@
 // This module handles all session-related operations
 
 import Storage from './storage.js';
-import uiModule, { styledPrompt } from './ui.js';
-import markdownModule from './markdown.js';
-import chatRenderer from './chatRenderer.js';
+import uiModule, { autoResize, styledPrompt } from './ui.js';
+import chatRenderer from './chatRenderer.js?v=20260815toolapproval4';
 import { providerLogo } from './providers.js';
-import { initModelPicker, updateModelPicker } from './modelPicker.js';
+import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260722ctxheader1';
 import themeModule from './theme.js';
 import spinnerModule from './spinner.js';
 
@@ -16,16 +15,241 @@ let sessions = [];
 let currentSessionId = null;
 let _sessionNavToken = 0;
 let _skipAutoSelect = false;
+let _suppressNextSessionLoading = false;
+let _rootFreshChatApplied = false;
+const HISTORY_DISPLAY_CHAR_LIMIT = 160000;
+const HISTORY_DISPLAY_TAIL_CHARS = 20000;
+const HISTORY_PAGE_LIMIT_MOBILE = 8;
+const HISTORY_PAGE_LIMIT_DESKTOP = 24;
 
 const SIDEBAR_MAX_VISIBLE = 10;
 const FOLDER_MAX_VISIBLE = 5;
 let _showAllSessions = false;
 let _expandedFolders = {};  // folderName -> true if "show more" clicked
 let _sortMode = Storage.get('odysseus-session-sort') || 'active'; // default to last active
+const DATE_SECTION_COLLAPSE_KEY = 'ody-session-date-section-collapsed';
 let _autoCreateInProgress = false; // guard against recursive auto-create
 const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key for incognito session IDs
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
+let _historyPager = null;
+
+function _shouldPreserveStartupComposer(msgInput) {
+  if (!msgInput || !msgInput.value) return false;
+  if (window.__odysseusComposerUserEdited) return true;
+  return !!document.getElementById('app-loader') && document.activeElement === msgInput;
+}
+
+function _clearComposerUnlessStartupTyped(msgInput) {
+  if (!msgInput) return;
+  if (_shouldPreserveStartupComposer(msgInput)) {
+    msgInput.disabled = false;
+    autoResize(msgInput);
+    return;
+  }
+  msgInput.value = '';
+}
+
+function _paintSessionLoading(chatHistory, label = 'Loading chat') {
+  if (!chatHistory) return;
+  if (chatRenderer.hideWelcomeScreen) chatRenderer.hideWelcomeScreen();
+  chatHistory.style.transition = '';
+  chatHistory.style.opacity = '1';
+  chatHistory.classList.add('no-animate');
+  chatHistory.innerHTML = '';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'session-loading-state session-loading-skeleton';
+  wrap.setAttribute('role', 'status');
+  wrap.setAttribute('aria-live', 'polite');
+  wrap.setAttribute('aria-label', label);
+
+  const viewportHeight = chatHistory.clientHeight || window.innerHeight || 720;
+  const bubbleCount = Math.max(8, Math.min(16, Math.ceil(viewportHeight / 86)));
+  for (let i = 0; i < bubbleCount; i += 1) {
+    const bubble = document.createElement('div');
+    bubble.className = `session-skeleton-bubble ${i % 2 ? 'is-user' : 'is-ai'}`;
+    const lines = i % 4 === 1 ? 2 : (i % 4 === 3 ? 3 : 4);
+    for (let j = 0; j < lines; j += 1) {
+      const line = document.createElement('div');
+      line.className = 'session-skeleton-line';
+      line.style.width = `${[72, 92, 58, 82][(i + j) % 4]}%`;
+      bubble.appendChild(line);
+    }
+    wrap.appendChild(bubble);
+  }
+  chatHistory.appendChild(wrap);
+}
+
+function _updateSessionLoading(chatHistory, label) {
+  const el = chatHistory?.querySelector('.session-loading-state');
+  if (el) el.setAttribute('aria-label', label);
+}
+
+function _nextPaint() {
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+function _displayHistoryContent(content) {
+  const text = String(content || '');
+  if (text.length <= HISTORY_DISPLAY_CHAR_LIMIT) return text;
+  const head = text.slice(0, HISTORY_DISPLAY_CHAR_LIMIT - HISTORY_DISPLAY_TAIL_CHARS);
+  const tail = text.slice(-HISTORY_DISPLAY_TAIL_CHARS);
+  const omitted = text.length - head.length - tail.length;
+  return [
+    `> Large message display clipped (${omitted.toLocaleString()} characters omitted). Full content remains stored in chat history/export.`,
+    '',
+    head,
+    '',
+    '```text',
+    `[... ${omitted.toLocaleString()} characters omitted from on-screen history render ...]`,
+    '```',
+    '',
+    tail,
+  ].join('\n');
+}
+
+function _stripUserVisionBlocks(text) {
+  return String(text || '').replace(
+    /\n*\[Image: ([^\]]+)\]\n[\s\S]*?(?=\n*\[Image: |\n*\[Image attached: |\n*=== File: |\n*\[PDF content\]:|$)/g,
+    ''
+  ).trim();
+}
+
+function _historyPageLimit() {
+  return window.innerWidth <= 768 ? HISTORY_PAGE_LIMIT_MOBILE : HISTORY_PAGE_LIMIT_DESKTOP;
+}
+
+function _historyUrl(id, { limit = null, offset = null } = {}) {
+  const url = new URL(`${API_BASE}/api/history/${id}`);
+  if (limit != null) url.searchParams.set('limit', String(limit));
+  if (offset != null) url.searchParams.set('offset', String(offset));
+  return url.toString();
+}
+
+function _addHistoryMessageWithFullRenderer(role, content, modelName, meta) {
+  const box = document.getElementById('chat-history');
+  if (!box) return [];
+  const marker = document.createComment('history-message');
+  box.appendChild(marker);
+  let rendered = null;
+  try {
+    rendered = chatRenderer.addMessage(role, content, modelName, meta);
+  } catch (e) {
+    marker.remove();
+    throw e;
+  }
+  const nodes = [];
+  let node = marker.nextSibling;
+  while (node) {
+    const next = node.nextSibling;
+    nodes.push(node);
+    node = next;
+  }
+  marker.remove();
+  return nodes.length ? nodes : (rendered ? [rendered] : []);
+}
+
+function _renderHistoryMessage(msg, modelName) {
+  const meta = msg.metadata ? { ...msg.metadata, _fromHistory: true } : null;
+  let displayContent;
+  if (typeof msg.content === 'string') {
+    displayContent = _displayHistoryContent(msg.content);
+  } else if (Array.isArray(msg.content)) {
+    displayContent = _displayHistoryContent(msg.content.filter(p => p.type === 'text').map(p => p.text).join('\n').trim());
+  } else {
+    displayContent = '';
+  }
+  if (msg.role === 'user') {
+    displayContent = _stripUserVisionBlocks(displayContent);
+    const trimmed = displayContent.trim();
+    if (
+      trimmed === 'Continue where you left off' ||
+      trimmed.startsWith('Your message was cut off.') ||
+      trimmed.startsWith('Your previous response was interrupted.') ||
+      displayContent.includes('[Instruction: Rewrite') ||
+      displayContent.includes('[Instruction: Explain')
+    ) {
+      return null;
+    }
+    const docEditMatch = displayContent.match(/^In the document, edit this specific text \((lines? [\d-]+)\):\n```\n([\s\S]*?)\n```\n\nInstruction: ([\s\S]*)$/);
+    if (docEditMatch) {
+      displayContent = `[Doc edit: ${docEditMatch[1]}] ${docEditMatch[3]}`;
+    }
+  }
+  return _addHistoryMessageWithFullRenderer(msg.role, displayContent, modelName, meta);
+}
+
+function _clearHistoryPager() {
+  const box = document.getElementById('chat-history');
+  if (_historyPager?.handler && box) {
+    box.removeEventListener('scroll', _historyPager.handler);
+  }
+  _historyPager = null;
+}
+
+function _installHistoryPager(id, pageInfo, modelName) {
+  const box = document.getElementById('chat-history');
+  _clearHistoryPager();
+  if (!box || !pageInfo || !pageInfo.has_more_before) return;
+
+  _historyPager = {
+    sessionId: id,
+    offset: Number(pageInfo.offset || 0),
+    limit: Number(pageInfo.limit || _historyPageLimit()),
+    loading: false,
+    done: false,
+    modelName,
+    handler: null,
+  };
+
+  const loadOlder = async () => {
+    if (!_historyPager || _historyPager.loading || _historyPager.done) return;
+    if (_historyPager.sessionId !== currentSessionId) return;
+    if (box.scrollTop > 90) return;
+
+    const nextOffset = Math.max(0, _historyPager.offset - _historyPager.limit);
+    const nextLimit = _historyPager.offset - nextOffset;
+    if (nextLimit <= 0) {
+      _historyPager.done = true;
+      return;
+    }
+
+    _historyPager.loading = true;
+    const anchor = box.querySelector('.msg, .agent-thread, .gallery-bubble');
+    const beforeHeight = box.scrollHeight;
+    try {
+      const res = await fetch(_historyUrl(_historyPager.sessionId, { limit: nextLimit, offset: nextOffset }));
+      const data = await res.json();
+      if (!_historyPager || _historyPager.sessionId !== currentSessionId) return;
+      const newEls = [];
+      for (const msg of data.history || []) {
+        if (msg.role !== 'user' && msg.role !== 'assistant') continue;
+        const els = _renderHistoryMessage(msg, _historyPager.modelName);
+        if (Array.isArray(els)) newEls.push(...els);
+      }
+      for (const el of newEls) {
+        box.insertBefore(el, anchor || box.firstChild);
+      }
+      _historyPager.offset = Number(data.offset || nextOffset);
+      _historyPager.done = !data.has_more_before;
+      if (window.hljs) {
+        newEls.forEach(el => el.querySelectorAll('pre code:not(.hljs)').forEach(block => window.hljs.highlightElement(block)));
+      }
+      const heightDelta = box.scrollHeight - beforeHeight;
+      box.scrollTop += heightDelta;
+    } catch (e) {
+      console.warn('Failed to load older chat history:', e);
+    } finally {
+      if (_historyPager) _historyPager.loading = false;
+    }
+  };
+
+  _historyPager.handler = () => {
+    if (box.scrollTop <= 90) loadOlder();
+  };
+  box.addEventListener('scroll', _historyPager.handler, { passive: true });
+}
 
 function _getIncognitoIds() {
   try { return JSON.parse(sessionStorage.getItem(_INCOGNITO_SESSIONS_KEY) || '[]'); } catch { return []; }
@@ -742,6 +966,106 @@ function createSessionItem(s) {
   return div;
 }
 
+function _dateBucketLabel(value) {
+  if (!value) return 'Older';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'Older';
+  const dayStart = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const today = dayStart(new Date());
+  const day = dayStart(d);
+  const diff = Math.round((today - day) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  if (diff > 1 && diff < 7) return d.toLocaleDateString([], { weekday: 'long' });
+  if (diff >= 365) {
+    const years = Math.floor(diff / 365);
+    return `${years} ${years === 1 ? 'year' : 'years'} ago`;
+  }
+  if (diff >= 180) return '6 months ago';
+  if (diff >= 30) return `${Math.floor(diff / 30) * 30} days ago`;
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString([], sameYear ? { month: 'long', day: 'numeric' } : { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+function _sessionBucketDate(s) {
+  return s.last_message_at || s.updated_at || s.created_at || '';
+}
+
+function _loadDateSectionCollapseState() {
+  const raw = Storage.getJSON(DATE_SECTION_COLLAPSE_KEY, {});
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return raw;
+}
+
+function _saveDateSectionCollapseState(state) {
+  Storage.setJSON(DATE_SECTION_COLLAPSE_KEY, state && typeof state === 'object' ? state : {});
+}
+
+function _dateSectionKey(kind, label) {
+  return `${kind || 'session'}:${label || 'Older'}`;
+}
+
+function _isDateSectionCollapsed(kind, label) {
+  return _loadDateSectionCollapseState()[_dateSectionKey(kind, label)] === true;
+}
+
+function _toggleDateSection(kind, label) {
+  const state = _loadDateSectionCollapseState();
+  const key = _dateSectionKey(kind, label);
+  state[key] = state[key] !== true;
+  _saveDateSectionCollapseState(state);
+  renderSessionList();
+}
+
+function _createDateSectionHeader(label, kind = 'session') {
+  const el = document.createElement('div');
+  el.className = `date-section-header ${kind}-date-section-header`;
+  el.textContent = label;
+  const collapsed = _isDateSectionCollapsed(kind, label);
+  if (collapsed) el.classList.add('collapsed');
+  el.dataset.dateSectionKind = kind;
+  el.dataset.dateSectionLabel = label;
+  el.tabIndex = 0;
+  el.setAttribute('role', 'button');
+  el.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  el.title = collapsed ? `Show ${label}` : `Hide ${label}`;
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    _toggleDateSection(kind, label);
+  });
+  el.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    _toggleDateSection(kind, label);
+  });
+  return el;
+}
+
+function _appendSessionItemsWithDateHeaders(frag, items) {
+  let lastLabel = null;
+  let collapsed = false;
+  for (const s of items) {
+    const label = _dateBucketLabel(_sessionBucketDate(s));
+    if (label !== lastLabel) {
+      frag.appendChild(_createDateSectionHeader(label, 'session'));
+      collapsed = _isDateSectionCollapsed('session', label);
+      lastLabel = label;
+    }
+    if (collapsed) continue;
+    frag.appendChild(createSessionItem(s));
+  }
+}
+
+function _appendFavoriteSessionItems(frag, items) {
+  if (!items.length) return;
+  frag.appendChild(_createDateSectionHeader('Favorites', 'session'));
+  if (_isDateSectionCollapsed('session', 'Favorites')) return;
+  for (const s of items) {
+    frag.appendChild(createSessionItem(s));
+  }
+}
+
 let _renderRAF = null;
 export function renderSessionList() {
   // Debounce rapid re-renders within the same frame
@@ -800,17 +1124,22 @@ function _renderSessionListImpl() {
       }
       return 0;
     });
-    // Starred still float to top
-    const starred = orderedSessions.filter(s => s.is_important);
-    const rest = orderedSessions.filter(s => !s.is_important);
-    const allFlat = [...starred, ...rest];
+    // Favorites are a global pinned block above date buckets, not just
+    // promoted within the day they belong to.
+    const allFlat = [
+      ...orderedSessions.filter(s => s.is_important),
+      ...orderedSessions.filter(s => !s.is_important),
+    ];
 
     const limit = _showAllSessions ? allFlat.length : SIDEBAR_MAX_VISIBLE;
     const visible = allFlat.slice(0, limit);
     const activeIdx = allFlat.findIndex(s => s.id === currentSessionId);
     if (!_showAllSessions && activeIdx >= limit) visible.push(allFlat[activeIdx]);
 
-    visible.forEach(s => _frag.appendChild(createSessionItem(s)));
+    const visibleFavorites = visible.filter(s => s.is_important);
+    const visibleRegular = visible.filter(s => !s.is_important);
+    _appendFavoriteSessionItems(_frag, visibleFavorites);
+    _appendSessionItemsWithDateHeaders(_frag, visibleRegular);
 
     if (allFlat.length > SIDEBAR_MAX_VISIBLE) {
       const remaining = allFlat.length - SIDEBAR_MAX_VISIBLE;
@@ -963,9 +1292,7 @@ function _renderSessionListImpl() {
         visibleFolder.push(folderSessions[activeInFolder]);
       }
 
-      visibleFolder.forEach(s => {
-        content.appendChild(createSessionItem(s));
-      });
+      _appendSessionItemsWithDateHeaders(content, visibleFolder);
 
       if (folderSessions.length > FOLDER_MAX_VISIBLE) {
         const rem = folderSessions.length - FOLDER_MAX_VISIBLE;
@@ -1065,9 +1392,7 @@ function _renderSessionListImpl() {
   }
 
   if (unfiledTarget) {
-    visibleUnfiled.forEach(s => {
-      unfiledTarget.appendChild(createSessionItem(s));
-    });
+    _appendSessionItemsWithDateHeaders(unfiledTarget, visibleUnfiled);
   }
 
   // "Show more" / "Show less" toggle
@@ -1353,8 +1678,25 @@ export async function loadSessions() {
       sessionStorage.removeItem('ody-prefetch-sessions');
       fetched = JSON.parse(prefetched);
     } else {
-      const res = await fetch(`${API_BASE}/api/sessions`);
+      let url = `${API_BASE}/api/sessions`;
+      if (currentSessionId && _isIncognitoSession(currentSessionId)) {
+        url += `?active_incognito_id=${encodeURIComponent(currentSessionId)}`;
+      }
+      const res = await fetch(url);
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const payload = await res.json();
+          detail = payload?.detail || payload?.error || '';
+        } catch (_) {}
+        const error = new Error(detail || `Session request failed (HTTP ${res.status})`);
+        error.status = res.status;
+        throw error;
+      }
       fetched = await res.json();
+    }
+    if (!Array.isArray(fetched)) {
+      throw new Error('Session request returned an invalid response');
     }
     sessions = _normalizeSessionsList(fetched);
     renderSessionList();
@@ -1373,8 +1715,17 @@ export async function loadSessions() {
     // most recently appended a message.
     const _isTransient = (s) => !!s && (s.folder === 'Assistant' || s.folder === 'Tasks');
     const _realSessions = activeSessions.filter(s => !_isTransient(s));
-    const hashId = window.location.hash.replace('#', '');
-    let savedId = Storage.get('lastSessionId');
+    let hashId = window.location.hash.replace('#', '');
+    if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) {
+      hashId = '';
+    }
+    const _isFirstLoad = !sessionStorage.getItem('ody-session-active');
+    const _freshRootLoad = !_rootFreshChatApplied && !hashId && !currentSessionId && !_pendingChat;
+    if (_freshRootLoad) {
+      _rootFreshChatApplied = true;
+      Storage.remove('lastSessionId');
+    }
+    let savedId = _freshRootLoad ? null : Storage.get('lastSessionId');
     // If the persisted lastSessionId points to a transient session (legacy
     // state from before the persistence-guard was added), drop it.
     if (savedId) {
@@ -1399,13 +1750,13 @@ export async function loadSessions() {
     } else if (currentSessionId) {
       // Session was just created but may not be in the list yet — keep it
       targetId = currentSessionId;
-    } else if (savedId && activeSessions.some(s => s.id === savedId)) {
+    } else if (!_freshRootLoad && savedId && activeSessions.some(s => s.id === savedId)) {
       targetId = savedId;
-    } else if (!_skipAutoSelect && _realSessions.length > 0) {
+    } else if (!_freshRootLoad && !_skipAutoSelect && _realSessions.length > 0) {
       // Most-recent NON-transient session — skip Assistant / Tasks so the
       // auto-firing assistant doesn't become the apparent default chat.
       targetId = _realSessions[0].id;
-    } else if (!_skipAutoSelect && activeSessions.length > 0) {
+    } else if (!_freshRootLoad && !_skipAutoSelect && activeSessions.length > 0) {
       // Only transient sessions exist (brand-new account) — fall through to
       // the original behaviour so we don't leave the user with nothing.
       targetId = activeSessions[0].id;
@@ -1421,36 +1772,24 @@ export async function loadSessions() {
     // picker would still show the old model's name from cached state). See
     // the targetId resolution above (hash → currentSession → lastSessionId →
     // most-recent).
-    const _isFirstLoad = !sessionStorage.getItem('ody-session-active');
-    if (_isFirstLoad) {
-      sessionStorage.setItem('ody-session-active', '1');
-      if (!targetId) {
-        try {
-          const dcRes = await fetch(`${API_BASE}/api/default-chat`);
-          const dc = await dcRes.json();
-          if (dc.endpoint_url && dc.model) {
-            // Check if there's already an empty session with this model we can reuse
-            const emptyDefault = activeSessions.find(s =>
-              s.model === dc.model && s.message_count === 0
-            );
-            if (emptyDefault) {
-              targetId = emptyDefault.id;
-            } else {
-              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
-              // On mobile, hide sidebar so user lands directly in chat
-              if (window.innerWidth < 768) {
-                const sb = document.getElementById('sidebar');
-                if (sb) sb.classList.add('hidden');
-              }
-              return; // createDirectChat handles selectSession internally
-            }
-          }
-        } catch (_) { /* no default model configured */ }
+    if (_isFirstLoad) sessionStorage.setItem('ody-session-active', '1');
+    if ((_isFirstLoad || _freshRootLoad) && !targetId) {
+      // Land on a visually fresh chat without creating hidden pending session
+      // state. The send path can create the default-backed session when the
+      // user actually submits. Pre-creating here races with opening an existing
+      // chat and was causing sends to jump into brand-new chats.
+      if (window.innerWidth < 768) {
+        const sb = document.getElementById('sidebar');
+        if (sb) sb.classList.add('hidden');
       }
     }
 
+    const suppressSessionLoading = _suppressNextSessionLoading;
+    _suppressNextSessionLoading = false;
+
     if (targetId && targetId !== currentSessionId) {
-      await selectSession(targetId, { keepSidebar: true });
+      const showLoading = !suppressSessionLoading && !(_isFirstLoad && !hashId);
+      await selectSession(targetId, { keepSidebar: true, showLoading });
     } else if (targetId && targetId === currentSessionId) {
       // Same session — just refresh the header name in case it was auto-generated
       const s = sessions.find(x => x.id === targetId);
@@ -1473,22 +1812,27 @@ export async function loadSessions() {
       if (activeSessions.length === 0 && !_autoCreateInProgress) {
         _autoCreateInProgress = true;
         try {
-          const dcRes = await fetch(`${API_BASE}/api/default-chat`);
-          const dc = await dcRes.json();
-          if (dc.endpoint_url && dc.model) {
-            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+          const dc = await _getPreferredDefaultChat();
+          if (dc && dc.endpoint_url && dc.model) {
+              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
           }
         } catch (_) { /* no default model — that's fine, user can /setup */ }
         _autoCreateInProgress = false;
       }
     }
+    return true;
   } catch (error) {
     console.error('Error in loadSessions:', error);
-    uiModule.showError('Failed to load sessions: ' + error.message);
+    // app.js's global fetch wrapper owns expired-auth navigation. Avoid
+    // flashing a redundant session error while that 401 redirect is pending.
+    if (error?.status !== 401) {
+      uiModule.showError('Failed to load sessions: ' + error.message);
+    }
+    return false;
   }
 }
 
-export async function selectSession(id, { keepSidebar = false } = {}) {
+export async function selectSession(id, { keepSidebar = false, showLoading = true, immediateLoading = false } = {}) {
   // Exit compare mode cleanly if active
   if (window.compareModule && window.compareModule.isActive()) {
     window.compareModule.deactivate(true);
@@ -1497,6 +1841,14 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
   try {
     const navToken = ++_sessionNavToken;
     const prevSessionId = currentSessionId;
+    // Selecting a real persisted chat cancels any deferred "New Chat" model
+    // pick. Otherwise the next send can materialize that pending chat instead
+    // of posting into the session the user just opened.
+    if (_pendingChat) {
+      _pendingChat = null;
+      _pendingMaterializePromise = null;
+    }
+    _clearHistoryPager();
     // Re-archive peeked session when navigating away
     _checkPeekCleanup(id);
     // Clear any leftover document text selection so it doesn't bleed into the new chat
@@ -1504,6 +1856,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       try { window.documentModule.clearSelection(); } catch {}
     }
     currentSessionId = id;
+    try { window.__odysseusLastSelectedSessionId = id; } catch (_) {}
     // Identify Assistant / task-output sessions so we don't "trap" the user
     // there on return. Skipped from both `lastSessionId` persistence and the
     // URL hash — the user complained that coming back to Odysseus kept
@@ -1556,7 +1909,10 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     const msgInput = document.getElementById('message');
     if (msgInput) {
       msgInput.disabled = false;
-      msgInput.value = '';
+      _clearComposerUnlessStartupTyped(msgInput);
+      msgInput.style.height = '';
+      msgInput.style.overflow = '';
+      autoResize(msgInput);
     }
     const sendBtn2 = document.querySelector('.send-btn');
     if (sendBtn2) {
@@ -1564,7 +1920,15 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       if (window._updateSendBtnIcon) window._updateSendBtnIcon();
     }
 
-    // On mobile, keep sidebar open — user dismisses it by tapping chat area or swiping
+    // On mobile manual chat switches, move the drawer away before showing the
+    // loader so the status sits over the chat pane instead of being hidden by
+    // the sidebar. Startup auto-restore passes keepSidebar + showLoading=false.
+    if (showLoading && !keepSidebar && window.innerWidth <= 768) {
+      const sidebar = document.getElementById('sidebar');
+      const backdrop = document.getElementById('sidebar-backdrop');
+      if (sidebar) sidebar.classList.add('hidden');
+      if (backdrop) backdrop.classList.remove('visible');
+    }
 
     // Highlight active session in sidebar
     document.querySelectorAll('.list-item.active-session').forEach(el => el.classList.remove('active-session'));
@@ -1577,6 +1941,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     }
     // Update model picker visibility
     updateModelPicker();
+    if (window.refreshChatContextHeader) window.refreshChatContextHeader('select-session');
 
     // Refresh session cost badge for the newly selected session
     if (chatRenderer.updateSessionCostUI) chatRenderer.updateSessionCostUI();
@@ -1588,13 +1953,38 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     // declaration had been removed while leaving the references in
     // place, producing a ReferenceError every selectSession.)
     const isOC = meta && (meta.is_openclaw || id === 'openclaw');
-    let msgHistory = [], modelName = null;
+    let msgHistory = [], modelName = null, pageInfo = null;
+    let paintedLoading = false;
+    let loadingTimer = null;
+    let loadingPaintReady = Promise.resolve();
     if (!isOC) {
-      const res = await fetch(`${API_BASE}/api/history/${id}`);
+      if (showLoading && chatHistory && prevSessionId !== id) {
+        const loadingDelayMs = immediateLoading ? 0 : (window.innerWidth <= 768 ? 900 : 500);
+        loadingTimer = setTimeout(() => {
+          if (navToken !== _sessionNavToken || currentSessionId !== id) return;
+          _paintSessionLoading(chatHistory, 'Loading chat');
+          paintedLoading = true;
+          loadingPaintReady = _nextPaint();
+        }, loadingDelayMs);
+      }
+      const res = await fetch(_historyUrl(id, { limit: _historyPageLimit() }));
       const data = await res.json();
+      if (loadingTimer) {
+        clearTimeout(loadingTimer);
+        loadingTimer = null;
+      }
+      if (paintedLoading) {
+        await loadingPaintReady;
+      }
       if (navToken !== _sessionNavToken || currentSessionId !== id) return;
       msgHistory = data.history || [];
       modelName = data.model || null;
+      pageInfo = {
+        offset: data.offset,
+        limit: data.limit,
+        total: data.total,
+        has_more_before: !!data.has_more_before,
+      };
       // The model returned by /api/history is the authoritative one the
       // backend will use for this session. Write it back into the cached
       // session meta and refresh the picker so the displayed model can
@@ -1623,8 +2013,17 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       return;
     }
 
-    // Fade out old content, swap, fade in
-    if (chatHistory) {
+    if (paintedLoading && chatHistory) {
+      _updateSessionLoading(chatHistory, msgHistory.length ? 'Rendering chat' : 'Opening chat');
+      await _nextPaint();
+      if (navToken !== _sessionNavToken || currentSessionId !== id) return;
+      chatHistory.innerHTML = '';
+    }
+
+    // Fade out old content, swap, fade in. When we already painted a loading
+    // state, keep it visible until render starts instead of fading to a blank
+    // pane during slow history fetches.
+    if (chatHistory && !paintedLoading) {
       chatHistory.style.transition = 'opacity 0.12s ease-out';
       chatHistory.style.opacity = '0';
       await new Promise(r => setTimeout(r, 120));
@@ -1644,33 +2043,26 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
         'OpenClaw');
     } else if (msgHistory.length) {
       for (const msg of msgHistory) {
-        const meta = msg.metadata ? { ...msg.metadata, _fromHistory: true } : null;
-        let displayContent;
-        if (typeof msg.content === 'string') {
-          displayContent = msg.content;
-        } else if (Array.isArray(msg.content)) {
-          // Multimodal (image/audio attachments): extract text parts, skip binary
-          displayContent = msg.content.filter(p => p.type === 'text').map(p => p.text).join('\n').trim();
-        } else {
-          displayContent = '';
+        try {
+          _renderHistoryMessage(msg, modelName);
+        } catch (e) {
+          console.warn('Failed to render history message:', e, msg);
         }
-        // Clean up doc selection context for display
-        if (msg.role === 'user') {
-          // Hide "Continue where you left off" bubbles
-          if (displayContent.trim() === 'Continue where you left off' || displayContent.trim().startsWith('Your message was cut off.') || displayContent.trim().startsWith('Your previous response was interrupted.') || displayContent.includes('[Instruction: Rewrite') || displayContent.includes('[Instruction: Explain')) continue;
-          const docEditMatch = displayContent.match(/^In the document, edit this specific text \((lines? [\d-]+)\):\n```\n([\s\S]*?)\n```\n\nInstruction: ([\s\S]*)$/);
-          if (docEditMatch) {
-            displayContent = `[Doc edit: ${docEditMatch[1]}] ${docEditMatch[3]}`;
-          }
-        }
-        window.chatModule.addMessage(msg.role, markdownModule.renderContent(displayContent), modelName, meta);
       }
     } else {
       if (window.chatModule && window.chatModule.showWelcomeScreen) window.chatModule.showWelcomeScreen();
-      // Don't highlight empty sessions — feels like nothing is selected
-      document.querySelectorAll('.list-item.active-session').forEach(el => el.classList.remove('active-session'));
+      // Don't highlight ordinary empty sessions — feels like nothing is
+      // selected. Keep document/email-scoped sessions highlighted though: a
+      // new email/reply chat starts empty but immediately owns an email doc.
+      const isDocScopedEmptySession = !!(meta && (meta.has_documents || /^Email:|^New Email$/i.test(meta.name || '')));
+      if (!isDocScopedEmptySession) {
+        document.querySelectorAll('.list-item.active-session').forEach(el => el.classList.remove('active-session'));
+      }
     }
     uiModule.scrollHistoryInstant();
+    if (!isOC && msgHistory.length) {
+      _installHistoryPager(id, pageInfo, modelName);
+    }
 
     // Fade in and re-enable message animations
     if (chatHistory) {
@@ -1740,11 +2132,28 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
 
   } catch (error) {
     console.error('Error in selectSession:', error);
+    const chatHistory = uiModule.el('chat-history');
+    if (chatHistory?.querySelector('.session-loading-state')) {
+      chatHistory.innerHTML = '';
+      chatHistory.style.opacity = '1';
+      chatHistory.classList.remove('no-animate');
+      const msg = document.createElement('div');
+      msg.className = 'msg msg-ai';
+      msg.innerHTML = `<div class="body">Failed to load this chat. ${uiModule.esc ? uiModule.esc(error.message || '') : ''}</div>`;
+      chatHistory.appendChild(msg);
+    }
     uiModule.showError('Failed to load session: ' + error.message);
   } finally {
-    // Ensure memories are loaded after session selection
+    // Memory warmup must not block chat switching. The memories panel can load
+    // on demand; this is only a delayed cache refresh when the foreground chat
+    // is idle.
     if (window.memoryModule && window.memoryModule.loadMemories) {
-      await window.memoryModule.loadMemories();
+      setTimeout(() => {
+        const busy = !!window.__odysseusChatBusy
+          || Date.now() < (window.__odysseusChatBusyUntil || 0)
+          || !!document.querySelector('.send-btn[data-mode="streaming"], .send-btn.send-pending');
+        if (!busy) window.memoryModule.loadMemories().catch(() => {});
+      }, 2500);
     }
     // Auto-focus message input (unless session list has keyboard focus).
     // Skip on mobile — focusing the textarea pops up the on-screen keyboard,
@@ -1760,8 +2169,44 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
 
 // Pending session — stored locally until the first message is sent
 let _pendingChat = null; // { url, modelId, endpointId }
+let _pendingMaterializePromise = null;
 
-export function createDirectChat(url, modelId, endpointId) {
+async function _getPreferredDefaultChat() {
+  let dc = null;
+  try {
+    dc = window.__odysseusDefaultChat || null;
+  } catch (_) {}
+  if (!dc || !dc.endpoint_url || !dc.model) {
+    try {
+      dc = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+    } catch (_) {}
+  }
+  if (dc && dc.endpoint_url && dc.model) return dc;
+  try {
+    const dcRes = await fetch(`${API_BASE}/api/default-chat`);
+    dc = await dcRes.json();
+    if (dc && dc.endpoint_url && dc.model) {
+      try {
+        window.__odysseusDefaultChat = dc;
+        localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(dc));
+      } catch (_) {}
+      return dc;
+    }
+  } catch (_) {}
+  return null;
+}
+
+export function createDirectChat(url, modelId, endpointId, opts = {}) {
+  const incomingSource = opts.source || 'manual';
+  if (
+    _pendingChat &&
+    _pendingChat.modelId &&
+    _pendingChat.source === 'manual' &&
+    incomingSource !== 'manual'
+  ) {
+    updateModelPicker();
+    return;
+  }
   _sessionNavToken++;
   // Detach any active stream so it doesn't interfere with the new chat
   if (window.chatModule && window.chatModule.detachCurrentStream) {
@@ -1775,9 +2220,12 @@ export function createDirectChat(url, modelId, endpointId) {
   }
 
   // Don't hit the API — just store the model info and prepare the UI
-  _pendingChat = { url, modelId, endpointId };
+  _pendingChat = { url, modelId, endpointId, source: incomingSource };
+  _pendingMaterializePromise = null;
   _skipAutoSelect = true;
+  _suppressNextSessionLoading = true;
   currentSessionId = null;
+  try { window.__odysseusLastSelectedSessionId = ''; } catch (_) {}
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
   document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
@@ -1805,6 +2253,7 @@ export function createDirectChat(url, modelId, endpointId) {
 
   // Update model picker to show the pending model
   updateModelPicker();
+  if (window.refreshChatContextHeader) window.refreshChatContextHeader('new-chat');
 
   // Update current-meta header
   const metaEl = document.getElementById('current-meta');
@@ -1814,67 +2263,112 @@ export function createDirectChat(url, modelId, endpointId) {
 
   // Enable input
   const msgInput = document.getElementById('message');
-  if (msgInput) { msgInput.disabled = false; msgInput.value = ''; msgInput.focus(); }
+  if (msgInput) {
+    msgInput.disabled = false;
+    _clearComposerUnlessStartupTyped(msgInput);
+    msgInput.focus();
+  }
 }
 
 /** Actually create the session in the DB. Called on first message send. */
 export async function materializePendingSession() {
+  if (_pendingMaterializePromise) return _pendingMaterializePromise;
   const pending = _pendingChat;
   if (!pending) return false;
-  _pendingChat = null;
 
+  const materializePromise = (async () => {
+
+    const incognitoChk = document.getElementById('incognito-toggle');
+    const isIncognito = incognitoChk && incognitoChk.checked;
+    const base = (pending.modelId || 'model').split('/').pop();
+    const name = isIncognito ? 'Nobody' : `${base} ${new Date().toLocaleTimeString()}`;
+
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('endpoint_url', pending.url || '');
+    fd.append('model', pending.modelId || '');
+    if (pending.url && pending.modelId) {
+      fd.append('skip_validation', 'true');
+    }
+    if (pending.endpointId) {
+      fd.append('endpoint_id', pending.endpointId);
+    }
+
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd });
+    } catch (e) {
+      uiModule.showError('Failed to reach backend: ' + e);
+      return false;
+    }
+
+    let payload;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = { detail: await res.text() };
+    }
+
+    if (!res.ok) {
+      uiModule.showError(`Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
+      return false;
+    }
+
+    // The user may have opened an existing chat while this deferred default
+    // session was being created. Do not let a stale response steal
+    // currentSessionId and make the next send land in a brand-new chat.
+    if (_pendingChat !== pending) {
+      if (payload.id) {
+        fetch(`${API_BASE}/api/session/${encodeURIComponent(payload.id)}`, { method: 'DELETE' }).catch(() => {});
+      }
+      return false;
+    }
+
+    if (isIncognito && payload.id) {
+      _markIncognito(payload.id);
+    }
+
+    // Clear any leftover document text selection from the previous session
+    if (window.documentModule?.clearSelection) {
+      try { window.documentModule.clearSelection(); } catch {}
+    }
+    _pendingChat = null;
+    currentSessionId = payload.id;
+    if (!isIncognito) {
+      Storage.set('lastSessionId', payload.id);
+      history.replaceState(null, '', '#' + payload.id);
+    }
+
+    // Reload the sidebar in the background. Awaiting this used to block the first
+    // prompt in a new/pending chat behind startup fetches and slow /api/sessions
+    // calls, so the user's message could sit for 20s+ before streaming began.
+    _suppressNextSessionLoading = true;
+    if (window.refreshChatContextHeader) window.refreshChatContextHeader('materialize-session');
+    loadSessions().catch(() => {});
+    return true;
+  })();
+  _pendingMaterializePromise = materializePromise;
+
+  try {
+    return await materializePromise;
+  } finally {
+    if (_pendingMaterializePromise === materializePromise) {
+      _pendingMaterializePromise = null;
+    }
+  }
+}
+
+export function preMaterializePendingSession() {
+  if (!_pendingChat || _pendingMaterializePromise) return;
   const incognitoChk = document.getElementById('incognito-toggle');
-  const isIncognito = incognitoChk && incognitoChk.checked;
-  const base = (pending.modelId || 'model').split('/').pop();
-  const name = isIncognito ? 'Nobody' : `${base} ${new Date().toLocaleTimeString()}`;
-
-  const fd = new FormData();
-  fd.append('name', name);
-  fd.append('endpoint_url', pending.url || '');
-  fd.append('model', pending.modelId || '');
-  if (pending.url && pending.modelId) {
-    fd.append('skip_validation', 'true');
-  }
-  if (pending.endpointId) {
-    fd.append('endpoint_id', pending.endpointId);
-  }
-
-  let res;
-  try {
-    res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd });
-  } catch (e) {
-    uiModule.showError('Failed to reach backend: ' + e);
-    return false;
-  }
-
-  let payload;
-  try {
-    payload = await res.json();
-  } catch {
-    payload = { detail: await res.text() };
-  }
-
-  if (!res.ok) {
-    uiModule.showError(`Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
-    return false;
-  }
-
-  if (isIncognito && payload.id) {
-    _markIncognito(payload.id);
-  }
-
-  // Clear any leftover document text selection from the previous session
-  if (window.documentModule?.clearSelection) {
-    try { window.documentModule.clearSelection(); } catch {}
-  }
-  currentSessionId = payload.id;
-  Storage.set('lastSessionId', payload.id);
-  history.replaceState(null, '', '#' + payload.id);
-
-  // Reload sidebar to show the new session — await it so the session
-  // is fully registered before the caller proceeds (prevents race conditions)
-  await loadSessions().catch(() => {});
-  return true;
+  if (incognitoChk && incognitoChk.checked) return;
+  setTimeout(() => {
+    const chk = document.getElementById('incognito-toggle');
+    if (chk && chk.checked) return;
+    if (_pendingChat && !_pendingMaterializePromise) {
+      materializePendingSession().catch(() => {});
+    }
+  }, 250);
 }
 
 export function hasPendingChat() { return !!_pendingChat; }
@@ -1884,6 +2378,10 @@ export function getCurrentSessionId() {
   return currentSessionId;
 }
 
+export function isCurrentSessionIncognito() {
+  return !!(currentSessionId && _isIncognitoSession(currentSessionId));
+}
+
 export function getSessions() {
   return sessions;
 }
@@ -1891,9 +2389,8 @@ export function getSessions() {
 export function getCurrentModel() {
   const sess = sessions.find(x => x.id === currentSessionId);
   if (sess && sess.model) return sess.model;
-  // Pending session not yet materialized — read from model picker label
-  const label = document.getElementById('model-picker-label');
-  return label ? label.textContent.trim() : null;
+  if (_pendingChat && _pendingChat.modelId) return _pendingChat.modelId;
+  return null;
 }
 
 /** Endpoint URL serving the current (or pending) session's model. Used to
@@ -1908,13 +2405,50 @@ export function getCurrentEndpointUrl() {
 export function setCurrentSessionId(id) {
   _sessionNavToken++;
   currentSessionId = id;
+  try { window.__odysseusLastSelectedSessionId = id || ''; } catch (_) {}
   if (!id) {
+    _suppressNextSessionLoading = true;
     Storage.remove('lastSessionId');
     history.replaceState(null, '', window.location.pathname);
     document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
       el.classList.remove('active-session', 'active');
     });
   }
+}
+
+export async function deleteCurrentSessionFromTopMenu() {
+  const sid = currentSessionId;
+  if (!sid) {
+    uiModule.showToast('No chat to delete');
+    return false;
+  }
+  const session = sessions.find(s => String(s.id) === String(sid));
+  if (session?.is_important) {
+    uiModule.showToast('Unfavorite before deleting');
+    return false;
+  }
+  if (!await uiModule.styledConfirm('Delete this session?', { confirmText: 'Delete', danger: true })) {
+    return false;
+  }
+  if (window.chatModule && window.chatModule.abortCurrentRequest) {
+    window.chatModule.abortCurrentRequest();
+  }
+  _deselectCurrentSession(sid);
+  _removeSessionFromLocalState(sid);
+  _skipAutoSelect = true;
+  try {
+    const pm = await import('./presets.js');
+    if (pm.removePersistentChat) pm.removePersistentChat(sid);
+  } catch (e) {}
+  try {
+    const res = await fetch(`${API_BASE}/api/session/${sid}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Failed');
+    uiModule.showToast('Session deleted');
+  } catch (e) {
+    uiModule.showError('Failed to delete session');
+  }
+  await loadSessions();
+  return true;
 }
 
 // Session list keyboard navigation: arrows to move, Delete to delete
@@ -1938,6 +2472,7 @@ async function _onSessionListKeydown(e) {
   }
 
   if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (item.querySelector('.session-rename-input')) return;
     e.preventDefault();
     const sid = item.dataset.sessionId;
     const s = sessions.find(x => x.id === sid);
@@ -2005,7 +2540,7 @@ export function initDragSort() {
 // session navigation (which would reset the active chat).
 window.addEventListener('hashchange', () => {
   const hashId = window.location.hash.replace('#', '');
-  if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId)) return;
+  if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return;
   if (hashId && hashId !== currentSessionId) {
     const target = sessions.find(s => s.id === hashId && !s.archived);
     if (target) selectSession(hashId);
@@ -2084,6 +2619,17 @@ export function clearStreaming(sessionId) {
   _updateRailNotifs();
 }
 
+function _clearRunningState(sessionId) {
+  if (!sessionId) return;
+  var changed = false;
+  if (_researchingSessions.delete(sessionId)) changed = true;
+  if (_streamingSessions.delete(sessionId)) changed = true;
+  if (changed) {
+    _updateResearchDots();
+    _updateRailNotifs();
+  }
+}
+
 export function markStreamComplete(sessionId) {
   _researchingSessions.delete(sessionId);
   _streamingSessions.delete(sessionId);
@@ -2154,9 +2700,15 @@ async function _checkServerStream(sessionId) {
     if (window.chatModule && window.chatModule.hasActiveStream && window.chatModule.hasActiveStream(sessionId)) return;
 
     const res = await fetch(`${API_BASE}/api/chat/stream_status/${sessionId}`);
-    if (!res.ok) return; // 404 = no active stream
+    if (!res.ok) {
+      _clearRunningState(sessionId);
+      return; // 404 = no active stream
+    }
     const info = await res.json();
-    if (info.status !== 'streaming') return;
+    if (info.status !== 'streaming') {
+      _clearRunningState(sessionId);
+      return;
+    }
 
     // Skip if this is a research stream — research has its own progress UI
     if (info.mode === 'research' || info.is_research) return;
@@ -2258,8 +2810,8 @@ if (document.readyState === 'loading') {
 // Shared global listener to close all session dropdowns on click-away or Escape
 function _initDropdownDismiss() {
   document.addEventListener('click', (e) => {
-    if (e.target.closest('.session-dropdown-menu')) return;
-    document.querySelectorAll('.session-dropdown-menu').forEach(d => d.style.display = 'none');
+    if (e.target.closest('.session-dropdown-menu, .session-folder-submenu')) return;
+    document.querySelectorAll('.session-dropdown-menu, .session-folder-submenu').forEach(d => d.style.display = 'none');
   });
   // Watch the sidebar — when it's hidden (any path: hamburger, swipe, mobile
   // collapse), close any open session dropdowns so they don't orphan over
@@ -2268,14 +2820,16 @@ function _initDropdownDismiss() {
   if (_sb) {
     new MutationObserver(() => {
       if (_sb.classList.contains('hidden')) {
-        document.querySelectorAll('.session-dropdown-menu, .folder-submenu').forEach(d => d.style.display = 'none');
+        document.querySelectorAll('.session-dropdown-menu, .session-folder-submenu').forEach(d => d.style.display = 'none');
       }
     }).observe(_sb, { attributes: true, attributeFilter: ['class'] });
   }
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      document.querySelectorAll('.session-dropdown-menu').forEach(d => d.style.display = 'none');
-    }
+    if (e.key !== 'Escape') return;
+    // Esc must dismiss both the parent dropdown AND the Move-to-folder
+    // submenu in one keypress — previously only the dropdown closed and
+    // the submenu was left orphaned on screen.
+    document.querySelectorAll('.session-dropdown-menu, .session-folder-submenu').forEach(d => d.style.display = 'none');
   });
 }
 
@@ -3104,6 +3658,7 @@ const sessionModule = {
   selectSession,
   createDirectChat,
   materializePendingSession,
+  preMaterializePendingSession,
   hasPendingChat,
   getPendingChat,
   getCurrentSessionId,
@@ -3125,7 +3680,8 @@ const sessionModule = {
   closeArchive,
   setSessionHasDocs,
   getSortMode,
-  setSortMode
+  setSortMode,
+  deleteCurrentSessionFromTopMenu
 };
 
 export { updateModelPicker };

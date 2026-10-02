@@ -25,7 +25,7 @@ End-users cloning the repo will land on `dev` by default. To run the curated/sta
 Docker is the recommended path for normal testing:
 
 ```bash
-git clone https://github.com/pewdiepie-archdaemon/odysseus.git
+git clone https://github.com/odysseus-dev/odysseus.git
 cd odysseus
 cp .env.example .env
 docker compose up -d --build
@@ -37,7 +37,7 @@ Manual development uses Python 3.11+:
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python -m uvicorn app:app --host 0.0.0.0 --port 7000
+python -m uvicorn app:app --host 127.0.0.1 --port 7000
 ```
 
 Windows is not actively tested. Docker on Linux or a Linux/macOS manual install is the safer path for now.

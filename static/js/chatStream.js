@@ -7,6 +7,36 @@ import Storage from './storage.js';
 import themeModule from './theme.js';
 import markdownModule from './markdown.js';
 import sessionModule from './sessions.js';
+import documentModule from './document.js?v=20260815approvalsave1';
+
+// Tool approvals are control-plane submits for the current chat. chat.js
+// deliberately leaves the composer untouched, then programmatically clicks the
+// shared send button after it records the sealed approval id/decision. That
+// button is polymorphic: with an empty composer it can mean New chat or Record
+// voice instead of Send. Intercept only the programmatic approval click and
+// route it through the form submit path, which already reaches chat.js directly.
+document.addEventListener('odysseus:tool-approval', () => {
+  const sendButton = document.querySelector('.send-btn');
+  const chatForm = document.getElementById('chat-form');
+  if (!sendButton || !chatForm) return;
+
+  const interceptApprovalClick = (event) => {
+    // A real user click must retain the normal send/new-chat/STT behavior.
+    if (event.isTrusted) return;
+    sendButton.removeEventListener('click', interceptApprovalClick, true);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (chatForm.requestSubmit) chatForm.requestSubmit();
+    else chatForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  };
+
+  sendButton.addEventListener('click', interceptApprovalClick, true);
+  // Fail-safe cleanup if the approval continuation never reaches its deferred
+  // synthetic click (for example because the surrounding view is torn down).
+  setTimeout(() => {
+    sendButton.removeEventListener('click', interceptApprovalClick, true);
+  }, 60000);
+}, true);
 
 /**
  * Handle a ui_control SSE event — AI-driven UI manipulation.
@@ -155,7 +185,7 @@ export function handleUIControl(uiData) {
           if (fn) fn();
         }).catch(function(){});
       } else if (panel === 'email') {
-        import('./emailLibrary.js').then(function(mod) {
+        import('./emailLibrary.js?v=20260815approvalsave1').then(function(mod) {
           var fn = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
           if (fn) fn();
         }).catch(function(){});
@@ -183,9 +213,30 @@ export function handleUIControl(uiData) {
       }
 
     } else if (uiEvent === 'open_email_reply' || uiData.ui_event === 'open_email_reply') {
-      import('./emailInbox.js').then(function(mod) {
+      try {
+        var activeCtx = documentModule && documentModule.getActiveEmailComposerContext
+          ? documentModule.getActiveEmailComposerContext()
+          : null;
+        var sameActiveDraft = activeCtx
+          && String(activeCtx.sourceUid || '') === String(uiData.uid || '')
+          && String(activeCtx.sourceFolder || 'INBOX') === String(uiData.folder || 'INBOX');
+        var existingDocId = sameActiveDraft && activeCtx.docId
+          ? activeCtx.docId
+          : (documentModule && documentModule.findEmailDocId
+            ? documentModule.findEmailDocId(uiData.uid, uiData.folder || 'INBOX')
+            : null);
+        if (existingDocId && documentModule.replaceEmailReplyBody) {
+          if (documentModule.loadDocument) documentModule.loadDocument(existingDocId);
+          documentModule.replaceEmailReplyBody(existingDocId, uiData.body || '', { force: true });
+          if (uiModule && uiModule.showToast) uiModule.showToast('Wrote reply into the open email');
+          return;
+        }
+      } catch (e) {
+        console.warn('open_email_reply existing draft update failed:', e);
+      }
+      import('./emailInbox.js?v=20260815approvalsave1').then(function(mod) {
         var fn = mod.openReplyDraft || (mod.default && mod.default.openReplyDraft);
-        if (fn) fn(uiData.uid, uiData.folder || 'INBOX', uiData.mode || 'reply');
+        if (fn) fn(uiData.uid, uiData.folder || 'INBOX', uiData.mode || 'reply', uiData.body || '');
       }).catch(function(e) {
         console.warn('open_email_reply failed:', e);
       });

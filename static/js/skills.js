@@ -7,6 +7,8 @@
 
 import uiModule from './ui.js';
 import * as spinnerModule from './spinner.js';
+import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { topPortalZ } from './toolWindowZOrder.js';
 
 const API = window.location.origin;
 let skills = [];
@@ -81,17 +83,26 @@ export async function loadSkills(cascade = false) {
   // Play the domino-in entrance on this load (set when the tab is opened,
   // not for the silent re-loads after an edit/delete).
   if (cascade) _cascadeNext = true;
-  if (cascade && loaded && !_loadPromise && _playSkillsCascade()) {
-    _cascadeNext = false;
-    updateCount();
-    return;
-  }
+  // Always re-fetch when the tab is explicitly opened — the cascade
+  // animation is handled inside renderSkillsList() via _cascadeNext.
+  // Skipping the fetch here caused stale data on panel close/reopen (#5870).
   if (_loadPromise) return _loadPromise;
   _loadPromise = (async () => {
   try {
     const res = await fetch(`${API}/api/skills`);
     const data = await res.json();
-    skills = data.skills || [];
+    // Dedupe by name (case-insensitive) — the API has occasionally
+    // returned the same skill twice (built-in shadow + user copy, or
+    // a write-then-read race), and rendering both made the duplicate
+    // detector mark BOTH entries as the "recommended" keeper.
+    const _seen = new Set();
+    skills = (data.skills || []).filter(sk => {
+      const k = String(sk?.name || sk?.id || '').toLowerCase();
+      if (!k) return true;
+      if (_seen.has(k)) return false;
+      _seen.add(k);
+      return true;
+    });
     _loadSkillApprovalThreshold();
     // Built-in capabilities are no longer surfaced in the Skills menu.
     loaded = true;
@@ -380,41 +391,40 @@ function _svg(paths, { fill = 'none', size = 13 } = {}) {
 // Kebab dropdown for a collapsed skill card — same actions + icons as the
 // expanded footer (Publish/Unpublish · Edit · Delete).
 function _openSkillMenu(btn, card, sk, name, isPublished) {
-  document.querySelectorAll('.skill-kebab-menu').forEach(m => m.remove());
+  document.querySelectorAll('.skill-kebab-menu').forEach(dismissOrRemove);
   const menu = document.createElement('div');
   menu.className = 'skill-kebab-menu';
   const mk = (paths, label, opts, onClick) => {
     const item = document.createElement('button');
     item.className = 'skill-kebab-item' + (opts && opts.danger ? ' danger' : '');
     item.innerHTML = _svg(paths, opts) + `<span>${label}</span>`;
-    item.addEventListener('click', (e) => { e.stopPropagation(); menu.remove(); onClick(); });
+    item.addEventListener('click', (e) => { e.stopPropagation(); close(); onClick(); });
     menu.appendChild(item);
   };
   if (isPublished) mk(_ICON.unpublish, 'Unpublish', {}, () => _setSkillStatus(name, 'draft'));
   else mk(_ICON.approve, 'Publish', {}, () => _setSkillStatus(name, 'published'));
+  // Select — moved up to 2nd so it sits next to Publish/Unpublish
+  // (bulk actions cluster at the top of the menu).
+  const selItem = document.createElement('button');
+  selItem.className = 'skill-kebab-item';
+  selItem.innerHTML = '<svg class="memory-select-btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg><span>Select</span>';
+  selItem.addEventListener('click', (e) => {
+    e.stopPropagation();
+    close();
+    if (!_selectMode) _enterSelectMode();
+    _selectedNames.add(name);
+    renderSkillsList();
+  });
+  menu.appendChild(selItem);
+
   mk(_ICON.edit, 'Edit', {}, async () => {
     if (!card.classList.contains('doclib-card-expanded')) await _expandSkillCard(card, name);
     _toggleSkillEdit(card, name);
   });
   mk(_ICON.test, 'Test', {}, () => _testSkill(card, name));
   // Audit kicks off the bulk audit-all loop (test → judge → fix → retry → demote).
-  // Starts at the top of the list and walks down.
   mk(_ICON.test, 'Audit', {}, () => _auditAllSkills());
   mk(_ICON.del, 'Delete', { danger: true }, () => _deleteSkill(name, card));
-
-  // Select — enters bulk-select mode and pre-selects this skill. Same pattern
-  // as the email/documents/brain Select item, with the email bullet icon.
-  const selItem = document.createElement('button');
-  selItem.className = 'skill-kebab-item';
-  selItem.innerHTML = '<span style="display:inline-flex;width:14px;height:14px;align-items:center;justify-content:center;"><span style="font-size:16px;line-height:1;">●</span></span><span>Select</span>';
-  selItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    menu.remove();
-    if (!_selectMode) _enterSelectMode();
-    _selectedNames.add(name);
-    renderSkillsList();
-  });
-  menu.appendChild(selItem);
 
   // Mobile-only Cancel — mirrors the email/documents/brain popup pattern.
   // CSS hides `.dropdown-cancel-mobile` on desktop where outside-click
@@ -422,10 +432,14 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
   const cancelItem = document.createElement('button');
   cancelItem.className = 'skill-kebab-item dropdown-cancel-mobile';
   cancelItem.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>Cancel</span>';
-  cancelItem.addEventListener('click', (e) => { e.stopPropagation(); menu.remove(); });
+  cancelItem.addEventListener('click', (e) => { e.stopPropagation(); close(); });
   menu.appendChild(cancelItem);
 
   document.body.appendChild(menu);
+  // Override the CSS z-index (100002) with a value derived from the live
+  // tool-window stack so the kebab menu stays above its modal even after the
+  // bring-to-front counter climbs past the static value (#4720).
+  menu.style.zIndex = String(topPortalZ());
   const r = btn.getBoundingClientRect();
   menu.style.top = (r.bottom + 4) + 'px';
   menu.style.right = Math.max(6, window.innerWidth - r.right) + 'px';
@@ -443,8 +457,7 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
     menu.style.maxHeight = Math.max(80, window.innerHeight - 12 - mr2.top) + 'px';
     menu.style.overflowY = 'auto';
   }
-  const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', close, true); } };
-  setTimeout(() => document.addEventListener('click', close, true), 0);
+  const close = bindMenuDismiss(menu, () => { menu.remove(); }, (ev) => !menu.contains(ev.target));
 }
 
 // Cards for the agent's built-in tool capabilities (from
@@ -514,6 +527,8 @@ function _buildBuiltinCards() {
 
     card.addEventListener('click', (e) => {
       if (e.target.closest('button, input, textarea')) return;
+      // Editing in progress → don't collapse on an outside-the-textarea click.
+      if (card.querySelector('.skill-md-editor')) return;
       _expandBuiltinCard(card, b.name);
     });
     return card;
@@ -786,6 +801,10 @@ function renderSkillsList() {
     card.addEventListener('click', (e) => {
       if (card._suppressNextClick) { card._suppressNextClick = false; return; }
       if (e.target.closest('button, input, textarea')) return;
+      // While editing, a click on the card body (outside the textarea) must
+      // NOT collapse the card — that silently discards unsaved edits. Only
+      // Save/Cancel exit edit mode.
+      if (card.querySelector('.skill-md-editor')) return;
       if (_selectMode) {
         const cb = card.querySelector('.skill-select-cb');
         if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
@@ -1109,9 +1128,66 @@ function _renderTestLog(logEl, verdictEl, job, card, name) {
     else if (ev.type === 'agent_step') add('— round ' + ev.round + ' —', 'skill-test-round');
     else if (ev.type === 'tool_start') add('▸ ' + ev.tool + '  ' + String(ev.command || '').slice(0, 200), 'skill-test-tool');
     else if (ev.type === 'tool_output') add(String(ev.output || '').slice(0, 500), 'skill-test-out');
+    else if (ev.type === 'approval_granted' || ev.type === 'approval_denied') add(ev.text || '', 'skill-test-meta');
     else if (ev.type === 'say') add(ev.text || '', 'skill-test-say');
     else if (ev.type === 'evaluating') add('Evaluating run…', 'skill-test-meta');
     else if (ev.type === 'error') add('Error: ' + (ev.error || 'run failed'), 'skill-test-err');
+  }
+  if (job.status === 'awaiting_approval' && job.approval) {
+    const approval = job.approval;
+    const box = document.createElement('div');
+    box.className = 'skill-test-approval';
+    const question = document.createElement('div');
+    question.className = 'skill-test-meta';
+    question.textContent = approval.question || 'Allow this exact action once?';
+    box.appendChild(question);
+    if (approval.action) {
+      const action = document.createElement('pre');
+      action.className = 'skill-test-out';
+      action.textContent = [
+        approval.action.tool || 'tool',
+        approval.action.content || '',
+        Array.isArray(approval.action.effects)
+          ? `Effects: ${approval.action.effects.join(', ')}`
+          : '',
+        approval.action.workspace ? `Workspace: ${approval.action.workspace}` : '',
+        approval.action.digest ? `Approval fingerprint: ${approval.action.digest}` : '',
+      ].filter(Boolean).join('\n');
+      box.appendChild(action);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'modal-footer';
+    const decide = async (decision) => {
+      actions.querySelectorAll('button').forEach(btn => { btn.disabled = true; });
+      try {
+        const response = await fetch(
+          `${API}/api/skills/${encodeURIComponent(name)}/test-approval`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ approval_id: approval.approval_id, decision }),
+          },
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        await _testSkill(card, name, false);
+      } catch (error) {
+        add(`Approval failed: ${error.message || error}`, 'skill-test-err');
+        actions.querySelectorAll('button').forEach(btn => { btn.disabled = false; });
+      }
+    };
+    for (const [decision, label, cls] of [
+      ['deny', 'Deny', 'confirm-btn confirm-btn-secondary'],
+      ['approve', 'Allow once', 'confirm-btn confirm-btn-primary'],
+    ]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = cls;
+      button.textContent = label;
+      button.addEventListener('click', () => decide(decision));
+      actions.appendChild(button);
+    }
+    box.appendChild(actions);
+    logEl.appendChild(box);
   }
   if (job.status === 'running') add('…running (you can close this — it keeps going)', 'skill-test-meta');
   logEl.scrollTop = logEl.scrollHeight;
@@ -1591,13 +1667,16 @@ function _renderAuditPanel(panel, st) {
 
 // ---- Select mode / bulk actions ----
 
+const _SKILLS_SELECT_BTN_DOT_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>';
+const _SKILLS_SELECT_BTN_X_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:3px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
 function _enterSelectMode() {
   _selectMode = true;
   _selectedNames.clear();
   const bar = document.getElementById('skills-bulk-bar');
   const btn = document.getElementById('skills-select-btn');
   if (bar) bar.classList.remove('hidden');
-  if (btn) { btn.classList.add('active'); btn.textContent = 'Cancel'; }
+  if (btn) { btn.classList.add('active'); btn.innerHTML = _SKILLS_SELECT_BTN_X_SVG + 'Cancel'; }
   _updateBulkBar();
   renderSkillsList();
 }
@@ -1609,7 +1688,7 @@ function _exitSelectMode() {
   const btn = document.getElementById('skills-select-btn');
   const all = document.getElementById('skills-select-all');
   if (bar) bar.classList.add('hidden');
-  if (btn) { btn.classList.remove('active'); btn.textContent = 'Select'; }
+  if (btn) { btn.classList.remove('active'); btn.innerHTML = _SKILLS_SELECT_BTN_DOT_SVG + 'Select'; }
   if (all) all.checked = false;
   renderSkillsList();
 }
@@ -1783,7 +1862,7 @@ async function _showSkillSource(name) {
   wrap.className = 'modal';
   wrap.style.display = 'block';
   wrap.innerHTML = `
-    <div class="modal-content" style="max-width:760px;max-height:85vh;display:flex;flex-direction:column">
+    <div class="modal-content" style="max-width:760px;display:flex;flex-direction:column">
       <div class="modal-header">
         <h4>SKILL.md — <code>${esc(name)}</code></h4>
         <span style="flex:1"></span>

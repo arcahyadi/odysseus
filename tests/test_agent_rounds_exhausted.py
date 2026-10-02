@@ -37,7 +37,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
 
     async def _fake_exec(block, *a, **k):
-        return ("bash", {"output": "ok", "exit_code": 0})
+        return (block.tool_type, {"output": "ok", "exit_code": 0})
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
 
@@ -58,8 +58,14 @@ def _run_loop(monkeypatch, round_text, max_rounds=2):
 
 def test_emits_rounds_exhausted_when_cap_hit_mid_task(monkeypatch):
     _patch_common(monkeypatch)
-    # Every round returns a tool block -> never "done" -> loop exhausts the cap.
-    events = _run_loop(monkeypatch, "```bash\necho hi\n```", max_rounds=2)
+    # Use a system-owned interaction result so this remains a loop-control test:
+    # Bash output is workspace-derived and now correctly pauses for exact user
+    # approval before a later Bash call.
+    events = _run_loop(
+        monkeypatch,
+        '```update_plan\n{"plan":"- [ ] keep going"}\n```',
+        max_rounds=2,
+    )
     assert any(e.get("type") == "rounds_exhausted" for e in events), events
 
 
@@ -68,3 +74,28 @@ def test_no_rounds_exhausted_on_normal_finish(monkeypatch):
     # A plain answer (no tool block) -> done-break on round 1 -> no event.
     events = _run_loop(monkeypatch, "All done, here is your answer.", max_rounds=2)
     assert not any(e.get("type") == "rounds_exhausted" for e in events), events
+
+
+def test_emits_intent_nudge_exhausted_when_cap_is_exhausted(monkeypatch):
+    _patch_common(monkeypatch)
+
+    events = _run_loop(monkeypatch, "Let me check the logs", max_rounds=5)
+
+    guard = next((e for e in events if e.get("type") == "intent_nudge_exhausted"), None)
+    assert guard is not None, events
+    assert guard["reason"] == "intent_without_action_nudge_cap"
+    assert guard["nudges"] == 2
+
+
+def test_emits_loop_breaker_triggered_when_loop_breaker_trips(monkeypatch):
+    _patch_common(monkeypatch)
+
+    events = _run_loop(
+        monkeypatch,
+        '```update_plan\n{"plan":"- [ ] keep going"}\n```',
+        max_rounds=6,
+    )
+
+    guard = next((e for e in events if e.get("type") == "loop_breaker_triggered"), None)
+    assert guard is not None, events
+    assert guard["reason"] == "loop_breaker_stall"

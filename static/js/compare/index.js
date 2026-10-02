@@ -19,9 +19,9 @@ import { EVAL_PROMPTS, WAVE_FRAMES,
   SEND_SVG, VOTES_STORAGE_KEY,
 } from './icons.js';
 import { fetchModels, _persistSelections, _modelDisplayNames, getExcludedModels, setExcludedModels } from './models.js';
-import { showModelSelector, disableToolToggles, restoreToolToggles, _syncToolbarIndicator } from './selector.js';
+import { showModelSelector, disableToolToggles, restoreToolToggles, _syncToolbarIndicator } from './selector.js?v=20260723compareicon2';
 import { _checkUnprobed, _clearProbeWaves } from './probe.js';
-import { streamToPane, _renderSearchResults, _runSynthForPane, _formatMs, registerStreamActions } from './stream.js';
+import { streamToPane, _renderSearchResults, _runSynthForPane, _formatMs, registerStreamActions } from './stream.js?v=20260819approvalcontrol1';
 import {
   stopAll, stopPane, rerollPane, shufflePanePositions, resetCompare,
   _addPane, _removePane, toggleExpandPane, togglePanePreview, copyPaneResponse,
@@ -39,6 +39,7 @@ import spinnerModule from '../spinner.js';
 import themeModule from '../theme.js';
 import presetsModule from '../presets.js';
 import markdownModule from '../markdown.js';
+import { bindMenuDismiss } from '../escMenuStack.js';
 
 var escapeHtml = uiModule.esc;
 
@@ -71,6 +72,45 @@ function init(apiBase) {
 
 function isCompareActive() {
   return state.isActive;
+}
+
+function _compareModeLabel() {
+  return ({ search: ' search providers', agent: ' agents', research: ' research models' }[state._compareMode] || ' models');
+}
+
+function _setToolbarMode(mode, syncModeTools = !state.isActive) {
+  const target = mode === 'agent' ? 'agent' : 'chat';
+  const toggleState = Storage.loadToggleState();
+  toggleState.mode = target;
+  Storage.saveToggleState(toggleState);
+  const agentBtn = document.getElementById('mode-agent-btn');
+  const chatBtn = document.getElementById('mode-chat-btn');
+  const modeToggle = agentBtn?.closest('.mode-toggle') || chatBtn?.closest('.mode-toggle') || document.querySelector('.mode-toggle');
+  if (agentBtn && chatBtn) {
+    agentBtn.classList.toggle('active', target === 'agent');
+    chatBtn.classList.toggle('active', target === 'chat');
+    agentBtn.setAttribute('aria-pressed', target === 'agent' ? 'true' : 'false');
+    chatBtn.setAttribute('aria-pressed', target === 'chat' ? 'true' : 'false');
+  }
+  if (modeToggle) {
+    modeToggle.classList.toggle('mode-chat', target === 'chat');
+    modeToggle.classList.toggle('mode-right', target === 'chat');
+  }
+  if (syncModeTools) {
+    document.querySelectorAll('[data-mode-tool]').forEach(b => { b.style.display = target === 'agent' ? '' : 'none'; });
+  }
+}
+
+function _syncCompareModeFromToolbar(mode) {
+  if (!state.isActive) return;
+  state._compareMode = mode === 'agent' ? 'agent' : 'chat';
+  _setToolbarMode(state._compareMode, false);
+  const headerLabel = document.querySelector('.compare-header-label');
+  if (headerLabel) {
+    headerLabel.textContent = 'Comparing' + _compareModeLabel() + (state._blindMode ? ' (blind)' : '') + ' · ' + state._timeout + 's timeout';
+  }
+  const evalWrap = document.getElementById('cmp-eval-wrap');
+  if (evalWrap && typeof evalWrap._renderItems === 'function') evalWrap._renderItems();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -170,12 +210,7 @@ async function deactivate(teardown) {
   });
 
   // Restore agent/chat mode to what it was before compare
-  const _ts = Storage.loadToggleState();
-  _ts.mode = state._savedMode;
-  Storage.saveToggleState(_ts);
-  const _ab2 = document.getElementById('mode-agent-btn'), _cb2 = document.getElementById('mode-chat-btn');
-  if (_ab2 && _cb2) { _ab2.classList.toggle('active', state._savedMode === 'agent'); _cb2.classList.toggle('active', state._savedMode === 'chat'); }
-  document.querySelectorAll('[data-mode-tool]').forEach(b => { b.style.display = state._savedMode === 'agent' ? '' : 'none'; });
+  _setToolbarMode(state._savedMode, true);
 
   // Delete unsaved sessions, then reload
   if (teardown) {
@@ -258,19 +293,30 @@ async function _buildCompareUI() {
     if (el) state._savedIndicatorDisplay[id] = el.style.display;
   });
 
-  // 5. Save current mode and lock to the right one for this compare type
+  // 5. Save current mode and seed the toolbar for this compare type.
   const _toggleState = Storage.loadToggleState();
   state._savedMode = _toggleState.mode || 'chat';
   const _targetMode = (state._compareMode === 'agent') ? 'agent' : 'chat';
-  _toggleState.mode = _targetMode;
-  Storage.saveToggleState(_toggleState);
+  _setToolbarMode(_targetMode, false);
   const _ab = document.getElementById('mode-agent-btn'), _cb = document.getElementById('mode-chat-btn');
+  let _modeCleanup = null;
+  const _onCompareModeClick = (ev) => {
+    ev.stopPropagation();
+    ev.stopImmediatePropagation();
+    _syncCompareModeFromToolbar(ev.currentTarget === _ab ? 'agent' : 'chat');
+  };
   if (_ab && _cb) {
-    _ab.classList.toggle('active', _targetMode === 'agent');
-    _cb.classList.toggle('active', _targetMode === 'chat');
+    _ab.addEventListener('click', _onCompareModeClick, true);
+    _cb.addEventListener('click', _onCompareModeClick, true);
+    _modeCleanup = document.createElement('span');
+    _modeCleanup.style.display = 'none';
+    _modeCleanup._cleanup = () => {
+      _ab.removeEventListener('click', _onCompareModeClick, true);
+      _cb.removeEventListener('click', _onCompareModeClick, true);
+    };
   }
   const _modeToggle = document.querySelector('.mode-toggle');
-  if (_modeToggle) { _modeToggle.style.pointerEvents = 'none'; _modeToggle.style.opacity = '0.4'; }
+  if (_modeToggle) { _modeToggle.style.pointerEvents = ''; _modeToggle.style.opacity = ''; }
 
   // 6. Force tool toggles per compare mode
   disableToolToggles();
@@ -289,6 +335,7 @@ async function _buildCompareUI() {
   // 7. Hide existing chat container children (preserves event listeners)
   const container = document.getElementById('chat-container');
   state._compareElements = [];
+  if (_modeCleanup) state._compareElements.push(_modeCleanup);
   Array.from(container.children).forEach(child => {
     if (child.style.display === 'none') return;
     child.dataset.cmpHidden = '1';
@@ -302,9 +349,9 @@ async function _buildCompareUI() {
   headerBar.className = 'compare-header-bar';
   headerBar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 10px;flex-shrink:0;';
   const headerLabel = document.createElement('span');
+  headerLabel.className = 'compare-header-label';
   headerLabel.style.cssText = 'font-size:10px;font-weight:400;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;';
-  const _modeLabel = ({ search: ' search providers', agent: ' agents', research: ' research models' }[state._compareMode] || ' models');
-  headerLabel.textContent = 'Comparing' + _modeLabel + (state._blindMode ? ' (blind)' : '') + ' · ' + state._timeout + 's timeout';
+  headerLabel.textContent = 'Comparing' + _compareModeLabel() + (state._blindMode ? ' (blind)' : '') + ' · ' + state._timeout + 's timeout';
   // Left side: the Compare tool icon (two side-by-side panes, matching the
   // rail/sidebar icon) + the label. Other tool headers carry their icon; this
   // one was missing it.
@@ -312,7 +359,7 @@ async function _buildCompareUI() {
   headerLeft.style.cssText = 'display:flex;align-items:center;min-width:0;';
   const headerIcon = document.createElement('span');
   headerIcon.style.cssText = 'display:inline-flex;flex-shrink:0;margin-right:6px;opacity:0.85;';
-  headerIcon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="8" height="18" rx="1"/><rect x="14" y="3" width="8" height="18" rx="1"/></svg>';
+  headerIcon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>';
   headerLeft.appendChild(headerIcon);
   headerLeft.appendChild(headerLabel);
   headerBar.appendChild(headerLeft);
@@ -475,7 +522,7 @@ async function _buildCompareUI() {
   }
   const msgTA = document.getElementById('message');
   if (msgTA) {
-    msgTA.placeholder = 'Enter prompt for all models...';
+    msgTA.placeholder = window.matchMedia('(max-width: 767px)').matches ? '' : 'Enter prompt for all models...';
     requestAnimationFrame(() => msgTA.focus());
   }
 
@@ -891,8 +938,7 @@ async function _executeCompare(message) {
     let sharedSearchContext = null;
     let sharedSearchSources = null;
     const webChk = document.getElementById('web-toggle');
-    const toggleState = Storage.loadToggleState();
-    const isAgentMode = (toggleState.mode || 'chat') === 'agent';
+    const isAgentMode = state._compareMode === 'agent';
     const webOn = webChk && webChk.checked;
     // In agent mode, web_search is a tool (handled per-pane); in chat mode, pre-search and share
     if (webOn && !isAgentMode) {
@@ -960,11 +1006,16 @@ async function _executeCompare(message) {
     console.error('Compare error:', err);
     if (uiModule) uiModule.showError('Compare failed: ' + err.message);
   } finally {
-    state._streaming = false;
-    _setSendBtn('send');
-    // Re-enable header buttons
-    document.querySelectorAll('#compare-shuffle-btn, #compare-check-btn, #compare-add-btn').forEach(b => {
-      b.disabled = false; b.style.opacity = '0.7'; b.style.pointerEvents = '';
+    // A pane may have started its own ask_user/approval continuation while the
+    // original all-pane Promise was settling. Keep Compare busy until every
+    // pane-owned controller is gone instead of exposing a second broadcast send.
+    const compareStillStreaming = state._abortControllers.some(Boolean);
+    state._streaming = compareStillStreaming;
+    _setSendBtn(compareStillStreaming ? 'stop' : 'send');
+    document.querySelectorAll('#compare-shuffle-btn, #compare-check-btn, #compare-add-btn').forEach((button) => {
+      button.disabled = compareStillStreaming;
+      button.style.opacity = compareStillStreaming ? '0.25' : '0.7';
+      button.style.pointerEvents = compareStillStreaming ? 'none' : '';
     });
   }
 }
@@ -1017,6 +1068,7 @@ function _buildComparisonMarkdown() {
 }
 
 let _exportMenuEl = null;
+let _closeExportMenu = () => {};
 function _toggleExportMenu(btn) {
   if (_exportMenuEl) { _closeExportMenu(); return; }
   const r = btn.getBoundingClientRect();
@@ -1040,10 +1092,9 @@ function _toggleExportMenu(btn) {
   }
   document.body.appendChild(m);
   _exportMenuEl = m;
-  setTimeout(() => document.addEventListener('click', _closeExportMenu, { once: true }), 0);
-}
-function _closeExportMenu() {
-  if (_exportMenuEl) { _exportMenuEl.remove(); _exportMenuEl = null; }
+  _closeExportMenu = bindMenuDismiss(m, () => {
+    if (_exportMenuEl) { _exportMenuEl.remove(); _exportMenuEl = null; }
+  }, (ev) => !m.contains(ev.target));
 }
 
 async function _exportCopyMarkdown(_btn) {
@@ -1198,6 +1249,15 @@ function _setupEvalPicker() {
 
   function _renderItems() {
     const mode = state._compareMode || 'chat';
+    const label = btn.querySelector('.cmp-eval-label');
+    if (label) {
+      label.textContent = ({
+        agent: 'Agent prompts',
+        chat: 'Chat prompts',
+        search: 'Search prompts',
+        research: 'Research prompts'
+      }[mode] || 'Eval prompts');
+    }
     // research/html aren't first-class compare types — fall back gracefully
     const key = EVAL_PROMPTS[mode] ? mode
       : (mode === 'research' ? 'search' : 'chat');
@@ -1258,8 +1318,10 @@ function _setupEvalPicker() {
   };
   document.addEventListener('click', _onDocClick);
 
+  _renderItems();
   wrap.appendChild(btn);
   wrap.appendChild(menu);
+  wrap._renderItems = _renderItems;
   inputTop.appendChild(wrap);
 
   // Expected-answer chip — placed above the chat-input-bar (outside it), so
@@ -1457,7 +1519,7 @@ async function showShufflePoolEditor() {
 // ────────────────────────────────────────────────────────────────────────────
 
 registerCompareActions({ stopAll, resetCompare });
-registerStreamActions({ rerollPane, autoPreviewHtml: _autoPreviewHtml });
+registerStreamActions({ rerollPane, autoPreviewHtml: _autoPreviewHtml, setSendBtn: _setSendBtn });
 registerPaneActions({ setSendBtn: _setSendBtn, deactivate, streamToPane, renderSearchResults: _renderSearchResults, fetchModels });
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -3,10 +3,14 @@
 
 import os
 import secrets
+from collections.abc import Mapping
 
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+from starlette.routing import get_route_path
+
+from src.owner_identity import INTERNAL_TOOL_USER, auth_disabled
 
 
 # Per-process token that lets the in-app tool layer hit admin-gated
@@ -15,6 +19,30 @@ from starlette.responses import Response
 # same value from this module. Never persisted or exposed externally.
 INTERNAL_TOOL_TOKEN = os.environ.get("ODYSSEUS_INTERNAL_TOKEN") or secrets.token_hex(32)
 INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
+
+
+def get_application_route_path(scope: Mapping[str, object]) -> str:
+    """Return the application-relative path used by Starlette routing.
+
+    Uvicorn prefixes ``scope["path"]`` with a configured ASGI ``root_path``;
+    Starlette removes that prefix before matching routes. Middleware policy
+    must use the same path form or a deployment prefix can change which policy
+    applies to an otherwise unchanged application route.
+    """
+    return get_route_path(scope)
+
+
+def with_asgi_root_path(scope: Mapping[str, object], path: str) -> str:
+    """Prefix an application path for a client-facing redirect target."""
+    root_path = scope.get("root_path", "")
+    if not isinstance(root_path, str) or not root_path:
+        return path
+    return f"{root_path.rstrip('/')}{path}"
+
+
+def path_is_route_or_child(path: str, prefix: str) -> bool:
+    """Return whether ``path`` is exactly ``prefix`` or below that route."""
+    return path == prefix or path.startswith(prefix + "/")
 
 
 def is_cors_preflight(method: str, headers) -> bool:
@@ -39,13 +67,13 @@ def require_admin(request: Request):
         hdr = request.headers.get(INTERNAL_TOOL_HEADER)
         if hdr and secrets.compare_digest(hdr, INTERNAL_TOOL_TOKEN):
             return
-        if getattr(request.state, "current_user", None) == "internal-tool":
+        if getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
             return
     except Exception:
         pass
 
     auth_mgr = getattr(request.app.state, "auth_manager", None)
-    if os.getenv("AUTH_ENABLED", "true").lower() == "false":
+    if auth_disabled():
         return
     if not auth_mgr or not auth_mgr.is_configured:
         raise HTTPException(403, "Admin only")
@@ -65,10 +93,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         path = request.url.path
 
-        # Tool render endpoints are served inside iframes — allow framing by self
+        # Tool render endpoints
         is_tool_render = path.startswith("/api/tools/") and path.endswith("/render")
-        # PDF previews are embedded by the in-app document library. Keep the
-        # exception route-scoped so normal app pages remain unframeable.
+        # Document library PDF preview endpoint
         is_document_pdf_preview = path.startswith("/api/document/") and path.endswith("/render-pdf")
         # Visual report pages are self-contained HTML — need inline scripts + external images
         is_report = path.startswith("/api/research/report/")
@@ -95,9 +122,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "frame-ancestors 'none'"
             )
         elif is_tool_render:
-            # Tool iframe content: skip all framing headers — the iframe's
-            # sandbox="allow-scripts" attribute provides isolation.
-            # Don't overwrite the route's own restrictive CSP either.
+            # Skip framing headers for tools.
             pass
         elif is_document_pdf_preview:
             response.headers["X-Frame-Options"] = "SAMEORIGIN"
@@ -118,7 +143,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
                 "font-src 'self' https://cdn.jsdelivr.net; "
-                "img-src 'self' data: blob:; "
+                "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
                 "connect-src 'self'; "
                 "frame-src 'self'; "

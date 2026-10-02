@@ -4,30 +4,38 @@
 // ============================================
 import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
+import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
-import modelsModule from './js/models.js';
+import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js';
-import compareModule from './js/compare/index.js';
-import documentModule from './js/document.js';
+import chatModule from './js/chat.js?v=20260819approvalcontrol1';
+import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
+import documentModule from './js/document.js?v=20260815approvalsave1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
+import {
+  revealApplicationShellAfterPaint,
+  runDeferredRouteOpener,
+  deferRouteOpener,
+  settleSessionHydration
+} from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js';
+import chatRenderer from './js/chatRenderer.js?v=20260819approvalcontrol1';
 import sessionModule from './js/sessions.js';
-import memoryModule from './js/memory.js';
+import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
-import tasksModule from './js/tasks.js';
+import { UI_VIS_DEFAULT_OFF, resolveVisibility } from './js/ui_visibility.js';
+import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
-import adminModule from './js/admin.js';
-import settingsModule from './js/settings.js';
+import adminModule from './js/admin.js?v=20260716openrouter3';
+import settingsModule from './js/settings.js?v=20260815approvalsave1';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
-import './js/modalManager.js';
+import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
 import './js/tileManager.js';
 import themeModule from './js/theme.js';
@@ -38,11 +46,12 @@ import themeModule from './js/theme.js';
 // unversioned so this can't recur.
 import cookbookModule from './js/cookbook.js';
 import groupModule from './js/group.js';
-import * as researchPanelModule from './js/research/panel.js';
+import * as researchPanelModule from './js/research/panel.js?v=20260630researchthumb';
 import ttsModule from './js/tts-ai.js';
 import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
-import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
+import { getSettings } from './js/appConfig.js';
+import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260715startupclean';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
 
 const API_BASE = window.location.origin;
@@ -51,6 +60,138 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+
+function _isMobileChatInput() {
+  return window.innerWidth <= 768;
+}
+
+function _submitChatFormDirect(form) {
+  if (!form) return;
+  if (form.requestSubmit) form.requestSubmit();
+  else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+}
+
+function _isForegroundChatBusy() {
+  const sendBtn = document.querySelector('.send-btn');
+  return !!window.__odysseusChatBusy
+    || Date.now() < (window.__odysseusChatBusyUntil || 0)
+    || !!document.querySelector('.send-btn[data-mode="streaming"], .send-btn.send-pending')
+    || (sendBtn && (sendBtn.title || '').toLowerCase().includes('stop'));
+}
+
+function _shouldQueueFromMobileEnter(e, input) {
+  return e.key === 'Enter'
+    && !e.shiftKey
+    && !e.ctrlKey
+    && !e.metaKey
+    && !e.altKey
+    && !e.isComposing
+    && _isMobileChatInput()
+    && _isForegroundChatBusy()
+    && !!(input && input.value && input.value.trim());
+}
+
+function _shouldQueueFromMobileLineBreak(input) {
+  return _isMobileChatInput()
+    && _isForegroundChatBusy()
+    && !!(input && input.value && input.value.trim());
+}
+
+function _isLineBreakInputEvent(e) {
+  return e
+    && (e.inputType === 'insertLineBreak'
+      || e.inputType === 'insertParagraph'
+      || e.data === '\n');
+}
+
+function _submitMobileQueuedInput(input) {
+  if (!input || !_shouldQueueFromMobileLineBreak(input)) return false;
+  const now = Date.now();
+  const last = Number(input.dataset.mobileQueueSubmitAt || 0);
+  if (now - last < 300) return true;
+  input.dataset.mobileQueueSubmitAt = String(now);
+  if (chatModule && chatModule.queueStreamingComposerRequest && chatModule.queueStreamingComposerRequest()) {
+    return true;
+  }
+  window.__odysseusQueueStreamingSubmit = now;
+  const form = document.getElementById('chat-form');
+  _submitChatFormDirect(form);
+  return true;
+}
+
+function _syncMobileEnterKeyHint(input) {
+  if (!input) return;
+  input.setAttribute('enterkeyhint', (_isMobileChatInput() && _isForegroundChatBusy()) ? 'send' : 'enter');
+}
+
+function _countLineBreaks(s) {
+  return ((s || '').match(/\n/g) || []).length;
+}
+
+function initForegroundActivityHeartbeat() {
+  let lastSent = 0;
+  const minGapMs = 12000;
+  const send = (force = false) => {
+    if (document.visibilityState === 'hidden') return;
+    const now = Date.now();
+    if (!force && now - lastSent < minGapMs) return;
+    lastSent = now;
+    try {
+      if (navigator.sendBeacon) {
+        const body = new Blob(['{}'], { type: 'application/json' });
+        if (navigator.sendBeacon('/api/activity/heartbeat', body)) return;
+      }
+    } catch (_) {}
+    fetch('/api/activity/heartbeat', {
+      method: 'POST',
+      credentials: 'same-origin',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }).catch(() => {});
+  };
+  send(true);
+  window.addEventListener('focus', () => send(true));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'hidden') send(true);
+  });
+  ['pointerdown', 'keydown', 'touchstart', 'scroll'].forEach(type => {
+    window.addEventListener(type, () => send(false), { passive: true, capture: true });
+  });
+  setInterval(() => send(false), 15000);
+}
+initForegroundActivityHeartbeat();
+
+function initRailHoverLabels() {
+  const labels = {
+    'rail-search-btn': 'Search',
+    'rail-new-session': 'New',
+    'rail-delete-session': 'Delete',
+    'rail-chats': 'Chat',
+    'rail-documents': 'Docs',
+    'rail-calendar': 'Calendar',
+    'rail-compare': 'Compare',
+    'rail-cookbook': 'Cookbook',
+    'rail-research': 'Research',
+    'rail-email': 'Email',
+    'rail-gallery': 'Gallery',
+    'rail-archive': 'Library',
+    'rail-memory': 'Brain',
+    'rail-notes': 'Notes',
+    'rail-tasks': 'Tasks',
+    'rail-theme': 'Theme',
+    'rail-settings': 'Settings',
+  };
+  document.querySelectorAll('#icon-rail .icon-rail-btn').forEach(btn => {
+    if (btn.querySelector('.rail-hover-label')) return;
+    const label = labels[btn.id] || btn.getAttribute('aria-label') || btn.getAttribute('title') || '';
+    if (!label) return;
+    const span = document.createElement('span');
+    span.className = 'rail-hover-label';
+    span.textContent = String(label).replace(/\s*\([^)]*\)\s*/g, '').trim();
+    btn.appendChild(span);
+  });
+}
 
 // Redirect to login on 401 from any fetch
 const _origFetch = window.fetch;
@@ -71,12 +212,22 @@ const el = uiModule.el;
 // changes take effect immediately (previously cached once at page load and
 // went stale when the user changed their default model).
 let _defaultChat = null;
+try {
+  const cachedDefaultChat = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+  if (cachedDefaultChat && cachedDefaultChat.endpoint_url && cachedDefaultChat.model) {
+    _defaultChat = cachedDefaultChat;
+    window.__odysseusDefaultChat = cachedDefaultChat;
+  }
+} catch (_) {}
 async function _refreshDefaultChat() {
   try {
     const d = await (await fetch('/api/default-chat')).json();
     if (d && d.endpoint_url && d.model) {
       _defaultChat = d;
-      try { window.__odysseusDefaultChat = d; } catch (_) {}
+      try {
+        window.__odysseusDefaultChat = d;
+        localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(d));
+      } catch (_) {}
       return d;
     }
   } catch (_) {}
@@ -90,22 +241,22 @@ async function _createDirectChatFromPreferredModel() {
   if (!sessionModule) return false;
 
   const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
-  if (pending && pending.url && pending.modelId) {
-    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId);
+  if (pending && pending.url && pending.modelId && pending.endpointId) {
+    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId, { source: pending.source || 'manual' });
     return true;
   }
 
   const sessions = sessionModule.getSessions();
   const currentId = sessionModule.getCurrentSessionId();
   const current = sessions.find(s => s.id === currentId);
-  if (current && current.endpoint_url && current.model) {
+  if (current && current.endpoint_url && current.model && current.endpoint_id) {
     sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
     return true;
   }
 
   const dc = await _refreshDefaultChat();
   if (dc) {
-    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
     return true;
   }
 
@@ -129,9 +280,9 @@ function initializeEventListeners() {
   // File attachments (inside overflow menu)
   const _overflowAttach = el('overflow-attach-btn');
   if (_overflowAttach) _overflowAttach.addEventListener('click', fileHandlerModule.openPicker);
-  el('file-input').addEventListener('change', (e)=>{
-    for (const f of e.target.files) fileHandlerModule.addFiles([f]);
-    fileHandlerModule.renderAttachStrip();
+  el('file-input').addEventListener('change', async (e)=>{
+    await fileHandlerModule.addFiles(Array.from(e.target.files || []));
+    e.target.value = '';
     // Refocus textarea after file picker closes (mobile keyboard)
     const ta = el('message');
     if (ta) setTimeout(() => ta.focus(), 100);
@@ -145,7 +296,7 @@ function initializeEventListeners() {
       if (item.kind === 'file'){
         const f = item.getAsFile();
         if (f) {
-          fileHandlerModule.addFiles([f]);
+          await fileHandlerModule.addFiles([f]);
           changed = true;
         }
       }
@@ -305,8 +456,10 @@ function initializeEventListeners() {
         }
         const body = child.querySelector('.body');
         // Prefer dataset.raw (original markdown) over innerText (rendered HTML as text)
-        // to avoid extra newlines and formatting artifacts.
-        const text = body ? (body.dataset.raw || body.innerText || body.textContent || '').trim() : '';
+        // to avoid extra newlines and formatting artifacts. Raw text lives on
+        // the outer .msg in the main renderer; keep body.dataset.raw as a legacy
+        // fallback for older/reused render paths.
+        const text = (child.dataset?.raw || body?.dataset?.raw || body?.innerText || body?.textContent || '').trim();
         if (text) parts.push(`${label}: ${text}`);
       } else if (child.classList?.contains('agent-thread')) {
         const lines = ['[Tool calls]'];
@@ -340,6 +493,20 @@ function initializeEventListeners() {
       // falsely report "Copied".
       if (!transcript.trim()) { uiModule.showToast('Nothing to copy yet'); return; }
       await uiModule.copyToClipboard(transcript);
+    });
+  }
+
+  // Export menu: Compact current chat context
+  const exportCompactBtn = el('export-compact-btn');
+  if (exportCompactBtn) {
+    exportCompactBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      exportMenu.classList.remove('open');
+      if (window.compactCurrentChatContext) {
+        await window.compactCurrentChatContext();
+      } else {
+        uiModule.showError('Compact action is not ready yet');
+      }
     });
   }
 
@@ -391,6 +558,18 @@ function initializeEventListeners() {
       } catch (err) {
         console.error('Save to docs failed:', err);
         uiModule.showError('Failed to save to documents');
+      }
+    });
+  }
+
+  // Export menu: Delete current chat
+  const exportDeleteBtn = el('export-delete-btn');
+  if (exportDeleteBtn) {
+    exportDeleteBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      exportMenu.classList.remove('open');
+      if (sessionModule?.deleteCurrentSessionFromTopMenu) {
+        await sessionModule.deleteCurrentSessionFromTopMenu();
       }
     });
   }
@@ -1046,12 +1225,13 @@ function initializeEventListeners() {
     '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
   };
   const _opener = _routeOpen[urlPath];
-  // Defer the opener — at this point in init, the modules whose handlers
-  // we trigger (#rail-new-session click handler, the email-section header
-  // click handler in emailInbox, sessionModule's loaded session list) are
-  // still being wired up further down in this same function. Stash the
-  // opener so it runs from sessionModule.loadSessions().finally() below.
-  if (_opener) window._odysseusRouteOpener = _opener;
+  // Defer the opener — at this point in init, the modules whose handlers we
+  // trigger (#rail-new-session click handler, the email-section header click
+  // handler in emailInbox, sessionModule) are still being wired up further
+  // down in this same function. startupShell decides when it can run: as soon
+  // as wiring completes, or — for the routes that read the session list —
+  // once /api/sessions has settled.
+  deferRouteOpener(urlPath, _opener);
 
   // Archive browser tool button
   const toolLibraryBtn = el('tool-library-btn');
@@ -1068,6 +1248,7 @@ function initializeEventListeners() {
   if (libraryNewDocBtn) {
     libraryNewDocBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
+      if (libraryNewDocBtn.dataset.docNewWired === '1') return;
       try {
         if (documentModule && documentModule.newDocument) await documentModule.newDocument();
       } catch (err) {
@@ -1159,7 +1340,7 @@ function initializeEventListeners() {
         if (!p.can_use_bash) {
           const bashToggle = document.getElementById('bash-toggle');
           if (bashToggle) bashToggle.closest('.chat-input-toggle')?.style.setProperty('display', 'none');
-          const bashBtn = document.getElementById('tool-bash-btn');
+          const bashBtn = document.getElementById('bash-toggle-btn');
           if (bashBtn) bashBtn.style.display = 'none';
         }
         // Hide document button
@@ -1176,11 +1357,7 @@ function initializeEventListeners() {
           const resOverflow = document.getElementById('overflow-research-btn');
           if (resOverflow) resOverflow.style.display = 'none';
         }
-        // Hide image generation options
-        if (!p.can_generate_images) {
-          const imgBtn = document.getElementById('tool-image-btn');
-          if (imgBtn) imgBtn.style.display = 'none';
-        }
+
       }
     })
     .catch(() => {});
@@ -1221,7 +1398,7 @@ function initializeEventListeners() {
       sortDropdown.querySelectorAll('.sort-option').forEach(o => {
         const check = o.querySelector('.sort-check') || document.createElement('span');
         check.className = 'sort-check';
-        check.style.cssText = 'float:right;font-size:20px;line-height:1;position:relative;top:3px;color:var(--accent, var(--red));opacity:' + (o.dataset.sort === current ? '1' : '0');
+        check.style.cssText = 'float:right;font-size:20px;line-height:1;position:relative;top:1px;color:var(--accent, var(--red));opacity:' + (o.dataset.sort === current ? '1' : '0');
         check.textContent = '\u2022';
         if (!o.querySelector('.sort-check')) o.appendChild(check);
       });
@@ -1265,9 +1442,9 @@ function initializeEventListeners() {
             let msg;
             if (data.updated > 0) {
               msg = `Sorted ${data.updated} into ${data.folders.length} folder${data.folders.length === 1 ? '' : 's'}`;
-              if (remaining > 0) msg += ` — ${remaining} unfiled left, hit Tidy again`;
+              if (remaining > 0) msg += ` — ${remaining} unfiled left, hit Group again`;
             } else if (remaining > 0) {
-              msg = `${remaining} unfiled chats — hit Tidy again`;
+              msg = `${remaining} unfiled chats — hit Group again`;
             } else {
               msg = 'All sorted';
             }
@@ -1288,17 +1465,6 @@ function initializeEventListeners() {
 
     const autoSortBtn = el('auto-sort-sessions-btn');
     if (autoSortBtn) autoSortBtn.addEventListener('click', () => _runTidy(false));
-
-    // Chevron next to the Tidy row toggles the no-AI sub-item.
-    const autoSortMoreBtn = el('auto-sort-sessions-more');
-    const autoSortNoaiBtn = el('auto-sort-sessions-noai-btn');
-    if (autoSortMoreBtn && autoSortNoaiBtn) {
-      autoSortMoreBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        autoSortNoaiBtn.style.display = autoSortNoaiBtn.style.display === 'none' ? 'block' : 'none';
-      });
-      autoSortNoaiBtn.addEventListener('click', () => _runTidy(true));
-    }
   }
 
   // Model sort dropdown
@@ -1353,13 +1519,11 @@ function initializeEventListeners() {
     })
     .catch(() => {});
 
-  // Hide Gallery when image generation is disabled in settings
-  const _prefetchedSettings = sessionStorage.getItem('ody-prefetch-settings');
-  sessionStorage.removeItem('ody-prefetch-settings');
-  window._initSettingsReady = (_prefetchedSettings
-    ? Promise.resolve(JSON.parse(_prefetchedSettings))
-    : fetch(`${API_BASE}/api/auth/settings`, { credentials: 'same-origin' }).then(r => r.json())
-  ).then(settings => {
+  // Hide Gallery when image generation is disabled in settings.
+  // getSettings() consumes the login prefetch itself, so every other module
+  // that asks for settings this load gets the same snapshot without a request.
+  window._initSettingsReady = getSettings()
+    .then(settings => {
       // NOTE: image_gen_enabled only governs *generating* images in chat — the
       // tool is blocked server-side (chat_routes / agent_loop). The Gallery
       // holds uploads and past images too, so it stays visible regardless;
@@ -1532,11 +1696,19 @@ function initializeEventListeners() {
   
   const newMemoryInput = el('new-memory-input');
   if (newMemoryInput) {
-    newMemoryInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') {
+    // keydown, not the deprecated keypress: keypress is not guaranteed to
+    // fire for Enter everywhere, which left the Add Memory form with no
+    // working submit path (#5828).
+    newMemoryInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
         memoryModule.addNewMemory();
       }
     });
+  }
+  const newMemoryAddBtn = el('new-memory-add-btn');
+  if (newMemoryAddBtn) {
+    newMemoryAddBtn.addEventListener('click', () => memoryModule.addNewMemory());
   }
 
 // Voice recording is handled by the dual-purpose send/mic button (see below)
@@ -1582,6 +1754,42 @@ function initializeEventListeners() {
     uiModule.showToast(`${label} ${active ? 'on' : 'off'}`, 1800);
   }
 
+  function syncPlanToggle(active) {
+    const btn = el('plan-toggle-btn');
+    const chk = el('plan-toggle');
+    const status = el('plan-mode-status');
+    const statusToggle = el('plan-mode-status-toggle');
+    if (chk) chk.checked = !!active;
+    document.body.classList.toggle('plan-mode-active', !!active);
+    if (status) status.hidden = !active;
+    if (statusToggle) {
+      statusToggle.setAttribute('aria-pressed', String(!!active));
+      statusToggle.setAttribute('aria-label', active ? 'Turn off plan mode' : 'Turn on plan mode');
+    }
+    if (btn) {
+      btn.classList.toggle('active', !!active);
+      btn.setAttribute('aria-pressed', String(!!active));
+      btn.title = active
+        ? 'Plan mode on - next message proposes a plan only'
+        : 'Plan mode';
+    }
+  }
+
+  function setPlanMode(active, options = {}) {
+    const on = !!active;
+    const st = loadToggleState();
+    st.plan_mode = on;
+    saveToggleState(st);
+    syncPlanToggle(on);
+    if (on) {
+      const resChk = el('research-toggle');
+      if (resChk && resChk.checked) _syncResearchIndicator(false);
+    }
+    if (!options.silent && uiModule?.showToast) {
+      uiModule.showToast(on ? 'Plan mode on' : 'Plan mode off', 1600);
+    }
+  }
+
   function applyModeToToggles(mode) {
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
@@ -1600,8 +1808,8 @@ function initializeEventListeners() {
     });
   }
 
-  // ── Agent / Chat mode toggle ──
-  (function initModeToggle() {
+	  // ── Agent / Chat mode toggle ──
+	  (function initModeToggle() {
     const agentBtn = el('mode-agent-btn');
     const chatBtn = el('mode-chat-btn');
     if (!agentBtn || !chatBtn) return;
@@ -1626,9 +1834,12 @@ function initializeEventListeners() {
       // Slide the pill to the active button
       const toggle = agentBtn.closest('.mode-toggle');
       if (toggle) toggle.classList.toggle('mode-chat', mode === 'chat');
+      // Workspace pill + overflow entry are agent-only - hide immediately (no flash).
+      try { workspaceModule.applyMode(mode); } catch (_) {}
       // Delay tool glow-up for a staggered effect
       setTimeout(() => applyModeToToggles(mode), 500);
     }
+    window.__odysseusSetChatMode = setMode;
     agentBtn.addEventListener('click', () => {
       // Agent mode turns off research if active
       const resChk = el('research-toggle');
@@ -1636,7 +1847,61 @@ function initializeEventListeners() {
       setMode('agent');
     });
     chatBtn.addEventListener('click', () => setMode('chat'));
-    setMode(currentMode);
+	    setMode(currentMode);
+	  })();
+
+  (function initPlanToggle() {
+    const btn = el('plan-toggle-btn');
+    const state = loadToggleState();
+    syncPlanToggle(!!state.plan_mode);
+    window.__odysseusSetPlanMode = (active) => setPlanMode(active, { silent: true });
+    const statusToggle = el('plan-mode-status-toggle');
+    if (btn) {
+      btn.addEventListener('click', () => {
+        const st = loadToggleState();
+        setPlanMode(!st.plan_mode);
+      });
+    }
+    if (statusToggle) {
+      statusToggle.addEventListener('click', () => setPlanMode(false));
+    }
+    const msgInput = el('message');
+    if (msgInput && !msgInput._odysseusPlanTabToggle) {
+      msgInput._odysseusPlanTabToggle = true;
+      msgInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Tab' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const st = loadToggleState();
+        setPlanMode(!st.plan_mode);
+      });
+    }
+    const chatBar = document.querySelector('.chat-input-bar');
+    if (chatBar && !chatBar._odysseusPlanSwipeToggle) {
+      chatBar._odysseusPlanSwipeToggle = true;
+      let touchStartX = 0;
+      let touchStartY = 0;
+      let touchStartAt = 0;
+      chatBar.addEventListener('touchstart', (e) => {
+        if (!e.touches || e.touches.length !== 1) return;
+        const t = e.touches[0];
+        touchStartX = t.clientX;
+        touchStartY = t.clientY;
+        touchStartAt = Date.now();
+      }, { passive: true });
+      chatBar.addEventListener('touchend', (e) => {
+        if (!touchStartAt || !e.changedTouches || e.changedTouches.length !== 1) return;
+        if (!window.matchMedia || !window.matchMedia('(max-width: 768px)').matches) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - touchStartX;
+        const dy = t.clientY - touchStartY;
+        const dt = Date.now() - touchStartAt;
+        touchStartAt = 0;
+        if (dt > 700 || Math.abs(dx) < 56 || Math.abs(dy) > 28 || Math.abs(dx) < Math.abs(dy) * 2) return;
+        const st = loadToggleState();
+        setPlanMode(!st.plan_mode);
+      }, { passive: true });
+    }
   })();
 
   // ── Tool splash explainer messages (shown first 2 times per tool) ──
@@ -1701,12 +1966,32 @@ function initializeEventListeners() {
   }
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
+  try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
+  function bringOpenDocumentToFrontOnMobile() {
+    if (window.innerWidth > 768) return false;
+    if (!documentModule || !documentModule.isPanelOpen || !documentModule.isPanelOpen()) return false;
+    if (!document.body.classList.contains('email-front')) return false;
+    document.body.classList.remove('email-front', 'email-doc-split-active');
+    document.documentElement.style.removeProperty('--email-doc-split-left-x');
+    document.documentElement.style.removeProperty('--email-doc-split-email-w');
+    document.documentElement.style.removeProperty('--email-doc-split-right-x');
+    const docPane = document.getElementById('doc-editor-pane');
+    if (docPane) docPane.style.setProperty('z-index', '10010', 'important');
+    const overflow = el('overflow-doc-btn');
+    if (overflow) overflow.classList.add('active');
+    const indicator = el('doc-indicator-btn');
+    if (indicator) indicator.classList.add('active');
+    const st = loadToggleState(); st.doc = true; saveToggleState(st);
+    return true;
+  }
+
   const overflowDocBtn = el('overflow-doc-btn');
   if (overflowDocBtn) {
     overflowDocBtn.addEventListener('click', async () => {
       if (!documentModule) return;
+      if (bringOpenDocumentToFrontOnMobile()) return;
       if (documentModule.isPanelOpen()) {
         documentModule.closePanel();
         overflowDocBtn.classList.remove('active');
@@ -2112,23 +2397,46 @@ function initializeEventListeners() {
     const pickerWrap = el('model-picker-wrap');
     if (!inputTop || !pickerWrap) return;
 
-    const PLACEHOLDER_HIDE_WIDTH = 400;
+    const PLACEHOLDER_COMPACT_WIDTH = 400;
     const PICKER_HIDE_WIDTH = 220;
     const TOOLBAR_HIDE_WIDTH = 160;
-    const textarea = el('message');
-    const inputBottom = document.querySelector('.chat-input-bottom');
-    const _isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+	    const textarea = el('message');
+	    const inputBottom = document.querySelector('.chat-input-bottom');
+	    const _isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+	    let _placeholderHintOn = false;
 
-    function checkPickerOverflow() {
-      // Skip responsive collapse on mobile — keyboard open/close causes flicker
-      if (_isMobile) return;
-      const w = inputTop.clientWidth;
-      // Hide model picker
-      pickerWrap.classList.toggle('picker-auto-hidden', w < PICKER_HIDE_WIDTH);
-      // Hide placeholder text
-      if (textarea) {
-        textarea.setAttribute('placeholder', w < PLACEHOLDER_HIDE_WIDTH ? '' : 'Message Odysseus...');
-      }
+	    function setComposerPlaceholder(width) {
+	      if (!textarea) return;
+	      if (_isMobile && _placeholderHintOn) {
+	        textarea.setAttribute('placeholder', 'Swipe to toggle plan');
+	        return;
+	      }
+	      textarea.setAttribute('placeholder', width < PLACEHOLDER_COMPACT_WIDTH ? 'Message...' : 'Message Odysseus...');
+	    }
+
+	    if (_isMobile && textarea && !textarea._odysseusPlanPlaceholderHint) {
+	      textarea._odysseusPlanPlaceholderHint = true;
+	      setInterval(() => {
+	        _placeholderHintOn = !_placeholderHintOn;
+	        setComposerPlaceholder(inputTop.clientWidth || window.innerWidth || 0);
+	      }, 5000);
+	    }
+
+		    function checkPickerOverflow() {
+		      const w = inputTop.clientWidth || window.innerWidth || 0;
+		      const hasText = !!(textarea && textarea.value && textarea.value.trim());
+		      if (_isMobile) {
+		        // Mobile has much less horizontal room: any typed text should get
+		        // the full composer row, matching plan-mode's collision behavior.
+		        pickerWrap.classList.toggle('picker-auto-hidden', hasText);
+		        setComposerPlaceholder(w);
+		        return;
+		      }
+		      // Hide model picker
+		      pickerWrap.classList.toggle('picker-auto-hidden', w < PICKER_HIDE_WIDTH);
+	      // Keep a prompt inside the composer even when the picker crowds the row.
+	      // A blank placeholder makes the mobile/compact empty state feel broken.
+	      setComposerPlaceholder(w);
       // Hide entire bottom toolbar (tools, mode toggle) — only send button remains
       if (inputBottom) {
         inputBottom.classList.toggle('toolbar-auto-hidden', w < TOOLBAR_HIDE_WIDTH);
@@ -2294,6 +2602,11 @@ function initializeEventListeners() {
       incognitoBtn.title = chk.checked ? 'Disable Nobody mode' : 'Enable Nobody mode — no memory, no history saved';
       const welcomeName = document.querySelector('.welcome-name');
       if (chk.checked) {
+        try {
+          if (sessionModule && sessionModule.setCurrentSessionId) sessionModule.setCurrentSessionId(null);
+          const box = el('chat-history');
+          if (box) box.innerHTML = '';
+        } catch (_) {}
         incognitoBtn.innerHTML = INCOGNITO_EYE_CLOSED + '<span class="incognito-label">Nobody</span>';
         if (welcomeName) {
           welcomeName.dataset.originalHtml = welcomeName.innerHTML;
@@ -2315,14 +2628,32 @@ function initializeEventListeners() {
         // IMPORTANT: don't overwrite the user's persisted per-mode tool prefs
         // (`web_agent`, `bash_agent`, `web_chat`, `bash_chat`). Nobody mode is
         // ephemeral — their agent-mode defaults must come back on toggle-off.
+        const beforeNobody = Storage.getJSON(Storage.KEYS.TOGGLES, {}) || {};
+        if (!beforeNobody.nobody_prev_mode) beforeNobody.nobody_prev_mode = beforeNobody.mode || 'agent';
+        Storage.setJSON(Storage.KEYS.TOGGLES, beforeNobody);
         const _offIds = ['web-toggle', 'bash-toggle', 'research-toggle'];
         _offIds.forEach(id => { const c = el(id); if (c) c.checked = false; });
         ['web-toggle-btn', 'bash-toggle-btn'].forEach(id => { const b = el(id); if (b) b.classList.remove('active'); });
-        const _ab = el('mode-agent-btn'), _cb = el('mode-chat-btn');
-        if (_ab) _ab.classList.remove('active');
-        if (_cb) _cb.classList.add('active');
+        if (typeof window.__odysseusSetChatMode === 'function') {
+          window.__odysseusSetChatMode('chat');
+        } else {
+          const _ab = el('mode-agent-btn'), _cb = el('mode-chat-btn');
+          if (_ab) {
+            _ab.classList.remove('active');
+            _ab.setAttribute('aria-pressed', 'false');
+          }
+          if (_cb) {
+            _cb.classList.add('active');
+            _cb.setAttribute('aria-pressed', 'true');
+          }
+          const _toggle = _ab?.closest('.mode-toggle') || _cb?.closest('.mode-toggle');
+          if (_toggle) _toggle.classList.add('mode-chat');
+          const ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
+          ts.mode = 'chat';
+          Storage.setJSON(Storage.KEYS.TOGGLES, ts);
+        }
         const ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-        ts.research = false; ts.mode = 'chat';
+        ts.research = false;
         Storage.setJSON(Storage.KEYS.TOGGLES, ts);
       } else {
         incognitoBtn.innerHTML = INCOGNITO_EYE_OPEN + '<span class="incognito-label">Nobody</span>';
@@ -2346,11 +2677,15 @@ function initializeEventListeners() {
         // Heal any previously-persisted false values from the old Nobody bug
         // so agent-mode defaults (web/bash ON) come back.
         const _ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-        let _dirty = false;
+        const _restoreMode = _ts.nobody_prev_mode || 'agent';
+        delete _ts.nobody_prev_mode;
         ['web_agent', 'bash_agent', 'web_chat', 'bash_chat'].forEach(k => {
-          if (_ts[k] === false) { delete _ts[k]; _dirty = true; }
+          if (_ts[k] === false) delete _ts[k];
         });
-        if (_dirty) Storage.setJSON(Storage.KEYS.TOGGLES, _ts);
+        Storage.setJSON(Storage.KEYS.TOGGLES, _ts);
+        if (typeof window.__odysseusSetChatMode === 'function') {
+          window.__odysseusSetChatMode(_restoreMode === 'chat' ? 'chat' : 'agent');
+        }
         // Reapply the current mode's real defaults to the visible toggles
         const _curMode = (Storage.getJSON(Storage.KEYS.TOGGLES, {}) || {}).mode || 'chat';
         try { applyModeToToggles(_curMode); } catch (_) {}
@@ -2390,47 +2725,6 @@ function initializeEventListeners() {
   // ── UI Visibility (Customize UI modal) ──
   const UI_VIS_KEY = 'odysseus-ui-visibility';
 
-  // Selector map: key → CSS selector(s) for targets
-  const UI_VIS_MAP = {
-    'sidebar-brand':       '.sidebar-brand-title',
-    'sidebar-new-chat':    '#sidebar-new-chat-btn',
-    'sidebar-search':      '#sidebar-search-btn',
-    'sessions-section':    '#sessions-section',
-    'email-section':       '#email-section',
-    'models-section':      '#models-section',
-    'tools-section':       '#tools-section',
-    // Per-tool visibility — fine-grained control over which entries show
-    // inside the Tools section in the sidebar.
-    'tool-calendar':       '#tool-calendar-btn',
-    'tool-compare':        '#tool-compare-btn',
-    'tool-cookbook':       '#tool-cookbook-btn',
-    'tool-research':       '#tool-research-btn',
-    'tool-gallery':        '#tool-gallery-btn',
-    'tool-library':        '#tool-library-btn',
-    'tool-memory':         '#tool-memory-btn',
-    'tool-notes':          '#tool-notes-btn',
-    'tool-tasks':          '#tool-tasks-btn',
-    'tool-theme':          '#tool-theme-btn',
-    'user-bar':            '#user-bar-profile',
-    'sidebar-settings-btn':'#user-bar-settings',
-    'chat-meta':           '.chat-meta-overlay',
-    'welcome-text':        '.welcome-name, .welcome-sub, #welcome-tip',
-    'incognito-btn':       '.incognito-btn',
-    'web-toggle-btn':      '#web-toggle-btn',
-    'doc-toggle-btn':      '#overflow-doc-btn',
-    'rag-toggle-btn':      '#overflow-rag-btn',
-    'bash-toggle-btn':     '#bash-toggle-btn',
-    'overflow-plus-btn':   '.overflow-wrapper',
-    'mode-toggle':         '.mode-toggle',
-    'preset-mini-btn':     '#overflow-preset-btn',
-    'attach-btn':          '#overflow-attach-btn',
-    'research-btn':        '#overflow-research-btn',
-    'rail-new-chat':       '#rail-new-session',
-  };
-
-  // Keys hidden by default on first run (no localStorage yet)
-  const UI_VIS_DEFAULT_OFF = new Set(['models-section', 'rag-toggle-btn', 'text-emojis']);
-
   // Keys that need admin to toggle off (reserved for future use)
   const UI_VIS_ADMIN_ONLY = new Set([]);
 
@@ -2443,14 +2737,14 @@ function initializeEventListeners() {
   }
 
   function applyUIVis(state) {
-    Object.entries(UI_VIS_MAP).forEach(([key, selector]) => {
-      // section-drag-reorder uses a body class instead of inline styles
-      if (key === 'section-drag-reorder') return;
-      const visible = key in state ? state[key] !== false : !UI_VIS_DEFAULT_OFF.has(key);
+    // resolveVisibility computes selector→visible (pure; ui_visibility.js),
+    // including the tools-section parent rule that hides every tool rail
+    // launcher when Tools is off. Apply the result to the DOM here.
+    for (const [selector, visible] of Object.entries(resolveVisibility(state))) {
       document.querySelectorAll(selector).forEach(el => {
         el.style.display = visible ? '' : 'none';
       });
-    });
+    }
     // Drag reorder: use body class so dynamically created handles are covered
     const dragEnabled = state['section-drag-reorder'] === true;
     document.body.classList.toggle('rearrange-mode', dragEnabled);
@@ -2462,6 +2756,8 @@ function initializeEventListeners() {
     applyTextEmojis(state['text-emojis'] === true);
     // Hide thinking sections toggle (show-thinking: checked=show, unchecked=hide)
     document.body.classList.toggle('hide-thinking', state['show-thinking'] === false);
+    // Fullwidth chat toggle (chat-fullwidth: checked=fullwidth, unchecked=big-padding
+    document.body.classList.toggle('fullwidth-chat', state['chat-fullwidth'] === true);
   }
 
   // Rearrange toggles in session/model sort dropdowns
@@ -2948,7 +3244,7 @@ function initializeEventListeners() {
       ['.memory-tabs', '.memory-tab'],
       ['.admin-tabs', '.admin-tab'],
     ];
-    const _IGNORE = 'input, textarea, select, [contenteditable="true"], .preset-range, ' +
+    const _IGNORE = '.chat-input-bar, input, textarea, select, [contenteditable="true"], .preset-range, ' +
       '.note-cl-row, .minimized-dock-chip, canvas, .email-card-reader';
     let sx = 0, sy = 0, tracking = false;
 
@@ -3014,10 +3310,7 @@ function initializeEventListeners() {
     }, { passive: true });
   })();
 
-  // New session button on icon rail
-  const railNewSession = el('rail-new-session');
-  if (railNewSession) {
-    railNewSession.addEventListener('click', async () => {
+  async function _handleNewChatAction({ preferModel = true, focus = true } = {}) {
       if (!sessionModule) return;
       if (_closeCompareIfActive()) return;
       _deactivateIncognito();
@@ -3026,18 +3319,24 @@ function initializeEventListeners() {
       // Clear research mode if active
       const _resChk = el('research-toggle');
       if (_resChk && _resChk.checked) _syncResearchIndicator(false);
-      if (await _createDirectChatFromPreferredModel()) return;
+      if (preferModel && await _createDirectChatFromPreferredModel()) return;
       // No models at all — show welcome screen
-      sessionModule.setCurrentSessionId(null);
-      if (documentModule && documentModule.isPanelOpen && documentModule.isPanelOpen()) documentModule.closePanel();
+      _startFreshChat();
       const docBtn3 = el('overflow-doc-btn');
       if (docBtn3) docBtn3.classList.remove('active', 'has-docs');
-      const box = el('chat-history');
-      if (box) box.innerHTML = '';
-      if (chatModule && chatModule.showWelcomeScreen) {
-        chatModule.showWelcomeScreen();
-      }
       document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
+      if (focus) {
+        const input = el('message');
+        if (input) { try { input.focus(); } catch (_) {} }
+      }
+  }
+
+  // New session button on icon rail
+  const railNewSession = el('rail-new-session');
+  if (railNewSession) {
+    railNewSession.addEventListener('click', async (e) => {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      await _handleNewChatAction();
     });
   }
 
@@ -3064,31 +3363,17 @@ function initializeEventListeners() {
   // Logo click → new chat (same logic as rail new-session button)
   const brandBtn = el('sidebar-brand-btn');
   if (brandBtn) {
-    brandBtn.addEventListener('click', async () => {
-      if (!sessionModule) return;
-      if (_closeCompareIfActive()) return;
-      _deactivateIncognito();
-      if (presetsModule && presetsModule.deactivateCharacter) presetsModule.deactivateCharacter();
-      // Clear research toggle when starting a fresh chat (not via research button)
-      _syncResearchIndicator(false);
-      if (await _createDirectChatFromPreferredModel()) return;
-      // No models at all — show welcome screen
-      sessionModule.setCurrentSessionId(null);
-      if (documentModule && documentModule.isPanelOpen && documentModule.isPanelOpen()) documentModule.closePanel();
-      const docBtn2 = el('overflow-doc-btn');
-      if (docBtn2) docBtn2.classList.remove('active', 'has-docs');
-      const box = el('chat-history');
-      if (box) box.innerHTML = '';
-      if (chatModule && chatModule.showWelcomeScreen) chatModule.showWelcomeScreen();
-      document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
+    brandBtn.addEventListener('click', async (e) => {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      await _handleNewChatAction();
     });
   }
 
   const sidebarNewChatBtn = el('sidebar-new-chat-btn');
   if (sidebarNewChatBtn) {
-    sidebarNewChatBtn.addEventListener('click', () => {
-      const brandBtn = el('sidebar-brand-btn');
-      if (brandBtn) brandBtn.click();
+    sidebarNewChatBtn.addEventListener('click', async (e) => {
+      if (e) { e.preventDefault(); e.stopImmediatePropagation(); }
+      await _handleNewChatAction();
     });
   }
 
@@ -3127,15 +3412,38 @@ function initializeEventListeners() {
   // Textarea auto-resize
   const textarea = el('message');
   if (textarea) {
+    _syncMobileEnterKeyHint(textarea);
+    window.addEventListener('odysseus:chat-busy-change', () => _syncMobileEnterKeyHint(textarea));
     uiModule.autoResize(textarea);
-    textarea.addEventListener('input', () => {
+    let previousTextareaValue = textarea.value || '';
+    textarea.addEventListener('beforeinput', (e) => {
+      if (_isLineBreakInputEvent(e) && _shouldQueueFromMobileLineBreak(textarea)) {
+        e.preventDefault();
+        e.stopPropagation();
+        _submitMobileQueuedInput(textarea);
+      }
+    });
+    textarea.addEventListener('input', (e) => {
+      const currentValue = textarea.value || '';
+      const insertedLineBreak = _isLineBreakInputEvent(e)
+        || _countLineBreaks(currentValue) > _countLineBreaks(previousTextareaValue);
+      if (insertedLineBreak && _shouldQueueFromMobileLineBreak(textarea)) {
+        textarea.value = currentValue.replace(/\n+$/g, '');
+        previousTextareaValue = textarea.value || '';
+        _submitMobileQueuedInput(textarea);
+        return;
+      }
+      previousTextareaValue = currentValue;
       uiModule.autoResize(textarea);
+      _syncMobileEnterKeyHint(textarea);
     });
     textarea.addEventListener('paste', () => {
       setTimeout(() => uiModule.autoResize(textarea), 1);
     });
     textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      const isMobile = _isMobileChatInput();
+
+      if (_shouldQueueFromMobileEnter(e, textarea) || (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isMobile)) {
         // If ghost autocomplete is active, accept the suggestion instead of submitting
         if (window._ghostAutocomplete && window._ghostAutocomplete.isActive()) {
           e.preventDefault();
@@ -3148,8 +3456,13 @@ function initializeEventListeners() {
         // Check if already submitting before triggering form submission
         const form = el('chat-form');
         if (form) {
-         const submitBtn = form.querySelector('button[type="submit"]');
-         if (submitBtn) submitBtn.click();
+          if (_isForegroundChatBusy() && textarea.value && textarea.value.trim()) {
+            if (chatModule && chatModule.queueStreamingComposerRequest && chatModule.queueStreamingComposerRequest()) {
+              return;
+            }
+            window.__odysseusQueueStreamingSubmit = Date.now();
+          }
+          _submitChatFormDirect(form);
         }
       }
     });
@@ -3328,7 +3641,7 @@ function initializeEventListeners() {
         // Now submit the form (the /new command handler will process it)
         setTimeout(() => {
           const form = el('chat-form');
-          if (form) form.querySelector('button[type="submit"]').click();
+          _submitChatFormDirect(form);
         }, 0);
       }
     };
@@ -3347,10 +3660,18 @@ function initializeEventListeners() {
 // INITIALIZATION ON PAGE LOAD
 // ============================================
 function startOdysseusApp() {
+  tasksModule?.startNotificationPolling?.();
   if (window.__odysseusAppStarted) return;
   window.__odysseusAppStarted = true;
+  const _bumpChatPriority = (ms = 10000) => {
+    try {
+      window.__odysseusChatBusyUntil = Math.max(window.__odysseusChatBusyUntil || 0, Date.now() + ms);
+    } catch (_) {}
+  };
+  _bumpChatPriority(10000);
   // Set CSS variables
   document.documentElement.style.setProperty('--line-height', '20px');
+  initRailHoverLabels();
 
   // Smooth keyboard open/close on mobile — keep chat scrolled to bottom
   if (window.visualViewport && 'ontouchstart' in window) {
@@ -3383,7 +3704,7 @@ function startOdysseusApp() {
   modelsModule.init(API_BASE);
   ragModule.init(API_BASE);
   presetsModule.init(API_BASE);
-  searchModule.init(API_BASE);
+  searchModule.init();
   chatModule.init(API_BASE);
   chatModule.initListeners();
   groupModule.init(API_BASE);
@@ -3516,9 +3837,16 @@ function startOdysseusApp() {
   const chatForm = document.getElementById('chat-form');
   const originalSubmit = chatModule.handleChatSubmit;
   let _submitting = false;
+  const _messageInput = document.getElementById('message') || document.getElementById('message-input');
+  if (_messageInput) {
+    _messageInput.addEventListener('focus', () => _bumpChatPriority(15000));
+    _messageInput.addEventListener('input', () => _bumpChatPriority(15000));
+    _messageInput.addEventListener('pointerdown', () => _bumpChatPriority(15000), { passive: true });
+  }
 
   function handleSubmit(e) {
     if (e) e.preventDefault();
+    _bumpChatPriority(30000);
     // Debounce: prevent double-submit while a request is being initiated
     if (_submitting) return;
     _submitting = true;
@@ -3544,6 +3872,7 @@ function startOdysseusApp() {
       return;
     }
 
+    chatRenderer.hideWelcomeScreen();
     return originalSubmit.call(chatModule, e);
   }
 
@@ -3553,6 +3882,11 @@ function startOdysseusApp() {
   const sendBtn = document.querySelector('.send-btn');
   const messageInput = el('message');
   const modelPickerWrap = document.getElementById('model-picker-wrap');
+
+  // ArrowUp/ArrowDown prompt recall on #message lives in
+  // static/js/composerArrowUpRecall.js (wired from chat.js). Do not re-add a
+  // copy here: two capture-phase listeners on the same textarea meant the one
+  // without the draft guard won and ate unsent multi-line prompts (#5862).
 
   const _sendIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   const _micIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
@@ -3570,10 +3904,31 @@ function startOdysseusApp() {
     return fileHandlerModule.getPendingCount && fileHandlerModule.getPendingCount() > 0;
   }
 
+  function _updateStreamingSubmitButton() {
+    if (!sendBtn || sendBtn.dataset.mode !== 'streaming') return false;
+    const hasText = messageInput && messageInput.value.trim().length > 0;
+    const nextPhase = hasText ? 'queue' : 'processing';
+    if (sendBtn.dataset.phase === nextPhase) return true;
+    sendBtn.dataset.phase = nextPhase;
+    sendBtn.classList.remove('mic-mode', 'newchat-mode', 'newchat-expanded', 'anim-spin', 'anim-launch', 'anim-land');
+    if (hasText) {
+      sendBtn.innerHTML = _sendIcon;
+      sendBtn.title = 'Queue message';
+    } else {
+      sendBtn.innerHTML = _stopIcon;
+      sendBtn.title = 'Stop generation';
+    }
+    return true;
+  }
+
   function _updateSendBtnIcon() {
     if (!sendBtn) return;
-    // Don't override if streaming (stop button) or recording
-    if (sendBtn.dataset.mode === 'streaming' || sendBtn.dataset.mode === 'recording') return;
+    if (sendBtn.dataset.mode === 'streaming') {
+      _updateStreamingSubmitButton();
+      return;
+    }
+    // Don't override if recording
+    if (sendBtn.dataset.mode === 'recording') return;
     const prevMode = sendBtn.dataset.mode || '';
     const hasText = messageInput && messageInput.value.trim().length > 0;
     const hasFiles = _hasAttachments();
@@ -3669,6 +4024,12 @@ function startOdysseusApp() {
       const hasText = messageInput && messageInput.value.trim().length > 0;
       const hasFiles = _hasAttachments();
 
+      if (sendBtn.dataset.mode === 'streaming') {
+        if (hasText) window.__odysseusQueueStreamingSubmit = Date.now();
+        handleSubmit(e);
+        return;
+      }
+
       // New chat mode — empty input, no attachments, no STT
       if (!hasText && !hasFiles && sendBtn.dataset.mode === 'newchat') {
         if (sessionModule) {
@@ -3708,7 +4069,10 @@ function startOdysseusApp() {
   // Enter to send (shift+enter for newline), or new chat when empty
   if (messageInput) {
     messageInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      if (e.defaultPrevented) return;
+      const isMobile = _isMobileChatInput();
+
+      if (_shouldQueueFromMobileEnter(e, messageInput) || (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isMobile)) {
         e.preventDefault();
         // Flush the debounced icon update so dataset.mode reflects the current
         // text state. Without this, a fast type-and-Enter would still see the
@@ -3719,7 +4083,13 @@ function startOdysseusApp() {
           if (railNew) railNew.click();
           return;
         }
-        handleSubmit(e);
+        if (_isForegroundChatBusy() && messageInput.value && messageInput.value.trim()) {
+          if (chatModule && chatModule.queueStreamingComposerRequest && chatModule.queueStreamingComposerRequest()) {
+            return;
+          }
+          window.__odysseusQueueStreamingSubmit = Date.now();
+        }
+        _submitChatFormDirect(document.getElementById('chat-form'));
       }
     });
   }
@@ -3727,18 +4097,27 @@ function startOdysseusApp() {
   // Toggle mic/send icon on input change + hide model picker after enough text
   if (messageInput) {
     const _debouncedUpdateIcon = uiModule.debounce(_updateSendBtnIcon, 50);
-    const _MODEL_PICKER_HIDE_CHARS = 10;
-    const _syncModelPickerAutohide = () => {
-      const hidePicker = (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
-      if (modelPickerWrap) {
-        modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
-      }
-    };
+		    const _MODEL_PICKER_HIDE_CHARS = 23;
+		    const _syncModelPickerAutohide = () => {
+		      const compactMobile = _isMobileChatInput() && !!(messageInput.value || '').trim();
+		      const hidePicker = compactMobile || (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
+		      if (modelPickerWrap) {
+		        modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
+		      }
+	      const planStatus = el('plan-mode-status');
+	      if (planStatus) {
+	        planStatus.classList.toggle('plan-mode-status-autohide', hidePicker);
+	      }
+	    };
     window._syncModelPickerAutohide = _syncModelPickerAutohide;
     _syncModelPickerAutohide();
     messageInput.addEventListener('input', () => {
       _syncModelPickerAutohide();
-      _debouncedUpdateIcon();
+      if (sendBtn && sendBtn.dataset.mode === 'streaming') {
+        _updateSendBtnIcon();
+      } else {
+        _debouncedUpdateIcon();
+      }
     }, { passive: true });
   }
 
@@ -3793,14 +4172,13 @@ function startOdysseusApp() {
     _showDropHighlight();
   });
 
-  chatContainer.addEventListener('drop', (e) => {
+  chatContainer.addEventListener('drop', async (e) => {
     e.preventDefault();
     e.stopPropagation();
     _hideDropHighlight();
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
-    fileHandlerModule.addFiles(files);
-    fileHandlerModule.renderAttachStrip();
+    await fileHandlerModule.addFiles(files);
     uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to chat`);
   });
 
@@ -3817,12 +4195,13 @@ function startOdysseusApp() {
     attachStrip.style.borderRadius = '4px';
   });
   
-  attachStrip.addEventListener('drop', (e) => {
+  attachStrip.addEventListener('drop', async (e) => {
     e.preventDefault();
     attachStrip.style.backgroundColor = '';
     
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
+    await fileHandlerModule.addFiles(files);
 
     uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to chat`);
 
@@ -3890,19 +4269,22 @@ function startOdysseusApp() {
     if (_compareActive() && !e.relatedTarget) _hideCmpShield();
   }, true);
   window.addEventListener('dragend', _hideCmpShield, true);
-  window.addEventListener('drop', (e) => {
+  window.addEventListener('drop', async (e) => {
     if (!_isFileDrag(e) || !_compareActive()) return;
     e.preventDefault();
     _hideCmpShield();
     const files = Array.from(e.dataTransfer.files || []);
     if (!files.length) return;
-    fileHandlerModule.addFiles(files);
-    fileHandlerModule.renderAttachStrip();
+    await fileHandlerModule.addFiles(files);
     uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to attach`);
   }, true);
 
   // Load initial data
   presetsModule.loadPresets(uiModule.showError);
+
+  // Core wiring is complete for this turn — reveal the shell independently of
+  // the session-list request.
+  revealApplicationShellAfterPaint();
 
   if (sessionModule) {
     sessionModule.initDependencies({
@@ -3915,47 +4297,158 @@ function startOdysseusApp() {
       scrollHistory: uiModule.scrollHistoryInstant
     });
 
-    // Load sessions first (critical path) — remove loader when done
-    sessionModule.loadSessions()
-      .catch(e => console.warn('loadSessions error:', e))
-      .finally(() => {
-        const loader = document.getElementById('app-loader');
-        if (loader) { loader.style.opacity = '0'; setTimeout(() => loader.remove(), 300); }
-        // Fire any URL route opener now that sessions + module wiring are
-        // ready. Deferred from up top of init for exactly this reason.
-        if (window._odysseusRouteOpener) {
-          try { window._odysseusRouteOpener(); } catch (_) {}
-          window._odysseusRouteOpener = null;
-        }
-      });
+    // sessionModule is now wired, so every route opener has the modules it
+    // drives. The ones that read no session data open here rather than
+    // queueing behind /api/sessions.
+    runDeferredRouteOpener();
+
+    // The shell is already usable at this point; session hydration is
+    // sidebar-local and settles on its own schedule.
+    settleSessionHydration(() => sessionModule.loadSessions());
   } else {
     console.error('Session module not loaded!');
+    // Nothing will hydrate. Settle immediately so the sidebar exposes the
+    // failure; session-dependent routes must remain unopened without data.
+    settleSessionHydration(null);
   }
 
-  // Non-critical: load in parallel, resolve silently
-  modelsModule.refreshModels(true).then(() => {
-    const modelsBox = document.getElementById('models');
-    const hasModels = modelsBox && modelsBox.querySelector('.models-row');
-    if (!hasModels) {
-      const tip = document.getElementById('welcome-tip');
-      if (tip) tip.textContent = 'Add an AI endpoint from Settings in the sidebar, or paste an endpoint/API key into the chat.';
-    }
-  }).catch(() => {});
-  modelsModule.refreshProviders();
-  ragModule.loadPersonalDocs();
-  memoryModule.loadMemories(); // Ensure memories are loaded on page load
-  
-  // Ensure the memory list is rendered after loading
-  setTimeout(async () => {
-    await memoryModule.loadMemories();
-  }, 1000);
-  
-  // Ensure proper initial state
-  voiceRecorderModule.init();
-  if (censorModule) censorModule.init();
+  const runNonCriticalStartup = (fn, delay = 4000) => {
+    let tries = 0;
+    const run = () => {
+      const busy = !!window.__odysseusChatBusy
+        || Date.now() < (window.__odysseusChatBusyUntil || 0)
+        || !!document.querySelector('.send-btn[data-mode="streaming"], .send-btn.send-pending');
+      if (busy && tries < 12) {
+        tries += 1;
+        setTimeout(run, 2500);
+        return;
+      }
+      try { fn(); } catch (e) { console.warn('non-critical startup task failed:', e); }
+    };
+    setTimeout(() => {
+      if ('requestIdleCallback' in window) {
+        window.requestIdleCallback(run, { timeout: 5000 });
+      } else {
+        run();
+      }
+    }, delay);
+  };
 
-  // Auto-focus message input on load
-  const msgEl = document.getElementById('message');
+  // Non-critical startup work must not compete with first paint, chat send, or
+  // chat switching. Panels load their own data when opened; these are only warmups.
+  runNonCriticalStartup(() => {
+    modelsModule.refreshModels(false).then(() => {
+      try { sessionModule.updateModelPicker(); } catch (_) {}
+    }).catch(() => {});
+  }, 3500);
+  runNonCriticalStartup(() => modelsModule.refreshProviders(), 6500);
+  runNonCriticalStartup(() => ragModule.loadPersonalDocs(), 9000);
+	  runNonCriticalStartup(() => memoryModule.loadMemories(), 12000);
+
+	  // Ensure proper initial state
+	  voiceRecorderModule.init();
+	  if (censorModule) censorModule.init();
+
+	  // ── Mobile pull-to-refresh for the active chat ──
+	  (function initMobileChatPullRefresh() {
+	    const historyEl = document.getElementById('chat-history');
+	    const container = document.getElementById('chat-container');
+	    if (!historyEl || !container || !('ontouchstart' in window || navigator.maxTouchPoints > 0)) return;
+
+	    const THRESHOLD = 72;
+	    const MAX_PULL = 104;
+	    let startY = 0;
+	    let pullY = 0;
+	    let tracking = false;
+	    let refreshing = false;
+	    let spinner = null;
+	    const indicator = document.createElement('div');
+	    indicator.className = 'chat-pull-refresh';
+	    indicator.setAttribute('aria-hidden', 'true');
+	    indicator.innerHTML = '<div class="chat-pull-refresh-spinner"></div>';
+	    container.prepend(indicator);
+	    const spinnerMount = indicator.querySelector('.chat-pull-refresh-spinner');
+	    try {
+	      spinner = spinnerModule.createWhirlpool(18);
+	      spinnerMount.replaceChildren(spinner.element);
+	    } catch (_) {}
+
+	    function setPull(px, active = false) {
+	      pullY = Math.max(0, Math.min(MAX_PULL, px));
+	      const pct = Math.min(1, pullY / THRESHOLD);
+	      indicator.style.setProperty('--pull-refresh-y', `${pullY}px`);
+	      indicator.style.setProperty('--pull-refresh-progress', `${pct}`);
+	      indicator.classList.toggle('is-visible', active || refreshing || pullY > 2);
+	      indicator.classList.toggle('is-ready', pct >= 1 && !refreshing);
+	      indicator.classList.toggle('is-refreshing', refreshing);
+	    }
+
+	    async function runRefresh() {
+	      if (refreshing) return;
+	      if (_isForegroundChatBusy()) {
+	        setPull(0, false);
+	        return;
+	      }
+	      refreshing = true;
+	      setPull(THRESHOLD, true);
+	      const safetyTimer = setTimeout(() => {
+	        refreshing = false;
+	        setPull(0, false);
+	      }, 8000);
+	      try {
+	        const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+	        if (sid && sessionModule.selectSession) {
+	          await sessionModule.selectSession(sid, { keepSidebar: true, showLoading: false, immediateLoading: true });
+	        } else if (sessionModule && sessionModule.loadSessions) {
+	          await sessionModule.loadSessions();
+	        }
+	      } catch (err) {
+	        console.warn('pull refresh failed:', err);
+	      } finally {
+	        clearTimeout(safetyTimer);
+	        refreshing = false;
+	        setPull(0, false);
+	      }
+	    }
+
+	    historyEl.addEventListener('touchstart', (e) => {
+	      if (refreshing || window.innerWidth > 768) return;
+	      if (document.querySelector('.modal:not(.hidden)')) return;
+	      if (historyEl.scrollTop > 0) return;
+	      if (e.target && e.target.closest && e.target.closest('.chat-input-bar, textarea, input, button, select, a')) return;
+	      tracking = true;
+	      startY = e.touches[0].clientY;
+	      setPull(0, false);
+	    }, { passive: true });
+
+	    historyEl.addEventListener('touchmove', (e) => {
+	      if (!tracking || refreshing) return;
+	      const dy = e.touches[0].clientY - startY;
+	      if (dy <= 0) {
+	        setPull(0, false);
+	        return;
+	      }
+	      if (historyEl.scrollTop <= 0) {
+	        e.preventDefault();
+	        setPull(dy * 0.62, true);
+	      }
+	    }, { passive: false });
+
+	    historyEl.addEventListener('touchend', () => {
+	      if (!tracking) return;
+	      tracking = false;
+	      if (pullY >= THRESHOLD) runRefresh();
+	      else setPull(0, false);
+	    }, { passive: true });
+
+	    historyEl.addEventListener('touchcancel', () => {
+	      tracking = false;
+	      if (!refreshing) setPull(0, false);
+	    }, { passive: true });
+	  })();
+
+	  // Auto-focus message input on load
+	  const msgEl = document.getElementById('message');
   if (msgEl) msgEl.focus();
   
   // Initialize mouse-based drag for sidebar sections

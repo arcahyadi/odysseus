@@ -6,6 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from core.middleware import require_admin
+from services.memory import MemoryStoreUnreadable
 from src.auth_helpers import get_current_user
 from src.settings import load_settings, save_settings, load_features, save_features
 
@@ -76,7 +77,15 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
 
         # ── Memories ──
         if "memories" in body and isinstance(body["memories"], list):
-            existing = memory_manager.load_all()
+            # Strict load: importing on top of an unreadable store would write
+            # only the incoming rows back and drop everything already saved.
+            try:
+                existing = memory_manager.load_all_for_update()
+            except MemoryStoreUnreadable as e:
+                logger.error("Refusing to import memories: %s", e)
+                raise HTTPException(
+                    503, "Memory store is temporarily unreadable — nothing was imported."
+                )
             # Dedup against THIS user's own memories only. Using every tenant's
             # rows (load_all) meant a memory whose text matched any other
             # user's was silently skipped, so the importing user lost their own
@@ -101,11 +110,17 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
         # ── Skills ──
         if "skills" in body and isinstance(body["skills"], list):
             existing = skills_manager.load_all()
-            existing_names = {s.get("name") for s in existing if s.get("name")}
-            existing_ids = {s.get("id") for s in existing if s.get("id")}
+            # Dedup against THIS user's own skills only. Using every tenant's
+            # rows (load_all) meant a skill whose id/name/title matched any
+            # other user's was silently skipped, so the importing user lost
+            # their own data — same cross-tenant bug fixed for memories above.
+            # The full store is still saved back below.
+            own = [s for s in existing if s.get("owner") == user]
+            existing_names = {s.get("name") for s in own if s.get("name")}
+            existing_ids = {s.get("id") for s in own if s.get("id")}
             existing_titles = {
                 (s.get("title") or s.get("description") or "").strip().lower()
-                for s in existing
+                for s in own
             }
             added = 0
             for skill in body["skills"]:

@@ -26,13 +26,14 @@ import io
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 
 from contextlib import asynccontextmanager
 
 import torch
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
@@ -44,6 +45,7 @@ _pipe = None
 _model_id = ""
 DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 _args = None
+_PROGRESS = {}
 
 
 @asynccontextmanager
@@ -112,6 +114,77 @@ def _configure_security_middleware(application, allowed_hosts, allowed_origins):
 _configure_security_middleware(app, _DEFAULT_ALLOWED_HOSTS, _DEFAULT_CORS_ORIGINS)
 
 
+def _start_progress(request_id: str, total_steps: int, prompt: str, kind: str) -> str:
+    rid = (request_id or "").strip() or uuid.uuid4().hex
+    _PROGRESS[rid] = {
+        "id": rid,
+        "kind": kind,
+        "status": "running",
+        "step": 0,
+        "total": max(1, int(total_steps or 1)),
+        "percent": 0,
+        "prompt": (prompt or "")[:120],
+        "started_at": time.time(),
+        "updated_at": time.time(),
+    }
+    return rid
+
+
+def _update_progress(request_id: str, step: int, total_steps: int | None = None, status: str = "running"):
+    if not request_id:
+        return
+    item = _PROGRESS.get(request_id)
+    if not item:
+        return
+    total = max(1, int(total_steps or item.get("total") or 1))
+    current = max(0, min(int(step or 0), total))
+    item.update({
+        "status": status,
+        "step": current,
+        "total": total,
+        "percent": round((current / total) * 100, 1),
+        "updated_at": time.time(),
+    })
+
+
+def _finish_progress(request_id: str, status: str = "done", error: str = ""):
+    if not request_id:
+        return
+    item = _PROGRESS.get(request_id)
+    if not item:
+        return
+    total = max(1, int(item.get("total") or 1))
+    item.update({
+        "status": status,
+        "step": total if status == "done" else item.get("step", 0),
+        "total": total,
+        "percent": 100 if status == "done" else item.get("percent", 0),
+        "error": error,
+        "updated_at": time.time(),
+    })
+
+
+def _run_pipeline_with_progress(pipe, request_id: str, total_steps: int, **kwargs):
+    def step_end_callback(_pipe, step, timestep, callback_kwargs):
+        _update_progress(request_id, int(step) + 1, total_steps)
+        return callback_kwargs
+
+    def legacy_callback(step, timestep, latents):
+        _update_progress(request_id, int(step) + 1, total_steps)
+
+    try:
+        return pipe(callback_on_step_end=step_end_callback, **kwargs)
+    except TypeError as exc:
+        if "callback_on_step_end" not in str(exc):
+            raise
+    try:
+        return pipe(callback=legacy_callback, callback_steps=1, **kwargs)
+    except TypeError as exc:
+        if "callback" not in str(exc) and "callback_steps" not in str(exc):
+            raise
+    return pipe(**kwargs)
+
+
 class ImageRequest(BaseModel):
     model: str = ""
     prompt: str
@@ -119,10 +192,71 @@ class ImageRequest(BaseModel):
     size: str = "1024x1024"
     quality: str = "medium"
     response_format: str = "b64_json"
+    request_id: str = ""
+
+
+def _parse_size(size: str) -> tuple[int, int]:
+    try:
+        w, h = (size or "").split("x")
+        return int(w), int(h)
+    except Exception:
+        return _args.width, _args.height
+
+
+def _quality_steps(quality: str) -> int:
+    default_steps = _args.steps or 8
+    steps_map = {"low": 4, "medium": default_steps, "high": 20, "auto": 12}
+    return steps_map.get(quality, default_steps)
+
+
+def _guidance_scale() -> float:
+    return float(_args.guidance_scale)
+
+
+def _default_negative_prompt() -> str | None:
+    value = (_args.negative_prompt or "").strip()
+    return value or None
+
+
+def _pipeline_accepts_arg(name: str) -> bool:
+    try:
+        import inspect
+        sig = inspect.signature(_pipe.__call__)
+        return name in sig.parameters
+    except Exception:
+        return True
+
+
+def _pipeline_call_kwargs(**kwargs) -> dict:
+    """Filter kwargs to the active pipeline signature.
+
+    Diffusers/community pipelines are not consistent: ordinary img2img
+    usually accepts `image`, while instruction-edit models such as OmniGen2
+    accept `input_images` plus model-specific guidance fields. Filtering keeps
+    the server generic and avoids hardcoding repo IDs.
+    """
+    try:
+        import inspect
+        sig = inspect.signature(_pipe.__call__)
+        params = sig.parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return {k: v for k, v in kwargs.items() if v is not None}
+        return {k: v for k, v in kwargs.items() if v is not None and k in params}
+    except Exception:
+        return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def _image_response(images) -> dict:
+    data = []
+    for img in images:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        data.append({"b64_json": base64.b64encode(buf.getvalue()).decode()})
+    return {"created": int(time.time()), "data": data}
 
 
 def _fix_meta_tensors(pipe, dtype):
-    """Replace any meta tensors with real zero tensors on CPU so .to(cuda) works."""
+    """Replace any meta tensors with real zero tensors on CPU so .to(device) works."""
     for name, component in pipe.components.items():
         if not hasattr(component, 'parameters'):
             continue
@@ -142,6 +276,69 @@ def _fix_meta_tensors(pipe, dtype):
             logger.info(f"  Fixed {fixed} meta tensors in {name}")
 
 
+def _target_device() -> str:
+    """Best available torch device for Diffusers on this host."""
+    try:
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    try:
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _can_cpu_offload(device: str) -> bool:
+    # Diffusers CPU offload helpers are CUDA/accelerate-oriented. On Apple
+    # Silicon they either no-op poorly or fail; MPS should use direct .to("mps").
+    return device == "cuda"
+
+
+def _load_omnigen2_pipeline(model_path: str, torch_dtype, target_device: str, use_offload: bool) -> bool:
+    """Load OmniGen2 from the official repo package.
+
+    OmniGen2 publishes a Diffusers-style model_index.json, but current
+    public diffusers builds do not expose OmniGen2Pipeline as a stock class.
+    The official examples import the pipeline from the cloned `omnigen2`
+    package, so support that path without hardcoding any private model.
+    """
+    global _pipe
+    try:
+        from omnigen2.pipelines.omnigen2.pipeline_omnigen2 import OmniGen2Pipeline
+        from omnigen2.models.transformers.transformer_omnigen2 import OmniGen2Transformer2DModel
+    except Exception as exc:
+        logger.warning("OmniGen2 package import failed: %s", exc)
+        return False
+
+    try:
+        logger.info("Loading OmniGen2 pipeline via official omnigen2 package")
+        pipe = OmniGen2Pipeline.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        )
+        pipe.transformer = OmniGen2Transformer2DModel.from_pretrained(
+            model_path,
+            subfolder="transformer",
+            torch_dtype=torch_dtype,
+        )
+        if use_offload and _can_cpu_offload(target_device):
+            pipe.enable_model_cpu_offload()
+            logger.info("Loaded OmniGen2 with CPU offload")
+        else:
+            pipe = pipe.to(target_device)
+            logger.info("Loaded OmniGen2 on %s", target_device)
+        _pipe = pipe
+        return True
+    except Exception as exc:
+        logger.warning("Official OmniGen2 loader failed: %s", exc)
+        _pipe = None
+        return False
+
+
 def load_model():
     global _pipe, _model_id
     import diffusers
@@ -151,8 +348,12 @@ def load_model():
     dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
     torch_dtype = dtype_map.get(_args.dtype, torch.bfloat16)
     use_offload = _args.cpu_offload
+    target_device = _target_device()
+    if target_device != "cuda" and use_offload:
+        logger.warning("CPU offload requested but %s is the active device; using direct device placement instead", target_device)
+        use_offload = False
 
-    logger.info(f"Loading model from {model_path} (dtype={_args.dtype}, offload={use_offload})...")
+    logger.info(f"Loading model from {model_path} (dtype={_args.dtype}, offload={use_offload}, device={target_device})...")
 
     # Ensure HF token is available for gated repos
     _hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -207,23 +408,45 @@ def load_model():
         except Exception as e:
             logger.debug(f"GPU cache clear failed: {e}")
 
+    loaded = False
+    if cls_name_from_index == "OmniGen2Pipeline" or "omnigen2" in str(model_path).lower():
+        loaded = _load_omnigen2_pipeline(model_path, torch_dtype, target_device, use_offload)
+
     def _load_pipe(cls, name):
         """Try loading pipeline, handling meta tensor issues."""
         global _pipe
 
         # First try normal load
         try:
-            _pipe = cls.from_pretrained(model_path, torch_dtype=torch_dtype)
+            kwargs = {"torch_dtype": torch_dtype}
+            if name == "DiffusionPipeline" and cls_name_from_index and not hasattr(diffusers, cls_name_from_index):
+                kwargs["trust_remote_code"] = True
+            _pipe = cls.from_pretrained(model_path, **kwargs)
         except Exception as e:
             logger.warning(f"{name} from_pretrained failed: {e}")
-            _pipe = None
-            _cleanup()
-            return False
+            if name == "DiffusionPipeline" and cls_name_from_index and not hasattr(diffusers, cls_name_from_index):
+                try:
+                    logger.info(f"Retrying {name} with custom_pipeline={model_path}")
+                    _pipe = cls.from_pretrained(
+                        model_path,
+                        torch_dtype=torch_dtype,
+                        custom_pipeline=model_path,
+                        trust_remote_code=True,
+                    )
+                except Exception as e2:
+                    logger.warning(f"{name} custom_pipeline retry failed: {e2}")
+                    _pipe = None
+                    _cleanup()
+                    return False
+            else:
+                _pipe = None
+                _cleanup()
+                return False
 
         # Materialize any meta tensors before moving to device
         _fix_meta_tensors(_pipe, torch_dtype)
 
-        if use_offload:
+        if use_offload and _can_cpu_offload(target_device):
             try:
                 _pipe.enable_model_cpu_offload()
                 logger.info(f"Loaded as {name} with CPU offload")
@@ -234,24 +457,27 @@ def load_model():
                 _cleanup()
                 return False
 
-        # Try full CUDA
+        # Try direct device placement
         try:
-            _pipe = _pipe.to("cuda")
-            logger.info(f"Loaded as {name} on CUDA")
+            _pipe = _pipe.to(target_device)
+            logger.info(f"Loaded as {name} on {target_device}")
             return True
         except Exception as e:
-            logger.warning(f"{name} + .to(cuda) failed: {e}")
+            logger.warning(f"{name} + .to({target_device}) failed: {e}")
             _pipe = None
             _cleanup()
 
         if not use_offload:
-            logger.error(f"{name} doesn't fit in VRAM. Use --cpu-offload to enable offloading.")
+            logger.error(f"{name} could not be placed on {target_device}. On CUDA, try --cpu-offload; on Apple Silicon try a smaller model or lower resolution.")
             return False
 
         # OOM — reload and try with CPU offload
         try:
             logger.info(f"Reloading {name} with CPU offload...")
-            _pipe = cls.from_pretrained(model_path, torch_dtype=torch_dtype)
+            kwargs = {"torch_dtype": torch_dtype}
+            if name == "DiffusionPipeline" and cls_name_from_index and not hasattr(diffusers, cls_name_from_index):
+                kwargs["trust_remote_code"] = True
+            _pipe = cls.from_pretrained(model_path, **kwargs)
             _fix_meta_tensors(_pipe, torch_dtype)
             _pipe.enable_model_cpu_offload()
             logger.info(f"Loaded as {name} with CPU offload")
@@ -264,7 +490,10 @@ def load_model():
         # Last resort — sequential offload
         try:
             logger.info(f"Reloading {name} with sequential CPU offload...")
-            _pipe = cls.from_pretrained(model_path, torch_dtype=torch_dtype)
+            kwargs = {"torch_dtype": torch_dtype}
+            if name == "DiffusionPipeline" and cls_name_from_index and not hasattr(diffusers, cls_name_from_index):
+                kwargs["trust_remote_code"] = True
+            _pipe = cls.from_pretrained(model_path, **kwargs)
             _fix_meta_tensors(_pipe, torch_dtype)
             _pipe.enable_sequential_cpu_offload()
             logger.info(f"Loaded as {name} with sequential CPU offload")
@@ -276,11 +505,11 @@ def load_model():
 
         return False
 
-    loaded = False
-    for cls, name in candidates:
-        if _load_pipe(cls, name):
-            loaded = True
-            break
+    if not loaded:
+        for cls, name in candidates:
+            if _load_pipe(cls, name):
+                loaded = True
+                break
 
     # Last resort: override unknown pipeline class
     if not loaded and cls_name_from_index and not hasattr(diffusers, cls_name_from_index):
@@ -322,36 +551,19 @@ def load_model():
 
         if single_file:
             logger.info(f"Trying from_single_file with: {single_file}")
-            # Detect model family from path/filename to prioritize the right pipeline + config
-            _path_lower = (model_path + "/" + (single_file or "")).lower()
-            _SD35_CONFIGS = ["stabilityai/stable-diffusion-3.5-large", "stabilityai/stable-diffusion-3.5-medium"]
-            _SD3_CONFIGS = ["stabilityai/stable-diffusion-3-medium-diffusers"]
-            _FLUX2_CONFIGS = ["black-forest-labs/FLUX.2-dev"]
-            _FLUX_CONFIGS = ["black-forest-labs/FLUX.1-schnell", "black-forest-labs/FLUX.1-dev"]
-            _SDXL_CONFIGS = ["stabilityai/stable-diffusion-xl-base-1.0"]
-
-            # Build ordered pipeline candidates based on model name hints
-            _pipeline_configs = []
-            if "sd3.5" in _path_lower or "stable-diffusion-3.5" in _path_lower:
-                _pipeline_configs.append(("StableDiffusion3Pipeline", _SD35_CONFIGS))
-            elif "sd3" in _path_lower or "stable-diffusion-3" in _path_lower:
-                _pipeline_configs.append(("StableDiffusion3Pipeline", _SD3_CONFIGS + _SD35_CONFIGS))
-            elif "flux.2" in _path_lower or "flux2" in _path_lower:
-                _pipeline_configs.append(("Flux2Pipeline", _FLUX2_CONFIGS))
-                _pipeline_configs.append(("FluxPipeline", _FLUX_CONFIGS))
-            elif "flux" in _path_lower:
-                _pipeline_configs.append(("FluxPipeline", _FLUX_CONFIGS))
-                _pipeline_configs.append(("Flux2Pipeline", _FLUX2_CONFIGS))
-            elif "sdxl" in _path_lower or "xl" in _path_lower:
-                _pipeline_configs.append(("StableDiffusionXLPipeline", _SDXL_CONFIGS))
-            # Always add all pipelines as fallbacks
-            _pipeline_configs.extend([
-                ("Flux2Pipeline", _FLUX2_CONFIGS),
-                ("StableDiffusion3Pipeline", _SD35_CONFIGS + _SD3_CONFIGS),
-                ("FluxPipeline", _FLUX_CONFIGS),
-                ("StableDiffusionXLPipeline", _SDXL_CONFIGS + [None]),
-                ("StableDiffusionPipeline", [None]),
-            ])
+            explicit_configs = [
+                c.strip()
+                for c in str(_args.single_file_config or "").replace("\n", ",").split(",")
+                if c.strip()
+            ]
+            config_candidates = explicit_configs or [None]
+            _pipeline_configs = [
+                ("Flux2Pipeline", config_candidates),
+                ("StableDiffusion3Pipeline", config_candidates),
+                ("FluxPipeline", config_candidates),
+                ("StableDiffusionXLPipeline", config_candidates),
+                ("StableDiffusionPipeline", config_candidates),
+            ]
             # Deduplicate while preserving order
             _seen = set()
             _deduped = []
@@ -409,12 +621,12 @@ def load_model():
                             logger.info(f"Trying {cls_name}.from_single_file with config={config}")
                         _pipe = cls.from_single_file(single_file, **kwargs)
                         _fix_meta_tensors(_pipe, torch_dtype)
-                        if use_offload:
+                        if use_offload and _can_cpu_offload(target_device):
                             _pipe.enable_model_cpu_offload()
                             logger.info(f"Loaded as {cls_name} (single file, config={config}) with CPU offload")
                         else:
-                            _pipe = _pipe.to("cuda")
-                            logger.info(f"Loaded as {cls_name} (single file, config={config}) on CUDA")
+                            _pipe = _pipe.to(target_device)
+                            logger.info(f"Loaded as {cls_name} (single file, config={config}) on {target_device}")
                         loaded = True
                         break
                     except Exception as e:
@@ -480,17 +692,9 @@ def generate_image(req: ImageRequest):
     if _pipe is None:
         return {"error": "Model not loaded"}
 
-    # Parse size
-    try:
-        w, h = req.size.split("x")
-        width, height = int(w), int(h)
-    except Exception:
-        width, height = _args.width, _args.height
-
-    # Map quality to num_inference_steps
-    default_steps = _args.steps or 8
-    steps_map = {"low": 4, "medium": default_steps, "high": 20, "auto": 12}
-    steps = steps_map.get(req.quality, default_steps)
+    width, height = _parse_size(req.size)
+    steps = _quality_steps(req.quality)
+    request_id = _start_progress(req.request_id, steps * max(1, int(req.n or 1)), req.prompt, "generation")
 
     logger.info(f"Generating: {req.prompt[:80]}... ({width}x{height}, {steps} steps)")
     start = time.time()
@@ -499,44 +703,172 @@ def generate_image(req: ImageRequest):
     _is_inpaint_pipe = 'inpaint' in type(_pipe).__name__.lower()
 
     images = []
-    for _ in range(req.n):
-        if _is_inpaint_pipe:
-            # Inpaint pipelines need an image + mask — create blank ones for txt2img
-            from PIL import Image as _PILGen
-            _blank = _PILGen.new('RGB', (width, height), (128, 128, 128))
-            _mask = _PILGen.new('L', (width, height), 255)  # full white = regenerate everything
-            result = _pipe(
-                prompt=req.prompt,
-                image=_blank,
-                mask_image=_mask,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                guidance_scale=3.5,
+    try:
+        for image_index in range(req.n):
+            progress_offset = image_index * steps
+            negative_prompt = _default_negative_prompt() if _pipeline_accepts_arg("negative_prompt") else None
+            if _is_inpaint_pipe:
+                # Inpaint pipelines need an image + mask — create blank ones for txt2img
+                from PIL import Image as _PILGen
+                _blank = _PILGen.new('RGB', (width, height), (128, 128, 128))
+                _mask = _PILGen.new('L', (width, height), 255)  # full white = regenerate everything
+                kwargs = {
+                    "prompt": req.prompt,
+                    "image": _blank,
+                    "mask_image": _mask,
+                    "width": width,
+                    "height": height,
+                    "num_inference_steps": steps,
+                    "guidance_scale": _guidance_scale(),
+                }
+            else:
+                kwargs = {
+                    "prompt": req.prompt,
+                    "width": width,
+                    "height": height,
+                    "num_inference_steps": steps,
+                    "guidance_scale": _guidance_scale(),
+                }
+            if negative_prompt:
+                kwargs["negative_prompt"] = negative_prompt
+            result = _run_pipeline_with_progress(
+                _pipe,
+                request_id,
+                steps * max(1, int(req.n or 1)),
+                **kwargs,
             )
-        else:
-            result = _pipe(
-                prompt=req.prompt,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                guidance_scale=3.5,
-            )
-        img = result.images[0]
-
-        # Convert to base64
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode()
-        images.append({"b64_json": b64})
+            _update_progress(request_id, progress_offset + steps, steps * max(1, int(req.n or 1)))
+            img = result.images[0]
+            images.append(img)
+    except Exception as e:
+        _finish_progress(request_id, "error", str(e))
+        raise
 
     elapsed = time.time() - start
     logger.info(f"Generated {req.n} image(s) in {elapsed:.1f}s")
+    _finish_progress(request_id)
 
-    return {
-        "created": int(time.time()),
-        "data": images,
-    }
+    return _image_response(images)
+
+
+@app.get("/v1/images/progress/{request_id}")
+def image_progress(request_id: str):
+    item = _PROGRESS.get(request_id)
+    if not item:
+        return {"id": request_id, "status": "unknown", "step": 0, "total": 0, "percent": 0}
+    return item
+
+
+@app.post("/v1/images/edits")
+async def edit_image(
+    prompt: str = Form(...),
+    image: UploadFile = File(...),
+    model: str = Form(""),
+    n: int = Form(1),
+    size: str = Form("1024x1024"),
+    quality: str = Form("medium"),
+    response_format: str = Form("b64_json"),
+    request_id: str = Form(""),
+):
+    if _pipe is None:
+        return {"error": "Model not loaded"}
+    accepts_image = _pipeline_accepts_arg("image")
+    accepts_input_images = _pipeline_accepts_arg("input_images")
+    if not accepts_image and not accepts_input_images:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{type(_pipe).__name__} does not support image edits. Use /v1/images/generations with this model.",
+        )
+
+    from PIL import Image as PILImage, ImageOps
+
+    width, height = _parse_size(size)
+    steps = _quality_steps(quality)
+    request_id = _start_progress(request_id, steps * max(1, min(int(n or 1), 4)), prompt, "edit")
+    raw = await image.read()
+    init_image = PILImage.open(io.BytesIO(raw)).convert("RGB")
+    if width > 0 and height > 0:
+        init_image = ImageOps.fit(init_image, (width, height), method=PILImage.LANCZOS, centering=(0.5, 0.5))
+
+    logger.info(f"Editing image: {prompt[:80]}... ({width}x{height}, {steps} steps)")
+    start = time.time()
+    images = []
+    total_images = max(1, min(int(n or 1), 4))
+    for image_index in range(total_images):
+        progress_offset = image_index * steps
+        try:
+            if accepts_input_images and not accepts_image:
+                negative_prompt = _default_negative_prompt()
+                kwargs = _pipeline_call_kwargs(
+                    prompt=prompt,
+                    input_images=[init_image],
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    max_sequence_length=1024,
+                    text_guidance_scale=_guidance_scale(),
+                    image_guidance_scale=2.0,
+                    cfg_range=(0.0, 1.0),
+                    negative_prompt=negative_prompt,
+                    num_images_per_prompt=1,
+                    output_type="pil",
+                    max_pixels=width * height if width > 0 and height > 0 else None,
+                    max_input_image_side_length=max(width, height) if width > 0 and height > 0 else None,
+                )
+            else:
+                kwargs = _pipeline_call_kwargs(
+                    image=init_image,
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=3.5,
+                    true_cfg_scale=4.0,
+                    negative_prompt=_default_negative_prompt(),
+                    output_type="pil",
+                )
+            result = _run_pipeline_with_progress(
+                _pipe,
+                request_id,
+                steps * total_images,
+                **kwargs,
+            )
+        except TypeError:
+            if accepts_input_images and not accepts_image:
+                kwargs = _pipeline_call_kwargs(
+                    prompt=prompt,
+                    input_images=[init_image],
+                    num_inference_steps=steps,
+                    text_guidance_scale=_guidance_scale(),
+                    image_guidance_scale=2.0,
+                    negative_prompt=_default_negative_prompt(),
+                    output_type="pil",
+                )
+            else:
+                kwargs = _pipeline_call_kwargs(
+                    image=init_image,
+                    prompt=prompt,
+                    num_inference_steps=steps,
+                    guidance_scale=3.5,
+                    negative_prompt=_default_negative_prompt(),
+                    output_type="pil",
+                )
+            result = _run_pipeline_with_progress(
+                _pipe,
+                request_id,
+                steps * total_images,
+                **kwargs,
+            )
+        except Exception as e:
+            _finish_progress(request_id, "error", str(e))
+            raise
+        _update_progress(request_id, progress_offset + steps, steps * total_images)
+        images.append(result.images[0])
+
+    elapsed = time.time() - start
+    logger.info(f"Edited {len(images)} image(s) in {elapsed:.1f}s")
+    _finish_progress(request_id)
+    return _image_response(images)
 
 
 class InpaintRequest(BaseModel):
@@ -607,11 +939,12 @@ def _get_inpaint_pipe():
     ]
     torch_dtype = DTYPE_MAP.get(_args.dtype, torch.bfloat16)
     harmonize_gpu = _args.harmonize_gpu
+    target_device = _target_device()
     for name in img2img_names:
         cls = getattr(diffusers, name, None)
         if cls:
             try:
-                if harmonize_gpu is not None:
+                if harmonize_gpu is not None and target_device == "cuda":
                     # Load fresh on separate GPU
                     logger.info(f"Loading {name} on cuda:{harmonize_gpu}...")
                     _img2img_pipe = cls.from_pretrained(_args.model, torch_dtype=torch_dtype)
@@ -625,10 +958,10 @@ def _get_inpaint_pipe():
                 try:
                     # Some pipelines need from_pretrained instead of from_pipe
                     _img2img_pipe = cls.from_pretrained(_args.model, torch_dtype=torch_dtype)
-                    if _args.cpu_offload:
+                    if _args.cpu_offload and _can_cpu_offload(target_device):
                         _img2img_pipe.enable_model_cpu_offload()
                     else:
-                        _img2img_pipe = _img2img_pipe.to("cuda")
+                        _img2img_pipe = _img2img_pipe.to(target_device)
                     logger.info(f"Loaded img2img pipeline (from_pretrained): {name}")
                     return _img2img_pipe, 'img2img'
                 except Exception as e2:
@@ -1140,6 +1473,9 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--device-map", default=None, help="Device map strategy (unused, kept for compat)")
     parser.add_argument("--steps", type=int, default=0, help="Default inference steps (0=auto)")
+    parser.add_argument("--guidance-scale", type=float, default=3.5, help="Default classifier-free guidance scale")
+    parser.add_argument("--negative-prompt", default="", help="Default negative prompt for pipelines that support it")
+    parser.add_argument("--single-file-config", default="", help="Base Diffusers repo/path for single-file checkpoints that need missing components. Comma-separated values are tried in order.")
     parser.add_argument("--width", type=int, default=1024, help="Default output width")
     parser.add_argument("--height", type=int, default=1024, help="Default output height")
     parser.add_argument("--cpu-offload", action="store_true", help="Enable model CPU offload")

@@ -63,6 +63,23 @@ class TestSelfSummaryPrompt:
 
 
 class TestTrimForContext:
+    def test_system_truncation_preserves_internal_route_metadata(self):
+        messages = [
+            {
+                "role": "system",
+                "content": "persona\n\n" + ("agent prompt " * 2000),
+                "_agent_injected": "merged_prompt",
+                "_agent_base_message": {"role": "system", "content": "persona"},
+            },
+            {"role": "user", "content": "latest"},
+        ]
+
+        trimmed = trim_for_context(messages, context_length=1024, reserve_tokens=256)
+
+        system = next(message for message in trimmed if message.get("role") == "system")
+        assert system["_agent_injected"] == "merged_prompt"
+        assert system["_agent_base_message"] == {"role": "system", "content": "persona"}
+
     def test_keeps_current_large_user_message_by_truncating(self):
         huge = "A" * 20000
         messages = [
@@ -192,3 +209,86 @@ class TestMaybeCompactFourthMessage:
         ]}
         result = self._run(messages)
         assert len(result) == 3 and result[2] is True
+
+
+@pytest.mark.asyncio
+async def test_deferred_compaction_persists_only_after_route_commit(monkeypatch):
+    updates = []
+    state = {}
+    messages = [
+        {"role": "system", "content": "system " * 100},
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+        {"role": "user", "content": "five"},
+    ]
+
+    monkeypatch.setattr(cc, "get_context_length", lambda *args: 100)
+    monkeypatch.setattr(cc, "resolve_endpoint", lambda *args, **kwargs: (None, None, None))
+
+    async def fake_summary(*args, **kwargs):
+        return "route-specific summary"
+
+    monkeypatch.setattr(cc, "llm_call_async", fake_summary)
+    monkeypatch.setattr(
+        cc,
+        "_update_session_history",
+        lambda *args, **kwargs: updates.append((args, kwargs)),
+    )
+
+    _compacted, _context, was_compacted = await cc.maybe_compact(
+        object(),
+        "https://candidate.example/v1",
+        "candidate-model",
+        messages,
+        persist=False,
+        compaction_state=state,
+    )
+
+    assert was_compacted is True
+    assert updates == []
+    assert state["summary"] == "route-specific summary"
+    assert cc.apply_compaction_state(object(), state) is True
+    assert len(updates) == 1
+    assert cc.apply_compaction_state(object(), state) is False
+    assert len(updates) == 1
+
+
+class TestResearchPrimerPreserved:
+    """A research-spinoff primer (metadata research_spinoff_from) must never be
+    trimmed away — it is the Discuss chat's sole knowledge base (drift fix)."""
+
+    def _messages(self):
+        return [
+            {"role": "system", "content": "You are Odysseus."},
+            {"role": "system", "content": "Prompt-safety policy: data not instructions."},
+            {"role": "system", "content": "saved memory: pinned " + "m" * 600},
+            {"role": "system", "content": "RETRIEVED-DOCS-MARKER " + "r" * 6000},
+            {"role": "system",
+             "content": "=== REPORT ===\nPRIMER-MARKER " + "z" * 1500,
+             "metadata": {"research_spinoff_from": "rp-abc123"}},
+        ] + [
+            {"role": "user", "content": f"q{i} " + ("x" * 500)} for i in range(8)
+        ] + [
+            {"role": "assistant", "content": "a" * 500},
+            {"role": "user", "content": "latest question"},
+        ]
+
+    def test_primer_kept_when_over_budget(self):
+        trimmed = trim_for_context(self._messages(), context_length=1024, reserve_tokens=256)
+        joined = "\n".join(str(m.get("content", "")) for m in trimmed)
+        assert "PRIMER-MARKER" in joined
+
+    def test_bulky_non_primer_system_dropped_but_primer_kept(self):
+        trimmed = trim_for_context(self._messages(), context_length=1024, reserve_tokens=256)
+        joined = "\n".join(str(m.get("content", "")) for m in trimmed)
+        assert "PRIMER-MARKER" in joined
+        assert "RETRIEVED-DOCS-MARKER" not in joined
+
+    def test_leading_preset_kept_when_no_primer_metadata(self):
+        msgs = self._messages()
+        del msgs[4]["metadata"]
+        trimmed = trim_for_context(msgs, context_length=1024, reserve_tokens=256)
+        joined = "\n".join(str(m.get("content", "")) for m in trimmed)
+        assert "You are Odysseus." in joined
