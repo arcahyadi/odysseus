@@ -6,6 +6,11 @@
   A self-hosted AI workspace for chat, agents, research, documents, email, notes, calendar, and local model workflows.
 </p>
 
+<!-- sync-test: verifying garrach/odysseus push access (2026-10-02) -->
+<p align="center">
+  <sub>Local mirror of <a href="https://github.com/odysseus-dev/odysseus">odysseus-dev/odysseus</a> &mdash; edits here are test commits.</sub>
+</p>
+
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="website/setup.md">Setup Guide</a> ·
