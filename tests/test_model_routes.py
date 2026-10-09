@@ -49,6 +49,7 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
         _parse_model_list,
         _normalize_refresh_mode,
         _truthy,
+        _parse_optional_bool,
         _speech_settings_using_endpoint,
         _clear_speech_settings_for_endpoint,
         _endpoint_settings_using_endpoint,
@@ -537,6 +538,18 @@ class TestSetupProbeSafety:
     @pytest.mark.parametrize("value", ["false", "0", "no", "", None])
     def test_truthy_false_values(self, value):
         assert _truthy(value) is False
+
+    @pytest.mark.parametrize("value", [True, 1, "true", "1", "yes", "on", " TRUE "])
+    def test_parse_optional_bool_true(self, value):
+        assert _parse_optional_bool(value) is True
+
+    @pytest.mark.parametrize("value", [False, 0, "false", "0", "no", "off", " FALSE "])
+    def test_parse_optional_bool_false(self, value):
+        assert _parse_optional_bool(value) is False
+
+    @pytest.mark.parametrize("value", [None, "", "unknown", "invalid", [], {}])
+    def test_parse_optional_bool_none(self, value):
+        assert _parse_optional_bool(value) is None
 
     def test_keyed_probe_does_not_fallback_to_curated_on_auth_failure(self, monkeypatch):
         monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)

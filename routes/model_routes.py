@@ -359,6 +359,22 @@ def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in ("true", "1", "yes", "on")
 
 
+def _parse_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+    return None
+
+
 _ENDPOINT_KINDS = {"auto", "local", "api", "proxy"}
 _REFRESH_MODES = {"auto", "manual", "disabled"}
 
@@ -1852,8 +1868,7 @@ def setup_model_routes(model_discovery):
         ep_id = str(uuid.uuid4())[:8]
         db = SessionLocal()
         try:
-            _st_raw = (supports_tools or "").strip().lower()
-            _st = True if _st_raw in ("true", "1", "yes") else (False if _st_raw in ("false", "0", "no") else None)
+            _st = _parse_optional_bool(supports_tools)
             _pinned = _normalize_model_ids(pinned_models)
             # Stamp owner so the picker only shows this endpoint to the admin
             # who added it. Pass `shared=true` to mark it null-owner (visible
@@ -2208,8 +2223,7 @@ def setup_model_routes(model_discovery):
                 raise HTTPException(404, "Endpoint not found")
             if body:
                 if "supports_tools" in body:
-                    v = body["supports_tools"]
-                    ep.supports_tools = {True: True, False: False, 'true': True, 'false': False, 1: True, 0: False}.get(v)
+                    ep.supports_tools = _parse_optional_bool(body.get("supports_tools"))
                 if "is_enabled" in body:
                     v_ie = body['is_enabled']
                     ep.is_enabled = v_ie.lower() in ('true', '1', 'yes') if isinstance(v_ie, str) else bool(v_ie)
