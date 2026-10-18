@@ -1,13 +1,14 @@
 # src/tts_service.py
 """Multi-provider TTS service — dispatches to local Kokoro, OpenAI-compatible API, or browser."""
 
-import io
-import wave
-import logging
 import hashlib
-import httpx
+import io
+import logging
+import wave
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any
+
+import httpx
 
 from src.constants import TTS_CACHE_DIR
 
@@ -46,6 +47,7 @@ class TTSService:
 
     def _load_settings(self) -> dict:
         from src.settings import load_settings
+
         saved = load_settings()
         return {
             "tts_enabled": saved.get("tts_enabled", True),
@@ -78,7 +80,7 @@ class TTSService:
         raw = f"{provider}|{model}|{voice}|{speed}|{text}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
-    def _get_cached(self, key: str) -> Optional[bytes]:
+    def _get_cached(self, key: str) -> bytes | None:
         for ext in (".mp3", ".wav"):
             path = self.cache_dir / f"{key}{ext}"
             if path.exists():
@@ -86,7 +88,11 @@ class TTSService:
         return None
 
     def _put_cache(self, key: str, data: bytes):
-        ext = ".mp3" if (len(data) >= 3 and (data[:3] == b'ID3' or (data[0] == 0xff and (data[1] & 0xe0) == 0xe0))) else ".wav"
+        ext = (
+            ".mp3"
+            if (len(data) >= 3 and (data[:3] == b"ID3" or (data[0] == 0xFF and (data[1] & 0xE0) == 0xE0)))
+            else ".wav"
+        )
         (self.cache_dir / f"{key}{ext}").write_bytes(data)
 
     def clear_cache(self):
@@ -105,8 +111,8 @@ class TTSService:
 
     # ── API endpoint ──
 
-    def _synthesize_api(self, text: str, endpoint_id: str, model: str, voice: str, speed: float = 1.0) -> Optional[bytes]:
-        from src.database import SessionLocal, ModelEndpoint
+    def _synthesize_api(self, text: str, endpoint_id: str, model: str, voice: str, speed: float = 1.0) -> bytes | None:
+        from src.database import ModelEndpoint, SessionLocal
 
         db = SessionLocal()
         try:
@@ -143,7 +149,7 @@ class TTSService:
 
     # ── Public interface ──
 
-    def synthesize(self, text: str, use_cache: bool = True) -> Optional[bytes]:
+    def synthesize(self, text: str, use_cache: bool = True) -> bytes | None:
         settings = self._load_settings()
         if settings.get("tts_enabled") is False:
             return None
@@ -187,8 +193,9 @@ class TTSService:
 
         return audio_data
 
-    def synthesize_to_base64(self, text: str) -> Optional[str]:
+    def synthesize_to_base64(self, text: str) -> str | None:
         import base64
+
         audio = self.synthesize(text)
         if audio:
             return base64.b64encode(audio).decode("utf-8")
@@ -197,7 +204,7 @@ class TTSService:
     def set_voice(self, voice: str):
         """Legacy no-op — voice is now managed via admin settings."""
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         settings = self._load_settings()
         provider = settings["tts_provider"]
         tts_enabled = settings.get("tts_enabled", True)
@@ -259,12 +266,12 @@ class _KokoroPipeline:
         except Exception as e:
             logger.error(f"Kokoro init failed: {e}", exc_info=True)
 
-    def synthesize_raw(self, text: str, voice: str = "af_heart") -> Optional[bytes]:
+    def synthesize_raw(self, text: str, voice: str = "af_heart") -> bytes | None:
         if not self.available:
             return None
         try:
-            import torch
             import numpy as np
+            import torch
 
             with torch.cuda.device(self.device):
                 chunks = []
@@ -289,6 +296,7 @@ class _KokoroPipeline:
 
 # Module-level singleton
 _tts_service = None
+
 
 def get_tts_service() -> TTSService:
     global _tts_service

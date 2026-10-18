@@ -6,7 +6,8 @@ tool_utils._truncate which caps at MAX_OUTPUT_CHARS (10 000) and appends
 a ``... (truncated, N chars total)`` suffix so the frontend can show a
 truncation indicator in the tool bubble.
 """
-from src.tool_utils import _truncate, MAX_OUTPUT_CHARS
+
+from src.tool_utils import MAX_OUTPUT_CHARS, _truncate
 
 
 def test_short_output_unchanged():

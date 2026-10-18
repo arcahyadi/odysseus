@@ -18,7 +18,6 @@ unchanged. That lets legacy rows coexist with new ones until a
 single migration pass rewrites them.
 """
 
-import os
 import logging
 from pathlib import Path
 
@@ -26,12 +25,14 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from core.platform_compat import safe_chmod
 from src.constants import APP_KEY_FILE
+from src.app_context import app_context
+
 
 logger = logging.getLogger(__name__)
 
 _KEY_PATH = Path(APP_KEY_FILE)
 _PREFIX = "enc:"
-_fernet: Fernet | None = None
+app_context.caches.fernet: Fernet | None = None
 
 
 def _load_or_create_key() -> bytes:
@@ -48,10 +49,9 @@ def _load_or_create_key() -> bytes:
 
 
 def _get_fernet() -> Fernet:
-    global _fernet
-    if _fernet is None:
-        _fernet = Fernet(_load_or_create_key())
-    return _fernet
+    if app_context.caches.fernet is None:
+        app_context.caches.fernet = Fernet(_load_or_create_key())
+    return app_context.caches.fernet
 
 
 def encrypt(plaintext: str) -> str:
@@ -74,7 +74,7 @@ def decrypt(value: str) -> str:
     if not value.startswith(_PREFIX):
         return value
     try:
-        return _get_fernet().decrypt(value[len(_PREFIX):].encode("ascii")).decode("utf-8")
+        return _get_fernet().decrypt(value[len(_PREFIX) :].encode("ascii")).decode("utf-8")
     except InvalidToken:
         logger.error("Failed to decrypt stored secret — wrong key or corrupt token")
         return ""

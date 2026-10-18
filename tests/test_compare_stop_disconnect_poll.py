@@ -23,6 +23,7 @@ single (non-duplicated) save of the partial response, regression-safety for
 normal completed streams, and non-interference with detached chat/agent
 streams that are meant to keep running server-side after a client disconnect.
 """
+
 import asyncio
 
 import pytest
@@ -64,6 +65,7 @@ def _make_stream_with_save(sink, chunks, *, hang_after=None):
     so cancellation must interrupt an in-flight await, not just be noticed
     between chunks.
     """
+
     async def gen():
         full_response = ""
         try:
@@ -78,12 +80,14 @@ def _make_stream_with_save(sink, chunks, *, hang_after=None):
             if full_response:
                 sink.save_partial(full_response)
             raise
+
     return gen()
 
 
 # --------------------------------------------------------------------------- #
 # agent_runs: detached-run semantics (what NORMAL chat/agent streams use)
 # --------------------------------------------------------------------------- #
+
 
 @pytest.mark.asyncio
 async def test_detached_run_keeps_going_after_subscriber_disconnects():
@@ -173,6 +177,7 @@ async def test_normal_completion_saves_exactly_once_not_partial():
 # agent_runs subscriber layer in between.
 # --------------------------------------------------------------------------- #
 
+
 async def _drain_into(agen, sink_list):
     async for ev in agen:
         sink_list.append(ev)
@@ -241,11 +246,15 @@ async def test_compare_pane_full_stream_completes_and_saves_once():
 # that only fixes one mode's loop would still be caught.
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode_chunks", [
-    ["chat-delta-1", "chat-delta-2"],          # chat-mode shaped chunks
-    ["agent-delta-1", "agent-tool-event", "agent-delta-2"],  # agent-mode shaped
-])
+@pytest.mark.parametrize(
+    "mode_chunks",
+    [
+        ["chat-delta-1", "chat-delta-2"],  # chat-mode shaped chunks
+        ["agent-delta-1", "agent-tool-event", "agent-delta-2"],  # agent-mode shaped
+    ],
+)
 async def test_cancellation_contract_holds_for_chat_and_agent_shaped_streams(mode_chunks):
     sink = _FakeSaveSink()
     agen = _make_stream_with_save(sink, mode_chunks, hang_after=1)
@@ -272,12 +281,14 @@ async def test_cancellation_contract_holds_for_chat_and_agent_shaped_streams(mod
 # routes/chat_routes.py rather than re-deriving it from source text.
 # --------------------------------------------------------------------------- #
 
+
 def test_compare_mode_branch_skips_agent_runs_in_source():
     """The compare_mode branch must return the raw generator as the SSE body
     (bypassing agent_runs.start/subscribe) BEFORE the detached agent_runs.start
     call below it — otherwise compare streams would still be detached and a
     pane's Stop (closing the SSE) wouldn't cancel the upstream call."""
     from pathlib import Path
+
     src = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text(encoding="utf-8")
 
     branch_idx = src.index("if compare_mode:")

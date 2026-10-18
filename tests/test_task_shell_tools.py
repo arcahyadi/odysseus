@@ -30,16 +30,14 @@ def test_shell_offered_when_rag_returns_nothing():
     tools = compose_task_relevant_tools(set(), ASSISTANT_ALWAYS_AVAILABLE, None)
     assert "bash" in tools
     assert "python" in tools
-    assert TASK_DEFAULT_SHELL_TOOLS <= tools
+    assert tools >= TASK_DEFAULT_SHELL_TOOLS
 
 
 def test_assistant_and_rag_tools_preserved():
-    tools = compose_task_relevant_tools(
-        {"web_fetch"}, ASSISTANT_ALWAYS_AVAILABLE, None
-    )
-    assert "web_fetch" in tools          # RAG-selected tool kept
-    assert "manage_calendar" in tools    # assistant-always member kept
-    assert "bash" in tools               # shell default added
+    tools = compose_task_relevant_tools({"web_fetch"}, ASSISTANT_ALWAYS_AVAILABLE, None)
+    assert "web_fetch" in tools  # RAG-selected tool kept
+    assert "manage_calendar" in tools  # assistant-always member kept
+    assert "bash" in tools  # shell default added
 
 
 def test_crew_allowlist_restriction_still_honored():
@@ -110,8 +108,9 @@ async def test_scheduled_task_honors_global_disabled_tools(monkeypatch):
 
     captured = {}
 
-    async def _capture(endpoint_url, model, task, session_id, *,
-                       system_prompt=None, disabled_tools=None, relevant_tools=None):
+    async def _capture(
+        endpoint_url, model, task, session_id, *, system_prompt=None, disabled_tools=None, relevant_tools=None
+    ):
         captured["disabled_tools"] = disabled_tools
         captured["relevant_tools"] = relevant_tools
         return "done"
@@ -148,5 +147,5 @@ async def test_scheduled_task_honors_global_disabled_tools(monkeypatch):
     assert "bash" not in offered
     assert "python" not in offered
     assert "read_file" not in offered
-    assert "edit_file" in offered   # shell default NOT globally disabled
-    assert "web_fetch" in offered   # RAG-selected tool preserved
+    assert "edit_file" in offered  # shell default NOT globally disabled
+    assert "web_fetch" in offered  # RAG-selected tool preserved

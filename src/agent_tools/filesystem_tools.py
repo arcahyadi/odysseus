@@ -1,19 +1,64 @@
 import asyncio
+import difflib
+import fnmatch
 import json
 import os
 import re
-import difflib
-import fnmatch
 import shutil
-from typing import Optional, Dict, Any, Tuple
+from typing import Any
 
-from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS
+from src.constants import MAX_DIFF_LINES, MAX_READ_CHARS
 
-_CODENAV_SKIP_DIRS = frozenset({
-    ".git", ".hg", ".svn", "node_modules", "venv", ".venv", "__pycache__",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build",
-    ".next", ".cache", "site-packages", ".idea", ".tox",
-})
+
+# Tree-sitter integration (lazy, kill-switched)
+def _treesitter_enabled() -> bool:
+    """Check ODYSSEUS_TREESITTER kill-switch at runtime."""
+    raw = os.environ.get("ODYSSEUS_TREESITTER", "off")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _try_treesitter_summary(filepath: str) -> dict[str, Any] | None:
+    """Build an AST summary for a file via tree-sitter. Returns None if unavailable."""
+    if not _treesitter_enabled():
+        return None
+    try:
+        from services.code.treesitter_parser import TreeSitterService
+
+        symbols = TreeSitterService.extract_symbols(filepath)
+        functions = TreeSitterService.find_functions(filepath)
+        if symbols is None and functions is None:
+            return None
+        summary: dict[str, Any] = {}
+        if symbols:
+            summary["symbols"] = symbols
+        if functions:
+            summary["functions"] = functions
+        return summary or None
+    except Exception:
+        return None
+
+
+_CODENAV_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        ".next",
+        ".cache",
+        "site-packages",
+        ".idea",
+        ".tox",
+    }
+)
 _CODENAV_MAX_HITS = 200
 _CODENAV_MAX_LINE = 400
 
@@ -42,17 +87,22 @@ def _glob_to_regex(pat: str) -> "re.Pattern":
             i += 1
     return re.compile("".join(out))
 
-def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
+
+def _unified_diff(old: str, new: str, path: str) -> dict[str, Any] | None:
     if old == new:
         return None
     old_lines = old.splitlines()
     new_lines = new.splitlines()
     label = path or "file"
-    diff_lines = list(difflib.unified_diff(
-        old_lines, new_lines,
-        fromfile=f"a/{label}", tofile=f"b/{label}",
-        lineterm="",
-    ))
+    diff_lines = list(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{label}",
+            tofile=f"b/{label}",
+            lineterm="",
+        )
+    )
     added = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
     removed = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
     truncated = False
@@ -70,9 +120,11 @@ def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
         "file": os.path.basename(path) or (path or "file"),
     }
 
+
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
+
         try:
             args = json.loads(content) if content.strip().startswith("{") else {}
         except (json.JSONDecodeError, TypeError):
@@ -94,7 +146,7 @@ class EditFileTool:
 
         def _apply():
             """Helper function that performs the actual string replacement and file writing logic."""
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 original = f.read()
             count = original.count(old)
             if count == 0:
@@ -118,21 +170,42 @@ class EditFileTool:
             return {"error": f"edit_file: {path}: {e}", "exit_code": 1}
 
         if status == "not_found":
-            return {"error": f"edit_file: old_string not found in {path}. Read the file and match it exactly.", "exit_code": 1}
+            return {
+                "error": f"edit_file: old_string not found in {path}. Read the file and match it exactly.",
+                "exit_code": 1,
+            }
         if status.startswith("not_unique"):
             n = status.split(":", 1)[1]
-            return {"error": f"edit_file: old_string is not unique in {path} ({n} matches). Add surrounding context or set replace_all=true.", "exit_code": 1}
+            return {
+                "error": f"edit_file: old_string is not unique in {path} ({n} matches). Add surrounding context or set replace_all=true.",
+                "exit_code": 1,
+            }
 
         n = original.count(old)
         result = {"output": f"Edited {path} ({n} replacement{'s' if n != 1 else ''})", "exit_code": 0}
         diff = _unified_diff(original, updated, path)
         if diff:
             result["diff"] = diff
+        # Tree-sitter: validate syntax after edit (when kill-switch is ON)
+        if _treesitter_enabled() and path.endswith(".py"):
+            try:
+                import ast as _ast
+
+                try:
+                    _ast.parse(updated)
+                    result["syntax_valid"] = True
+                except SyntaxError as syn_err:
+                    result["syntax_valid"] = False
+                    result["syntax_error"] = str(syn_err)
+            except Exception:
+                pass
         return result
+
 
 class ReadFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
+
         raw_path, offset, limit = content.split("\n", 1)[0].strip(), 0, 0
         _stripped = content.strip()
         if _stripped.startswith("{"):
@@ -148,11 +221,12 @@ class ReadFileTool:
         except ValueError as e:
             return {"error": f"read_file: {e}", "exit_code": 1}
         try:
+
             def _read():
                 if offset > 0 or limit > 0:
                     start = max(offset, 1)
                     out, n, budget = [], 0, MAX_READ_CHARS
-                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    with open(path, encoding="utf-8", errors="replace") as f:
                         for i, line in enumerate(f, 1):
                             if i < start:
                                 continue
@@ -165,8 +239,9 @@ class ReadFileTool:
                                 out.append(f"\n... [truncated at {MAX_READ_CHARS} chars]")
                                 break
                     return "".join(out)
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                with open(path, encoding="utf-8", errors="replace") as f:
                     return f.read(MAX_READ_CHARS + 1)
+
             data = await asyncio.to_thread(_read)
         except FileNotFoundError:
             return {"error": f"read_file: {path}: not found", "exit_code": 1}
@@ -178,11 +253,19 @@ class ReadFileTool:
             return {"error": f"read_file: {path}: {e}", "exit_code": 1}
         if not (offset > 0 or limit > 0) and len(data) > MAX_READ_CHARS:
             data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
-        return {"output": data, "exit_code": 0}
+        result: dict[str, Any] = {"output": data, "exit_code": 0}
+        # Tree-sitter AST summary (when kill-switch is ON and file is parseable)
+        if not (offset > 0 or limit > 0):
+            ast_summary = _try_treesitter_summary(path)
+            if ast_summary:
+                result["ast_summary"] = ast_summary
+        return result
+
 
 class WriteFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
+
         lines = content.split("\n", 1)
         raw_path = lines[0].strip()
         body = lines[1] if len(lines) > 1 else ""
@@ -191,10 +274,11 @@ class WriteFileTool:
         except ValueError as e:
             return {"error": f"write_file: {e}", "exit_code": 1}
         try:
+
             def _write():
                 old = ""
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, encoding="utf-8") as f:
                         old = f.read()
                 except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, OSError):
                     old = ""
@@ -204,6 +288,7 @@ class WriteFileTool:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(body)
                 return old, len(body)
+
             old_content, size = await asyncio.to_thread(_write)
         except PermissionError:
             return {"error": f"write_file: {path}: permission denied", "exit_code": 1}
@@ -215,9 +300,12 @@ class WriteFileTool:
             result["diff"] = diff
         return result
 
+
 class LsTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_search_root
+        from src.tool_utils import _truncate
+
         raw_path = ""
         _s = (content or "").strip()
         if _s.startswith("{"):
@@ -264,9 +352,12 @@ class LsTool:
             return {"error": err, "exit_code": 1}
         return {"output": _truncate(out), "exit_code": 0}
 
+
 class GlobTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_search_root
+        from src.tool_utils import _truncate
+
         args = {}
         _s = (content or "").strip()
         if _s.startswith("{"):
@@ -331,10 +422,13 @@ class GlobTool:
             out += f"\n... [capped at {_CODENAV_MAX_HITS} files]"
         return {"output": _truncate(out), "exit_code": 0}
 
+
 class GrepTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
-        args: Dict[str, Any] = {}
+        from src.tool_execution import _resolve_search_root
+        from src.tool_utils import _truncate
+
+        args: dict[str, Any] = {}
         _s = (content or "").strip()
         if _s.startswith("{"):
             try:
@@ -360,11 +454,10 @@ class GrepTool:
 
         def _grep():
             import re as _re
-            import shutil
+
             rg = shutil.which("rg")
             if rg:
-                cmd = [rg, "--line-number", "--no-heading", "--color=never",
-                       "--max-count", str(max_hits)]
+                cmd = [rg, "--line-number", "--no-heading", "--color=never", "--max-count", str(max_hits)]
                 if ignore_case:
                     cmd.append("--ignore-case")
                 if glob_pat:
@@ -374,7 +467,8 @@ class GrepTool:
                 cmd += ["--regexp", pattern, root]
                 try:
                     import subprocess
-                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+
+                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
                     lines = [ln for ln in (p.stdout or "").splitlines() if ln][:max_hits]
                     return lines, None
                 except subprocess.TimeoutExpired:
@@ -400,7 +494,7 @@ class GrepTool:
                 if len(hits) >= max_hits:
                     break
                 try:
-                    with open(fp, "r", encoding="utf-8", errors="strict") as f:
+                    with open(fp, encoding="utf-8", errors="strict") as f:
                         for i, line in enumerate(f, 1):
                             if rx.search(line):
                                 hits.append(f"{fp}:{i}:{line.rstrip()[:_CODENAV_MAX_LINE]}")
@@ -420,20 +514,23 @@ class GrepTool:
             out += f"\n... [capped at {max_hits} matches]"
         return {"output": _truncate(out), "exit_code": 0}
 
+
 class GetWorkspaceTool:
     """Report the active workspace folder (no args). File tools are confined to
     it; the shell starts there (cwd) but is NOT sandboxed."""
+
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import get_active_workspace
+
         ws = get_active_workspace()
         if ws:
             return {
                 "output": f"{ws}\n(File tools are confined to this folder; the shell starts "
-                          f"here but is not sandboxed and can reach outside it.)",
+                f"here but is not sandboxed and can reach outside it.)",
                 "exit_code": 0,
             }
         return {
             "output": "No workspace is set. File tools use the default allowed roots; "
-                      "resolve paths from the user or use absolute paths.",
+            "resolve paths from the user or use absolute paths.",
             "exit_code": 0,
         }

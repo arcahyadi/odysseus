@@ -1,0 +1,61 @@
+# PROJECT.yaml — Project Manifest (AgentOS Odysseus)
+#
+# One file per project. Defines objectives, constraints, budgets,
+# and auto-evaluation criteria. The budget_enforcer and autoeval
+# loop read this file at session start.
+#
+# Schema: mission → goal → project → task (Paperclip goal-ancestry)
+# Kill-switch: ODYSSEUS_PROJECT_MANIFEST (default OFF) — when OFF,
+# the loop runs without project-level constraints (byte-identical).
+#
+# Copy this template to .planning/PROJECT.yaml for your project.
+
+# ── Identity ────────────────────────────────────────────────────────
+mission: "Build a reliable AI agent orchestration system"
+goal: "Complete M4 agent dispatch integration"
+project: "odysseusAgentOS"
+
+# ── Success criteria ────────────────────────────────────────────────
+done_definition:
+  - "All 12 agents dispatched at correct canonical phases"
+  - "31+ tests pass for AgentDispatcher"
+  - "import app smoke test passes"
+  - "0 regression in existing test suite"
+
+# ── Budgets (hard limits per session) ───────────────────────────────
+budgets:
+  max_iterations: 50        # max agent loop rounds
+  max_tokens: 200000        # max tokens consumed
+  max_cost_usd: 5.0         # max estimated cost
+  max_tool_calls: 200       # max tool executions
+  max_wall_seconds: 3600    # max wall-clock time (1 hour)
+
+# ── Auto-evaluation (keep/revert loop) ──────────────────────────────
+autoeval:
+  enabled: false            # set to true to enable keep/revert
+  eval_command: "python -m pytest tests/ -q --tb=no"
+  metric: "passed_ratio"    # key in eval_command JSON output
+  metric_min: 0.95          # revert if below this threshold
+  max_autoeval_rounds: 3    # max keep/revert cycles
+
+# ── Constraints ─────────────────────────────────────────────────────
+constraints:
+  # Files/directories the agent MUST NOT modify
+  read_only_paths:
+    - ".planning/STATE.md"
+    - "CONSTITUTION.md"
+    - "LICENSE"
+  # Required approval for these patterns
+  require_approval:
+    - "rm -rf"
+    - "git push --force"
+    - "DROP TABLE"
+    - "DELETE FROM"
+
+# ── Providers (override global routing for this project) ─────────────
+providers:
+  preferred: "opencode_zen"
+  fallback_chain:
+    - "opencode_zen"
+    - "anthropic_claude"
+    - "openrouter"

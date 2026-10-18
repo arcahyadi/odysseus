@@ -1,0 +1,19 @@
+{
+  "defaults": {
+    "standard": "WCAG2AA",
+    "timeout": 30000,
+    "wait": 1000,
+    "chromeLaunchConfig": {
+      "args": ["--no-sandbox", "--disable-setuid-sandbox"]
+    }
+  },
+  "urls": [
+    {
+      "url": "http://odysseus:7000",
+      "actions": [
+        "wait for element .cockpit to be visible",
+        "screen capture data/pa11y-home.png"
+      ]
+    }
+  ]
+}

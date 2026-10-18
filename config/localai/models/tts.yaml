@@ -1,0 +1,5 @@
+# LocalAI model config — Text-to-Speech (Piper backend)
+name: tts-1
+backend: piper
+parameters:
+  model: en_US-lessac-medium

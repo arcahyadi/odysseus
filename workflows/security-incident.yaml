@@ -1,0 +1,113 @@
+name: "Security Incident Response"
+description: "Incident response pipeline: snapshot, log, assess, alert, report, and mitigate."
+version: "1.0"
+enabled: true
+triggers:
+  - type: event
+    pattern: "security.block"
+steps:
+  - id: "db-snapshot"
+    action: docker_action
+    params:
+      command: "exec postgres pg_dump -U odysseus -d odysseus -Fc -f /tmp/incident_{{ trigger.payload.incident_id }}.dump"
+    on_error: continue
+    timeout: 300s
+  - id: "sqlite-snapshot"
+    action: call_tool
+    params:
+      tool: sqlite
+      args:
+        action: backup
+        source: "data/app.db"
+        output: "backups/incident_{{ trigger.payload.incident_id }}.db"
+    on_error: continue
+    timeout: 300s
+    condition: "{{ steps.db-snapshot.status }} != 'ok'"
+  - id: "log-capture"
+    action: docker_action
+    params:
+      command: "logs --tail 500 --timestamps > /var/log/incident_{{ trigger.payload.incident_id }}.log"
+    on_error: continue
+    timeout: 30s
+  - id: "severity-assessment"
+    action: spawn_agent
+    params:
+      agent: security-audit
+      args:
+        action: assess_severity
+        event: "{{ trigger.payload }}"
+        incident_id: "{{ trigger.payload.incident_id }}"
+    on_error: continue
+    timeout: 120s
+  - id: "critical-alert"
+    action: send_alert
+    params:
+      channel: ntfy
+      priority: critical
+      title: "Security Incident: {{ trigger.payload.block_type }}"
+      message: >
+        Incident {{ trigger.payload.incident_id }} detected.
+        Type: {{ trigger.payload.block_type }}
+        Source IP: {{ trigger.payload.source_ip }}
+        Severity: {{ steps.severity-assessment.output.severity }}
+        Details: {{ trigger.payload.details }}
+    on_error: continue
+    timeout: 15s
+  - id: "obsidian-report"
+    action: call_tool
+    params:
+      tool: obsidian
+      args:
+        action: write_note
+        vault: "security"
+        folder: "incidents"
+        filename: "incident_{{ trigger.payload.incident_id }}"
+        content: |
+          # Security Incident {{ trigger.payload.incident_id }}
+          - **Timestamp:** {{ workflow.started_at }}
+          - **Type:** {{ trigger.payload.block_type }}
+          - **Source IP:** {{ trigger.payload.source_ip }}
+          - **Severity:** {{ steps.severity-assessment.output.severity }}
+          - **Details:** {{ trigger.payload.details }}
+          - **DB Snapshot:** backups/incident_{{ trigger.payload.incident_id }}.dump
+    on_error: continue
+    timeout: 30s
+  - id: "check-repeated"
+    action: write_db
+    params:
+      target: sqlite
+      table: security_incidents
+      query: |
+        SELECT COUNT(*) AS count
+        FROM security_incidents
+        WHERE source_ip = '{{ trigger.payload.source_ip }}'
+          AND block_type = '{{ trigger.payload.block_type }}'
+          AND timestamp > datetime('now', '-24 hours')
+    on_error: continue
+    timeout: 15s
+  - id: "firewall-block"
+    action: call_tool
+    params:
+      tool: firewall
+      args:
+        action: temp_block_ip
+        ip: "{{ trigger.payload.source_ip }}"
+        duration_hours: 24
+        reason: "Repeated {{ trigger.payload.block_type }} - auto-response"
+    on_error: continue
+    timeout: 15s
+    condition: "{{ steps.check-repeated.output.count }} >= 3"
+  - id: "git-commit-report"
+    action: docker_action
+    params:
+      command: "run --rm -v ./incidents:/incidents alpine/git add incidents/{{ trigger.payload.incident_id }}.md && git commit -m 'docs: incident report {{ trigger.payload.incident_id }}' && git push origin main"
+    on_error: continue
+    timeout: 30s
+error_handling:
+  on_abort:
+    - action: send_alert
+      params:
+        channel: ntfy
+        priority: critical
+        title: "Security Pipeline Failed"
+        message: "Step '{{ error.step }}' failed during incident {{ trigger.payload.incident_id }}: {{ error.message }}"

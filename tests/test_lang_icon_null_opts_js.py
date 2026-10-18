@@ -1,6 +1,7 @@
 """Pin langIcon (static/js/langIcons.js) against an explicit null opts.
 Driven through `node --input-type=module`; skips without node.
 """
+
 import json
 import shutil
 import subprocess
@@ -15,12 +16,18 @@ _HAS_NODE = shutil.which("node") is not None
 
 def _icon(lang, size, opts):
     js = f"""
-    import {{ langIcon }} from '{_HELPER.as_posix()}';
+    import {{ langIcon }} from '{_HELPER.as_uri()}';
     console.log(langIcon({json.dumps(lang)}, {json.dumps(size)}, {json.dumps(opts)}));
     """
     proc = subprocess.run(
         ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
+        input=js,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=str(_REPO),
+        timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()

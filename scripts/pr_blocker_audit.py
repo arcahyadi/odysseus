@@ -4,6 +4,7 @@
 This script intentionally does not import the Odysseus application package.
 It only reads local JSON input or invokes read-only `gh` list/API commands.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -13,11 +14,10 @@ import re
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
-
 
 AREA_RULES = [
     (
@@ -287,7 +287,9 @@ def normalize_pr(item: dict) -> PullRequest:
         author=_extract_author(item),
         url=str(item.get("url") or item.get("html_url") or ""),
         files=files,
-        merge_state=str(item.get("mergeStateStatus") or item.get("merge_state_status") or item.get("mergeable_state") or "unknown"),
+        merge_state=str(
+            item.get("mergeStateStatus") or item.get("merge_state_status") or item.get("mergeable_state") or "unknown"
+        ),
         review_decision=str(item.get("reviewDecision") or item.get("review_decision") or "unknown"),
         updated_at=str(item.get("updatedAt") or item.get("updated_at") or ""),
         areas=areas,
@@ -369,9 +371,11 @@ def title_strongly_indicates_docs_tooling(title: str) -> bool:
         "script only",
         "scripts only",
     )
-    return any(phrase in title for phrase in phrases) or bool(
-        words_set & {"docs", "documentation", "readme", "tests", "tooling", "scripts"}
-    ) and not bool(words_set & {"api", "auth", "route", "runtime", "server", "ui", "memory", "model", "email"})
+    return (
+        any(phrase in title for phrase in phrases)
+        or bool(words_set & {"docs", "documentation", "readme", "tests", "tooling", "scripts"})
+        and not bool(words_set & {"api", "auth", "route", "runtime", "server", "ui", "memory", "model", "email"})
+    )
 
 
 def title_has_keyword(title: str, keyword: str) -> bool:
@@ -499,8 +503,7 @@ def direct_auth_token_signal(pr: PullRequest) -> bool:
     file_text = " ".join(pr.files).lower()
     title = pr.title.lower()
     path_hit = any(
-        keyword in file_text
-        for keyword in ("auth", "token", "api_key", "api-key", "apikey", "key_manager", "security")
+        keyword in file_text for keyword in ("auth", "token", "api_key", "api-key", "apikey", "key_manager", "security")
     )
     title_hit = any(
         phrase in title
@@ -521,7 +524,7 @@ def reference_time(prs: list[PullRequest]) -> datetime:
     parsed = [value for value in (parse_datetime(pr.updated_at) for pr in prs) if value is not None]
     if parsed:
         return max(parsed)
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def parse_datetime(value: str) -> datetime | None:
@@ -532,7 +535,7 @@ def parse_datetime(value: str) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -609,7 +612,15 @@ def locked_areas(prs: list[PullRequest], scored: list[ScoredPullRequest]) -> lis
                 "is_other": area == "Other",
             }
         )
-    return sorted(rows, key=lambda row: (bool(row["is_other"]), _priority_rank(str(row["priority"])), -len(row["prs"]), str(row["area"])))
+    return sorted(
+        rows,
+        key=lambda row: (
+            bool(row["is_other"]),
+            _priority_rank(str(row["priority"])),
+            -len(row["prs"]),
+            str(row["area"]),
+        ),
+    )
 
 
 def _locked_area_priority(area: str, prs: list[PullRequest], max_score: int) -> str:
@@ -645,7 +656,9 @@ def safer_areas(prs: list[PullRequest]) -> list[str]:
         elif area == "Docs / tooling / tests" and count <= 2:
             suggestions.append(f"{area}: low overlap; good candidate for docs, tests, or maintenance-only work")
     if not suggestions:
-        suggestions.append("No clearly quiet area found; prefer narrow docs, tests, or tooling work after checking current PRs.")
+        suggestions.append(
+            "No clearly quiet area found; prefer narrow docs, tests, or tooling work after checking current PRs."
+        )
     return suggestions[:6]
 
 
@@ -777,7 +790,9 @@ def render_terminal(prs: list[PullRequest], top: int = 15, use_color: bool = Fal
     lines.extend(["", colorize("Hot files", "bold_cyan", use_color)])
     lines.extend(_terminal_hot_rows(hot, top, use_color))
     lines.extend(["", colorize("Review / blocker priorities", "bold_cyan", use_color)])
-    lines.append(colorize("Heuristic score only; inspect these first, do not merge without validation.", "dim", use_color))
+    lines.append(
+        colorize("Heuristic score only; inspect these first, do not merge without validation.", "dim", use_color)
+    )
     if scored:
         for item in scored[:top]:
             pr = item.pr
@@ -803,7 +818,9 @@ def _terminal_hot_rows(hot: list[tuple[str, list[int]]], top: int, use_color: bo
     rows = []
     for path, numbers in hot[:top]:
         count_label = f"{len(numbers)} PRs"
-        rows.append(f"- {path:<28} {colorize(count_label, hot_count_color(len(numbers)), use_color)}  {_format_pr_numbers(numbers)}")
+        rows.append(
+            f"- {path:<28} {colorize(count_label, hot_count_color(len(numbers)), use_color)}  {_format_pr_numbers(numbers)}"
+        )
     return rows
 
 
@@ -1016,7 +1033,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-color", action="store_const", const="never", dest="color", help="Alias for --color never")
     parser.add_argument("--format", choices=["markdown", "terminal", "json"], default="markdown", help="Output format")
     parser.add_argument("--no-fetch-files", action="store_true", help="Skip per-PR changed-file API calls in live mode")
-    parser.add_argument("--progress", choices=["auto", "always", "never"], default="auto", help="Live file-fetch progress mode")
+    parser.add_argument(
+        "--progress", choices=["auto", "always", "never"], default="auto", help="Live file-fetch progress mode"
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress progress and non-fatal warning output")
     return parser
 
@@ -1029,7 +1048,9 @@ def main(argv: list[str] | None = None) -> int:
             payload = load_json_file(Path(args.input))
         else:
             progress = ProgressReporter(should_show_progress(args))
-            payload = fetch_live_prs(args.repo, fetch_files=not args.no_fetch_files, progress=progress, limit=args.limit)
+            payload = fetch_live_prs(
+                args.repo, fetch_files=not args.no_fetch_files, progress=progress, limit=args.limit
+            )
         prs = normalize_prs(payload)
         missing_files = missing_file_metadata_count(prs)
         if args.repo and not args.no_fetch_files and not args.quiet and missing_files:

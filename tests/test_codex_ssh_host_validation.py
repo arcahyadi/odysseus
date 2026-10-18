@@ -7,13 +7,14 @@ in ``remoteHost`` would be injected into that command.
 These pin validation on the host/port before they reach the ssh string, matching
 the validators the rest of the cookbook routes already apply.
 """
+
 import asyncio
 
 import pytest
 from fastapi import APIRouter, HTTPException
 from starlette.requests import Request
 
-import routes.codex_routes as codex_routes
+from routes import codex_routes
 
 
 def _route_endpoint(path: str, method: str, router=None):
@@ -77,25 +78,19 @@ def test_local_task_has_no_host():
 
 
 def test_valid_remote_builds_port_flag():
-    host, port_flag = codex_routes._ssh_prefix_for_task(
-        {"remoteHost": "user@box", "sshPort": "2222"}
-    )
+    host, port_flag = codex_routes._ssh_prefix_for_task({"remoteHost": "user@box", "sshPort": "2222"})
     assert host == "user@box"
     assert port_flag == "-p 2222 "
 
 
 def test_integer_ssh_port_in_stored_task_normalizes_without_crashing():
-    host, port_flag = codex_routes._ssh_prefix_for_task(
-        {"remoteHost": "user@box", "sshPort": 2222}
-    )
+    host, port_flag = codex_routes._ssh_prefix_for_task({"remoteHost": "user@box", "sshPort": 2222})
     assert host == "user@box"
     assert port_flag == "-p 2222 "
 
 
 def test_default_ssh_port_omits_flag():
-    host, port_flag = codex_routes._ssh_prefix_for_task(
-        {"remoteHost": "box", "sshPort": "22"}
-    )
+    host, port_flag = codex_routes._ssh_prefix_for_task({"remoteHost": "box", "sshPort": "22"})
     assert host == "box"
     assert port_flag == ""
 

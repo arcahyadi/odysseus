@@ -8,10 +8,10 @@ every request with 422 extra_forbidden. Self-hosted now also requires the
 endpoint to resolve as local: loopback/private/tailscale host, or endpoint
 kind explicitly configured as "local".
 """
+
 import pytest
 
-import src.llm_core as llm_core
-import src.model_context as model_context
+from src import llm_core, model_context
 
 
 def _affinity_fields(url, monkeypatch, kind=None):
@@ -38,11 +38,14 @@ def test_unknown_public_host_gets_no_affinity_fields(monkeypatch):
     assert payload == {}
 
 
-@pytest.mark.parametrize("url", [
-    "https://10.example-cloud.com/v1",
-    "https://172.16.example-cloud.com/v1",
-    "https://192.168.example-cloud.com/v1",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://10.example-cloud.com/v1",
+        "https://172.16.example-cloud.com/v1",
+        "https://192.168.example-cloud.com/v1",
+    ],
+)
 def test_private_prefix_dns_host_gets_no_affinity_fields(monkeypatch, url):
     payload = _affinity_fields(url, monkeypatch)
     assert payload == {}
@@ -75,14 +78,17 @@ def test_no_session_id_is_a_noop(monkeypatch):
 # Cloud-host sweep absorbed from #3839 (credit: Shabablinchikow) - every cloud
 # API that falls through provider detection to the OpenAI-compatible default
 # must stay clean, not just the Mistral host from the original report.
-@pytest.mark.parametrize("url", [
-    "https://api.mistral.ai/v1/chat/completions",
-    "https://api.deepseek.com/v1/chat/completions",
-    "https://api.x.ai/v1/chat/completions",
-    "https://api.together.xyz/v1/chat/completions",
-    "https://api.fireworks.ai/inference/v1/chat/completions",
-    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.mistral.ai/v1/chat/completions",
+        "https://api.deepseek.com/v1/chat/completions",
+        "https://api.x.ai/v1/chat/completions",
+        "https://api.together.xyz/v1/chat/completions",
+        "https://api.fireworks.ai/inference/v1/chat/completions",
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    ],
+)
 def test_cloud_openai_compatible_hosts_get_no_affinity_fields(monkeypatch, url):
     assert _affinity_fields(url, monkeypatch) == {}
 

@@ -11,6 +11,7 @@ makes it an incomplete view of the server:
 
 `_should_prune_window` therefore only allows the prune on a clean read.
 """
+
 from src.caldav_sync import _should_prune_window
 
 

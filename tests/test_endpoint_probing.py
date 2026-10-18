@@ -18,6 +18,7 @@ probe surface that drives endpoint setup and degraded-state reporting:
 HTTP is faked by monkeypatching `model_routes.httpx.{get,post}`, mirroring the
 established pattern in test_model_routes.py — no network, no server.
 """
+
 import sys
 import types
 from unittest.mock import MagicMock
@@ -35,26 +36,39 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
     if "core.database" not in sys.modules:
         _core_db = types.ModuleType("core.database")
         for _name in [
-            "SessionLocal", "ModelEndpoint", "Session", "ChatMessage", "Document",
-            "DocumentVersion", "GalleryImage", "GalleryAlbum", "Note",
-            "CalendarCal", "CalendarEvent", "ScheduledTask", "TaskRun", "McpServer",
-            "ProviderAuthSession", "Base",
+            "SessionLocal",
+            "ModelEndpoint",
+            "Session",
+            "ChatMessage",
+            "Document",
+            "DocumentVersion",
+            "GalleryImage",
+            "GalleryAlbum",
+            "Note",
+            "CalendarCal",
+            "CalendarEvent",
+            "ScheduledTask",
+            "TaskRun",
+            "McpServer",
+            "ProviderAuthSession",
+            "Base",
         ]:
             setattr(_core_db, _name, MagicMock())
         _core_db.utcnow_naive = MagicMock()
         sys.modules["core.database"] = _core_db
 
-    import routes.model_routes as model_routes
-    import src.endpoint_resolver as endpoint_resolver
+    from routes import model_routes
     from routes.model_routes import (
-        _probe_endpoint,
+        _classify_endpoint,
+        _ollama_model_names,
+        _openai_model_ids,
         _ping_endpoint,
+        _probe_endpoint,
         _probe_single_model,
         _resolve_probe_key,
-        _classify_endpoint,
         _rewrite_loopback_for_docker,
-        _PROVIDER_CURATED,
     )
+    from src import endpoint_resolver
 
 
 def _patch_resolve(monkeypatch):
@@ -74,15 +88,57 @@ def _resp(status, *, json=None, headers=None, url="https://api.example.com/v1/mo
     return httpx.Response(status, **kwargs)
 
 
+# ── _openai_model_ids / _ollama_model_names: parsing helpers ──
+
+
+class TestModelListHelpers:
+    @pytest.mark.parametrize(
+        "data,expected",
+        [
+            ({"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]}, ["gpt-4o", "gpt-4o-mini"]),
+            ({"data": [{"id": None}, {"id": 123}, {"id": "gpt-4o"}]}, ["gpt-4o"]),  # non-string ids dropped
+            ({"data": ["x", {"id": "ok"}]}, ["ok"]),  # non-dict entries dropped
+            ({"data": []}, []),
+            ({"data": "oops"}, []),  # non-list "data"
+            ([], []),
+            ("nope", []),
+            (None, []),
+            (123, []),  # non-dict body
+        ],
+    )
+    def test_openai_model_ids(self, data, expected):
+        assert _openai_model_ids(data) == expected
+
+    @pytest.mark.parametrize(
+        "data,expected",
+        [
+            ({"models": [{"name": "llama3:8b"}, {"model": "qwen3:4b"}]}, ["llama3:8b", "qwen3:4b"]),
+            ({"models": [{"name": "a", "model": "b"}]}, ["a"]),  # name precedence over model
+            ({"models": [{"name": 123}, {"model": None}, {"name": "ok"}]}, ["ok"]),  # non-string values dropped
+            ({"models": ["x", {"name": "ok"}]}, ["ok"]),  # non-dict entries dropped
+            ({"models": []}, []),
+            ({"models": "oops"}, []),
+            ([], []),
+            (None, []),
+            (42, []),  # non-dict body
+        ],
+    )
+    def test_ollama_model_names(self, data, expected):
+        assert _ollama_model_names(data) == expected
+
+
 # ── _probe_endpoint: model-list parsing ──
+
 
 class TestProbeEndpointParsing:
     def test_parses_openai_data_format(self, monkeypatch):
         _patch_resolve(monkeypatch)
         monkeypatch.setattr(
-            model_routes.httpx, "get",
+            model_routes.httpx,
+            "get",
             lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(
-                200, json={"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]}),
+                200, json={"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]}
+            ),
         )
         assert _probe_endpoint("https://api.example.com/v1", "key") == ["gpt-4o", "gpt-4o-mini"]
 
@@ -91,9 +147,11 @@ class TestProbeEndpointParsing:
         # No OpenAI-style "data"; fall back to the native {"models": [...]} shape,
         # honoring both the "name" and "model" keys.
         monkeypatch.setattr(
-            model_routes.httpx, "get",
+            model_routes.httpx,
+            "get",
             lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(
-                200, json={"models": [{"name": "llama3:8b"}, {"model": "qwen3:4b"}]}),
+                200, json={"models": [{"name": "llama3:8b"}, {"model": "qwen3:4b"}]}
+            ),
         )
         assert _probe_endpoint("https://api.example.com/v1") == ["llama3:8b", "qwen3:4b"]
 
@@ -116,8 +174,51 @@ class TestProbeEndpointParsing:
     def test_empty_list_with_no_curation_returns_empty(self, monkeypatch):
         _patch_resolve(monkeypatch)
         monkeypatch.setattr(
-            model_routes.httpx, "get",
+            model_routes.httpx,
+            "get",
             lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(200, json={"data": []}),
+        )
+        assert _probe_endpoint("https://api.example.com/v1") == []
+
+    @pytest.mark.parametrize("body", [[], "invalid", 123, True])
+    def test_non_dict_json_body_degrades_to_empty(self, monkeypatch, caplog, body):
+        # HTTP 200 with valid-but-non-dict JSON must not crash the probe with an
+        # AttributeError (data.get(...) on a list/str/int); it should fall through
+        # to the empty/curated path. caplog gives this test teeth: pre-fix the
+        # swallowed AttributeError logs "Failed to probe"; post-fix it does not.
+        _patch_resolve(monkeypatch)
+        monkeypatch.setattr(
+            model_routes.httpx,
+            "get",
+            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(200, json=body),
+        )
+        with caplog.at_level("WARNING", logger="routes.model_routes"):
+            assert _probe_endpoint("https://api.example.com/v1") == []
+        assert "Failed to probe" not in caplog.text
+
+    def test_skips_non_string_model_ids(self, monkeypatch):
+        # A non-compliant upstream returns int/None IDs alongside a valid one.
+        # The probe must not crash on .lower()/.startswith and must still surface
+        # the valid string model.
+        _patch_resolve(monkeypatch)
+        monkeypatch.setattr(
+            model_routes.httpx,
+            "get",
+            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(
+                200, json={"data": [{"id": None}, {"id": 123}, {"id": "gpt-4o"}]}
+            ),
+        )
+        assert _probe_endpoint("https://api.example.com/v1", "key") == ["gpt-4o"]
+
+    def test_all_non_string_ids_returns_empty(self, monkeypatch):
+        # Every id is non-string -> empty result, no exception, no curated leak.
+        _patch_resolve(monkeypatch)
+        monkeypatch.setattr(
+            model_routes.httpx,
+            "get",
+            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(
+                200, json={"data": [{"id": 123}, {"id": None}]}
+            ),
         )
         assert _probe_endpoint("https://api.example.com/v1") == []
 
@@ -144,26 +245,33 @@ class TestProbeEndpointParsing:
 
 # ── _ping_endpoint: reachability classification ──
 
+
 class TestPingEndpoint:
     def test_reachable_on_2xx(self, monkeypatch):
         _patch_resolve(monkeypatch)
         monkeypatch.setattr(
-            model_routes.httpx, "get",
+            model_routes.httpx,
+            "get",
             lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(200),
         )
         assert _ping_endpoint("https://api.example.com/v1", "key") == {
-            "reachable": True, "status_code": 200, "error": None,
+            "reachable": True,
+            "status_code": 200,
+            "error": None,
         }
 
     def test_auth_failure_is_reached_but_not_reachable(self, monkeypatch):
         _patch_resolve(monkeypatch)
         # A 401 means the server answered — surface the status, not "offline".
         monkeypatch.setattr(
-            model_routes.httpx, "get",
+            model_routes.httpx,
+            "get",
             lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(401),
         )
         assert _ping_endpoint("https://api.example.com/v1", "bad") == {
-            "reachable": False, "status_code": 401, "error": "HTTP 401",
+            "reachable": False,
+            "status_code": 401,
+            "error": "HTTP 401",
         }
 
     def test_detects_odysseus_login_redirect(self, monkeypatch):
@@ -186,7 +294,9 @@ class TestPingEndpoint:
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
         assert _ping_endpoint("https://api.example.com/v1") == {
-            "reachable": False, "status_code": 301, "error": "HTTP 301 redirect",
+            "reachable": False,
+            "status_code": 301,
+            "error": "HTTP 301 redirect",
         }
 
     def test_transport_error_is_unreachable(self, monkeypatch):
@@ -212,52 +322,45 @@ class TestPingEndpoint:
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
         assert _ping_endpoint("http://localhost:11434/v1") == {
-            "reachable": True, "status_code": 200, "error": None,
+            "reachable": True,
+            "status_code": 200,
+            "error": None,
         }
 
 
 # ── Docker loopback rewrite ──
 
+
 class TestDockerLoopbackRewrite:
     def test_manual_loopback_rewrites_to_docker_host_when_available(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
         monkeypatch.setattr(model_routes, "_container_loopback_reachable", lambda base_url: False)
-        assert (
-            _rewrite_loopback_for_docker("http://localhost:8000/v1")
-            == "http://host.docker.internal:8000/v1"
-        )
+        assert _rewrite_loopback_for_docker("http://localhost:8000/v1") == "http://host.docker.internal:8000/v1"
 
     def test_reachable_container_loopback_stays_local_even_without_container_flag(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
         monkeypatch.setattr(model_routes, "_container_loopback_reachable", lambda base_url: True)
-        assert (
-            _rewrite_loopback_for_docker("http://127.0.0.1:8001/v1")
-            == "http://127.0.0.1:8001/v1"
-        )
+        assert _rewrite_loopback_for_docker("http://127.0.0.1:8001/v1") == "http://127.0.0.1:8001/v1"
 
     def test_cookbook_container_local_loopback_stays_inside_container(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
         assert (
-            _rewrite_loopback_for_docker("http://localhost:8000/v1", container_local=True)
-            == "http://localhost:8000/v1"
+            _rewrite_loopback_for_docker("http://localhost:8000/v1", container_local=True) == "http://localhost:8000/v1"
         )
 
     def test_bind_address_becomes_connectable_loopback_for_container_local(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
         assert (
-            _rewrite_loopback_for_docker("http://0.0.0.0:8000/v1", container_local=True)
-            == "http://127.0.0.1:8000/v1"
+            _rewrite_loopback_for_docker("http://0.0.0.0:8000/v1", container_local=True) == "http://127.0.0.1:8000/v1"
         )
 
     def test_bind_address_becomes_connectable_loopback_on_native_install(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: False)
-        assert (
-            _rewrite_loopback_for_docker("http://0.0.0.0:8000/v1")
-            == "http://127.0.0.1:8000/v1"
-        )
+        assert _rewrite_loopback_for_docker("http://0.0.0.0:8000/v1") == "http://127.0.0.1:8000/v1"
 
 
 # ── _probe_single_model: completion probe ──
+
 
 class TestProbeSingleModel:
     def test_ok_on_success(self, monkeypatch):
@@ -274,11 +377,14 @@ class TestProbeSingleModel:
         assert "latency_ms" in result
         assert captured["url"] == "https://api.example.com/v1/chat/completions"
 
-    @pytest.mark.parametrize("base,api_key,model_id", [
-        ("https://api.example.com/v1", "key", "gpt-4o"),
-        ("http://localhost:11434/v1", None, "llama3.2"),
-        ("https://api.anthropic.com/v1", "sk-ant", "claude-sonnet-4-5"),
-    ])
+    @pytest.mark.parametrize(
+        "base,api_key,model_id",
+        [
+            ("https://api.example.com/v1", "key", "gpt-4o"),
+            ("http://localhost:11434/v1", None, "llama3.2"),
+            ("https://api.anthropic.com/v1", "sk-ant", "claude-sonnet-4-5"),
+        ],
+    )
     def test_completion_probe_uses_llm_verify(self, monkeypatch, base, api_key, model_id):
         _patch_resolve(monkeypatch)
         marker = object()
@@ -297,9 +403,11 @@ class TestProbeSingleModel:
     def test_extracts_dict_error_message(self, monkeypatch):
         _patch_resolve(monkeypatch)
         monkeypatch.setattr(
-            model_routes.httpx, "post",
+            model_routes.httpx,
+            "post",
             lambda url, headers=None, json=None, timeout=None, verify=None: _resp(
-                400, json={"error": {"message": "model not found"}}),
+                400, json={"error": {"message": "model not found"}}
+            ),
         )
         result = _probe_single_model("https://api.example.com/v1", "key", "ghost")
         assert result["status"] == "fail"
@@ -308,9 +416,9 @@ class TestProbeSingleModel:
     def test_extracts_string_error(self, monkeypatch):
         _patch_resolve(monkeypatch)
         monkeypatch.setattr(
-            model_routes.httpx, "post",
-            lambda url, headers=None, json=None, timeout=None, verify=None: _resp(
-                403, json={"error": "forbidden"}),
+            model_routes.httpx,
+            "post",
+            lambda url, headers=None, json=None, timeout=None, verify=None: _resp(403, json={"error": "forbidden"}),
         )
         result = _probe_single_model("https://api.example.com/v1", "key", "m")
         assert result["status"] == "fail"
@@ -384,6 +492,7 @@ class TestProbeSingleModel:
 
 # ── _resolve_probe_key: static key vs provider-auth runtime token ──
 
+
 class TestResolveProbeKey:
     def test_static_endpoint_uses_api_key(self):
         ep = types.SimpleNamespace(id="e1", api_key="sk-static", provider_auth_id=None, owner=None)
@@ -413,19 +522,26 @@ class TestResolveProbeKey:
 
 # ── _classify_endpoint: Tailscale CGNAT range ──
 
+
 class TestClassifyEndpointTailscale:
-    @pytest.mark.parametrize("url", [
-        "http://100.64.0.1:11434/v1",     # bottom of 100.64.0.0/10
-        "http://100.100.50.20:8080/v1",
-        "http://100.127.255.254/v1",      # top of the range
-    ])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://100.64.0.1:11434/v1",  # bottom of 100.64.0.0/10
+            "http://100.100.50.20:8080/v1",
+            "http://100.127.255.254/v1",  # top of the range
+        ],
+    )
     def test_cgnat_range_is_local(self, url):
         assert _classify_endpoint(url) == "local"
 
-    @pytest.mark.parametrize("url", [
-        "http://100.63.255.255/v1",   # just below 100.64.0.0/10
-        "http://100.128.0.1/v1",      # just above
-        "https://api.openai.com/v1",  # public hostname
-    ])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://100.63.255.255/v1",  # just below 100.64.0.0/10
+            "http://100.128.0.1/v1",  # just above
+            "https://api.openai.com/v1",  # public hostname
+        ],
+    )
     def test_outside_cgnat_is_api(self, url):
         assert _classify_endpoint(url) == "api"

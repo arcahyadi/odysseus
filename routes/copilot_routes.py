@@ -20,29 +20,28 @@ All routes are admin-gated (endpoint/provider management is an admin action).
 """
 
 import json
-import uuid
 import logging
-from typing import Dict, Optional
+import uuid
 
 import httpx
 from fastapi import HTTPException, Request
 
-from core.database import SessionLocal, ModelEndpoint
+from core.database import ModelEndpoint, SessionLocal
 from routes.device_flow import (
     DeviceFlowPoll,
     DeviceFlowStart,
     PendingDeviceFlowStore,
     create_device_flow_router,
 )
-from src.auth_helpers import get_current_user
 from src import copilot
+from src.auth_helpers import get_current_user
 
 logger = logging.getLogger(__name__)
 
 _DEVICE_FLOW_STORE = PendingDeviceFlowStore()
 
 
-def _provision_endpoint(token: str, base: str, owner: Optional[str]) -> Dict:
+def _provision_endpoint(token: str, base: str, owner: str | None) -> dict:
     """Create or update the owner's Copilot endpoint with a fresh token."""
     try:
         models = copilot.fetch_models(base, token)
@@ -93,6 +92,7 @@ def _provision_endpoint(token: str, base: str, owner: Optional[str]) -> Dict:
     # Best-effort: refresh the model cache so the new endpoint shows up.
     try:
         from routes.model_routes import _invalidate_models_cache
+
         _invalidate_models_cache()
     except Exception:
         pass
@@ -136,7 +136,7 @@ def _start_device_flow(request: Request, form) -> DeviceFlowStart:
     )
 
 
-def _poll_device_flow(_request: Request, pending: Dict) -> DeviceFlowPoll:
+def _poll_device_flow(_request: Request, pending: dict) -> DeviceFlowPoll:
     try:
         data = copilot.poll_access_token(pending["host"], pending["device_code"])
     except Exception as e:

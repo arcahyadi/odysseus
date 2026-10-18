@@ -45,11 +45,12 @@ def _widget_type_names() -> dict:
         fitz.PDF_WIDGET_TYPE_SIGNATURE: "signature",
     }
 
+
 # Text widgets that are really signature placeholders. Covers DocuSign-style
 # "_es_:signature" and the bare "signed N" / "Signature" patterns common in
 # UK conveyancing forms (TA6, TA10). Uses substring match deliberately —
 # false positives like "assigned" are rare in form-field names.
-_SIGNATURE_NAME_RE = re.compile(r'sign(?:ed|ature)', re.IGNORECASE)
+_SIGNATURE_NAME_RE = re.compile(r"sign(?:ed|ature)", re.IGNORECASE)
 
 
 def has_form_fields(path: str) -> bool:
@@ -183,9 +184,7 @@ def extract_fields(path: str) -> list[dict[str, Any]]:
                         "type": wtype,
                         "label": label,
                         "value": value,
-                        "options": list(w.choice_values) if w.choice_values else (
-                            [on_state] if on_state else []
-                        ),
+                        "options": list(w.choice_values) if w.choice_values else ([on_state] if on_state else []),
                         "page": page_index + 1,
                         "rect": [w.rect.x0, w.rect.y0, w.rect.x1, w.rect.y1],
                         "required": bool((w.field_flags or 0) & 2),
@@ -347,7 +346,7 @@ def stamp_annotations(
                 elif kind == "signature":
                     if not isinstance(value, str) or not value.startswith("signature:"):
                         continue
-                    sid = value[len("signature:"):].strip()
+                    sid = value[len("signature:") :].strip()
                     png = signature_pngs.get(sid)
                     if not png:
                         continue

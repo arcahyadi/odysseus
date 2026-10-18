@@ -11,7 +11,7 @@ from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -31,6 +31,7 @@ def _ensure_init():
 
     try:
         from src.rag_singleton import get_rag_manager
+
         _rag_manager = get_rag_manager()
     except Exception:
         pass
@@ -38,6 +39,7 @@ def _ensure_init():
     try:
         from src.constants import PERSONAL_DIR
         from src.personal_docs import PersonalDocsManager
+
         _personal_docs_manager = PersonalDocsManager(PERSONAL_DIR, _rag_manager)
     except Exception:
         pass
@@ -77,9 +79,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not _personal_docs_manager:
             return [TextContent(type="text", text="Personal docs manager not available. RAG may not be configured.")]
         try:
-            files = getattr(_personal_docs_manager, 'index', None) or []
+            files = getattr(_personal_docs_manager, "index", None) or []
             dirs = []
-            if hasattr(_personal_docs_manager, 'get_indexed_directories'):
+            if hasattr(_personal_docs_manager, "get_indexed_directories"):
                 dirs = _personal_docs_manager.get_indexed_directories()
 
             lines = []
@@ -124,7 +126,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     _personal_docs_manager.add_directory(directory, index=False)
                 except Exception:
                     pass
-            return [TextContent(type="text", text=f"Directory '{directory}' added to RAG index ({indexed} chunks indexed)")]
+            return [
+                TextContent(type="text", text=f"Directory '{directory}' added to RAG index ({indexed} chunks indexed)")
+            ]
         except Exception as e:
             return [TextContent(type="text", text=f"Error: Failed to index directory: {e}")]
 
@@ -139,16 +143,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not _personal_docs_manager:
             return [TextContent(type="text", text="Error: Personal docs manager not available")]
         try:
-            if hasattr(_personal_docs_manager, 'remove_directory'):
+            if hasattr(_personal_docs_manager, "remove_directory"):
                 _personal_docs_manager.remove_directory(directory)
-            if _rag_manager and hasattr(_rag_manager, 'remove_directory'):
+            if _rag_manager and hasattr(_rag_manager, "remove_directory"):
                 _rag_manager.remove_directory(directory)
             return [TextContent(type="text", text=f"Directory '{directory}' removed from RAG index")]
         except Exception as e:
             return [TextContent(type="text", text=f"Error: Failed to remove directory: {e}")]
 
     else:
-        return [TextContent(type="text", text=f"Error: Unknown action '{action}'. Use: list, add_directory, remove_directory")]
+        return [
+            TextContent(
+                type="text", text=f"Error: Unknown action '{action}'. Use: list, add_directory, remove_directory"
+            )
+        ]
 
 
 async def run():

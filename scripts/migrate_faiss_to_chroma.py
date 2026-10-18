@@ -15,9 +15,9 @@ Requires: faiss-cpu, chromadb-client, and the embedding endpoint to be running.
 """
 
 import json
+import logging
 import os
 import sys
-import logging
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,8 +62,8 @@ def _rag_docstore(data):
 def migrate_memories():
     """Migrate memory vectors from FAISS to ChromaDB."""
     from src.chroma_client import get_chroma_client
+    from src.constants import MEMORY_FILE, MEMORY_VECTORS_DIR
     from src.embeddings import get_embedding_client
-    from src.constants import MEMORY_VECTORS_DIR, MEMORY_FILE
 
     ids_path = os.path.join(MEMORY_VECTORS_DIR, "ids.json")
     memory_path = MEMORY_FILE
@@ -111,10 +111,10 @@ def migrate_memories():
         vecs = embed.encode(batch_texts, normalize_embeddings=True).tolist()
         for i in range(0, len(batch_texts), 100):
             collection.add(
-                ids=batch_ids[i:i+100],
-                embeddings=vecs[i:i+100],
-                documents=batch_texts[i:i+100],
-                metadatas=batch_metas[i:i+100],
+                ids=batch_ids[i : i + 100],
+                embeddings=vecs[i : i + 100],
+                documents=batch_texts[i : i + 100],
+                metadatas=batch_metas[i : i + 100],
             )
         logger.info(f"Migrated {len(batch_texts)} memories to ChromaDB")
     else:
@@ -149,9 +149,9 @@ def migrate_rag():
     )
 
     for i in range(0, len(ids), 100):
-        batch_ids = ids[i:i+100]
-        batch_docs = documents[i:i+100]
-        batch_metas = metadatas[i:i+100]
+        batch_ids = ids[i : i + 100]
+        batch_docs = documents[i : i + 100]
+        batch_metas = metadatas[i : i + 100]
         vecs = embed.encode(batch_docs, normalize_embeddings=True).tolist()
         collection.add(
             ids=batch_ids,
@@ -165,6 +165,7 @@ def migrate_rag():
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
+
     load_dotenv()
 
     logger.info("Starting FAISS -> ChromaDB migration")

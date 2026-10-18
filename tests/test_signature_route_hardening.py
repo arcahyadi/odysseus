@@ -8,7 +8,6 @@ from fastapi import HTTPException
 
 from routes import signature_routes
 
-
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nsignature-bytes"
 _PNG_B64 = base64.b64encode(_PNG_BYTES).decode("ascii")
 
@@ -82,16 +81,18 @@ def test_create_signature_stores_normalized_png_and_drops_svg(monkeypatch):
     monkeypatch.setattr(signature_routes, "Signature", _SignatureRecord)
     create_signature = _route_endpoint("/api/signatures", "POST")
 
-    response = asyncio.run(create_signature(
-        _request(),
-        signature_routes.SignatureCreate(
-            name=" Full signature ",
-            data=f"data:image/png;base64,{_PNG_B64}",
-            width=320,
-            height=80,
-            svg='<svg onload="alert(1)"></svg>',
-        ),
-    ))
+    response = asyncio.run(
+        create_signature(
+            _request(),
+            signature_routes.SignatureCreate(
+                name=" Full signature ",
+                data=f"data:image/png;base64,{_PNG_B64}",
+                width=320,
+                height=80,
+                svg='<svg onload="alert(1)"></svg>',
+            ),
+        )
+    )
 
     assert db.added.owner == "alice"
     assert db.added.name == "Full signature"

@@ -8,27 +8,27 @@ import pytest
 from fastapi import HTTPException
 
 from routes.cookbook_helpers import (
-    _cached_model_scan_script,
     _append_llama_cpp_linux_accel_build_lines,
     _append_pip_install_runner_lines,
     _append_serve_exit_code_lines,
     _append_serve_preflight_exit_lines,
-    _llama_cpp_rebuild_cmd,
     _append_vllm_linux_preflight_lines,
+    _cached_model_scan_script,
+    _llama_cpp_rebuild_cmd,
     _local_tooling_path_export,
+    _normalize_llama_cpp_python_cache_types,
+    _ollama_bind_from_cmd,
     _pip_install_attempt,
     _pip_install_fallback_chain,
-    _ollama_bind_from_cmd,
     _safe_env_prefix,
+    _shell_path,
     _user_shell_path_bootstrap,
-    _venv_safe_local_pip_install_cmd,
-    _normalize_llama_cpp_python_cache_types,
     _validate_gpus,
     _validate_local_dir,
     _validate_repo_id,
     _validate_serve_cmd,
     _validate_serve_model_id,
-    _shell_path,
+    _venv_safe_local_pip_install_cmd,
     run_ssh_command_async,
 )
 
@@ -152,10 +152,10 @@ def test_validate_local_dir_accepts_non_ascii_unicode_paths():
     # must accept them the same way it accepts spaces (see issue: spaces AND
     # non-ASCII chars were both rejected by the old ASCII-only allowlist).
     for path in [
-        "/Volumes/Модели/llamacpp",   # Cyrillic (POSIX / external drive)
-        "/home/josé/models",          # accented Latin
-        "/Volumes/モデル/llm",         # CJK
-        r"D:\AI Models\Модели",       # Cyrillic (Windows drive path)
+        "/Volumes/Модели/llamacpp",  # Cyrillic (POSIX / external drive)
+        "/home/josé/models",  # accented Latin
+        "/Volumes/モデル/llm",  # CJK
+        r"D:\AI Models\Модели",  # Cyrillic (Windows drive path)
     ]:
         assert _validate_local_dir(path) == path
 
@@ -212,10 +212,7 @@ def test_validate_serve_model_id_accepts_cached_local_model_names():
 def test_local_tooling_path_export_prepends_interpreter_bin():
     """The cookbook runners must see the venv's bin (where `hf`/`python` live)
     so tmux shells can find them without an activated venv."""
-    assert (
-        _local_tooling_path_export("/opt/venv/bin/python")
-        == 'export PATH="/opt/venv/bin:$PATH"'
-    )
+    assert _local_tooling_path_export("/opt/venv/bin/python") == 'export PATH="/opt/venv/bin:$PATH"'
 
 
 def test_local_tooling_path_export_preserves_spaces_and_expands_path():
@@ -285,7 +282,10 @@ def test_pip_install_fallback_chain_propagates_failure_in_venv():
     )
     result = subprocess.run(
         ["bash", "-c", script],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     assert "user_attempt" not in result.stdout
     assert result.returncode != 0, "Chain should propagate failure when base fails in venv"
@@ -296,14 +296,17 @@ def test_pip_install_fallback_chain_tries_user_outside_venv():
     # Force "not in venv" by making venv_check return 1 directly.
     script = (
         "bash -c '"
-        "python3 -c \"import sys; sys.exit(1)\" || "
-        "{ ! python3 -c \"import sys; sys.exit(1)\" "  # venv_check=1 → negated to 0 → user runs
+        'python3 -c "import sys; sys.exit(1)" || '
+        '{ ! python3 -c "import sys; sys.exit(1)" '  # venv_check=1 → negated to 0 → user runs
         "&& echo user_attempt; }"
         "'"
     )
     result = subprocess.run(
         ["bash", "-c", script],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     assert "user_attempt" in result.stdout, "Chain should try --user when not in venv and base fails"
 
@@ -332,8 +335,8 @@ def test_serve_runner_installs_llama_cpp_server_extra():
     with ``ModuleNotFoundError: No module named 'starlette_context'`` and the
     extra is never reinstalled."""
     import pathlib
-    src = (pathlib.Path(__file__).resolve().parent.parent
-           / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
+
+    src = (pathlib.Path(__file__).resolve().parent.parent / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
     # No serve path may install a bare (extra-less) llama-cpp-python.
     assert "pip install llama-cpp-python " not in src
     assert "_pip_install_fallback_chain('llama-cpp-python'" not in src
@@ -345,11 +348,10 @@ def test_serve_runner_installs_llama_cpp_server_extra():
 def test_serve_pip_install_normalizes_llama_cpp_alias_and_adds_wheel_index():
     import pathlib
 
-    src = (pathlib.Path(__file__).resolve().parent.parent
-        / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
+    src = (pathlib.Path(__file__).resolve().parent.parent / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
 
-    assert "re.sub(r\"(?<![A-Za-z0-9_.\\-/])llama_cpp(?![A-Za-z0-9_.\\-/])\", \"llama-cpp-python[server]\", req.cmd)" in src
-    assert "if \"llama-cpp-python\" in req.cmd and \"--extra-index-url\" not in req.cmd:" in src
+    assert 're.sub(r"(?<![A-Za-z0-9_.\\-/])llama_cpp(?![A-Za-z0-9_.\\-/])", "llama-cpp-python[server]", req.cmd)' in src
+    assert 'if "llama-cpp-python" in req.cmd and "--extra-index-url" not in req.cmd:' in src
     assert "https://abetlen.github.io/llama-cpp-python/whl/cpu" in src
 
 
@@ -363,7 +365,7 @@ def test_vllm_preflight_reports_cli_and_version():
     assert 'ODYSSEUS_VLLM_BIN="$(command -v vllm 2>/dev/null || true)"' in script
     assert 'echo "[odysseus] vLLM CLI: $ODYSSEUS_VLLM_BIN"' in script
     assert '"$ODYSSEUS_VLLM_BIN" --version' in script
-    assert 'ODYSSEUS_PREFLIGHT_EXIT=127' in script
+    assert "ODYSSEUS_PREFLIGHT_EXIT=127" in script
 
 
 def test_venv_safe_local_pip_install_strips_user_flags_only_for_local_venv():
@@ -419,13 +421,12 @@ def test_pip_install_attempt_failure_propagates_real_exit_code():
     """Run the generated snippet against a deliberately broken pip install
     to confirm the subshell exits with pip's non-zero status."""
     snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
-    if sys.platform == "win32":
-        snippet = snippet.replace("$", "\\$")
     result = subprocess.run(
         ["bash", "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     assert result.returncode != 0, "pip install of a nonexistent package should fail"
 
@@ -433,13 +434,12 @@ def test_pip_install_attempt_failure_propagates_real_exit_code():
 def test_pip_install_attempt_success_exits_zero():
     """When pip succeeds, the subshell should exit 0."""
     snippet = _pip_install_attempt("python3 -c 'pass'")
-    if sys.platform == "win32":
-        snippet = snippet.replace("$", "\\$")
     result = subprocess.run(
         ["bash", "-c", snippet],
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
     assert result.returncode == 0
 
@@ -447,13 +447,12 @@ def test_pip_install_attempt_success_exits_zero():
 def test_pip_install_attempt_surfaces_stderr_on_failure():
     """On failure, the last 5 lines of pip output should appear in stdout."""
     snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
-    if sys.platform == "win32":
-        snippet = snippet.replace("$", "\\$")
     result = subprocess.run(
         ["bash", "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     # pip's error message should be visible in the output (not swallowed)
     combined = result.stdout + result.stderr
@@ -471,10 +470,7 @@ def test_user_shell_path_bootstrap_falls_back_to_python_on_windows_bash():
     # A missing python3 OR a Microsoft Store App Execution Alias stub under
     # WindowsApps must shim python3 -> python so the venv interpreter is used.
     assert '_odys_py3="$(command -v python3 2>/dev/null || true)"' in script
-    assert (
-        'case "$_odys_py3" in ""|*[Ww]indows[Aa]pps*) python3() { python "$@"; } ;; esac'
-        in script
-    )
+    assert 'case "$_odys_py3" in ""|*[Ww]indows[Aa]pps*) python3() { python "$@"; } ;; esac' in script
     assert 'command -v python >/dev/null 2>&1 || python() { python3 "$@"; }' in script
 
 
@@ -487,13 +483,13 @@ def test_serve_preflight_failure_keeps_tmux_pane_visible():
     runner_lines = [
         'ODYSSEUS_PREFLIGHT_EXIT=""',
         'echo "ERROR: vLLM is not installed. Open Cookbook -> Dependencies and install vllm on this server, then launch again."',
-        'ODYSSEUS_PREFLIGHT_EXIT=127',
+        "ODYSSEUS_PREFLIGHT_EXIT=127",
     ]
     _append_serve_preflight_exit_lines(runner_lines, keep_shell_open=True)
     script = "\n".join(runner_lines)
 
     assert "ERROR: vLLM is not installed" in script
-    assert 'ODYSSEUS_PREFLIGHT_EXIT=127' in script
+    assert "ODYSSEUS_PREFLIGHT_EXIT=127" in script
     assert 'echo "=== Process exited with code $ODYSSEUS_PREFLIGHT_EXIT ==="' in script
     assert 'exec "${SHELL:-/bin/bash}"' in script
     assert "exit 127" not in script
@@ -536,12 +532,12 @@ def test_validate_serve_cmd_accepts_llama_advanced_controls():
         "MODEL_FILE=$(printf %s ${HOME}'/.cache/huggingface/hub/models--Qwen--Qwen3-GGUF/snapshots/model.gguf') "
         '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
         '|| { echo "ERROR: No GGUF found on this host."; exit 1; } && '
-        'GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 CUDA_VISIBLE_DEVICES=0,1 llama-server '
+        "GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 CUDA_VISIBLE_DEVICES=0,1 llama-server "
         '--model "$MODEL_FILE" --host 0.0.0.0 --port 8000 -ngl 99 -c 131072 '
-        '--n-cpu-moe 0 --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on '
-        '--fit off --split-mode tensor --tensor-split 50,50 --main-gpu 0 '
-        '--parallel 1 --batch-size 2048 --ubatch-size 512 --no-mmap --no-warmup '
-        '--spec-type draft-mtp --spec-draft-n-max 3 '
+        "--n-cpu-moe 0 --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on "
+        "--fit off --split-mode tensor --tensor-split 50,50 --main-gpu 0 "
+        "--parallel 1 --batch-size 2048 --ubatch-size 512 --no-mmap --no-warmup "
+        "--spec-type draft-mtp --spec-draft-n-max 3 "
         '|| python3 -m llama_cpp.server --model "$MODEL_FILE" --host 0.0.0.0 --port 8000'
     )
 
@@ -557,11 +553,21 @@ def test_validate_serve_cmd_accepts_windows_printf_format():
     assert _validate_serve_cmd(cmd) == cmd
 
 
-def test_normalize_llama_cpp_python_cache_types_for_stale_client_cmd():
+def test_validate_serve_cmd_accepts_llama_mmproj_printf_format():
     cmd = (
-        "python -m llama_cpp.server --model model.gguf --host 0.0.0.0 --port 8000 "
-        "--type_k q4_0 --type_v q4_0"
+        "CUDA_VISIBLE_DEVICES=0 llama-server --model "
+        "\"$(printf %s ${HOME}'/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-GGUF/snapshots/abc/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf')\" "
+        "--host 0.0.0.0 --port 8000 -ngl 99 -c 20000 "
+        "--cache-type-k q4_0 --cache-type-v q4_0 --mmproj "
+        "\"$(printf %s ${HOME}'/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-GGUF/snapshots/abc/mmproj-BF16.gguf')\" "
+        "--image-max-tokens 1024"
     )
+
+    assert _validate_serve_cmd(cmd) == cmd
+
+
+def test_normalize_llama_cpp_python_cache_types_for_stale_client_cmd():
+    cmd = "python -m llama_cpp.server --model model.gguf --host 0.0.0.0 --port 8000 --type_k q4_0 --type_v q4_0"
 
     assert _normalize_llama_cpp_python_cache_types(cmd).endswith("--type_k 2 --type_v 2")
 
@@ -581,8 +587,8 @@ def test_normalize_llama_cpp_python_cache_types_preserves_native_cache_flags():
 def test_model_serve_normalizes_llama_cpp_python_cache_types_after_validation():
     src = (Path(__file__).resolve().parents[1] / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
 
-    assert "req.cmd = _validate_serve_cmd(req.cmd) or \"\"" in src
-    assert "req.cmd = _normalize_llama_cpp_python_cache_types(req.cmd) or \"\"" in src
+    assert 'req.cmd = _validate_serve_cmd(req.cmd) or ""' in src
+    assert 'req.cmd = _normalize_llama_cpp_python_cache_types(req.cmd) or ""' in src
     assert src.index("_validate_serve_cmd(req.cmd)") < src.index("_normalize_llama_cpp_python_cache_types(req.cmd)")
 
 
@@ -592,32 +598,17 @@ def test_ollama_serve_defaults_to_loopback_bind():
 
 
 def test_ollama_serve_accepts_remote_reachable_default_bind():
-    assert (
-        _ollama_bind_from_cmd("ollama serve", default_host="0.0.0.0")
-        == ("0.0.0.0", "11434")
-    )
+    assert _ollama_bind_from_cmd("ollama serve", default_host="0.0.0.0") == ("0.0.0.0", "11434")
 
 
 def test_ollama_serve_preserves_explicit_bind_opt_in():
-    assert (
-        _ollama_bind_from_cmd("OLLAMA_HOST=0.0.0.0:12345 ollama serve")
-        == ("0.0.0.0", "12345")
-    )
-    assert (
-        _ollama_bind_from_cmd("OLLAMA_HOST=[::1]:11435 ollama serve")
-        == ("[::1]", "11435")
-    )
+    assert _ollama_bind_from_cmd("OLLAMA_HOST=0.0.0.0:12345 ollama serve") == ("0.0.0.0", "12345")
+    assert _ollama_bind_from_cmd("OLLAMA_HOST=[::1]:11435 ollama serve") == ("[::1]", "11435")
 
 
 def test_ollama_serve_rejects_unsafe_bind_values():
-    assert (
-        _ollama_bind_from_cmd("OLLAMA_HOST='$HOST:11434' ollama serve")
-        == ("127.0.0.1", "11434")
-    )
-    assert (
-        _ollama_bind_from_cmd("OLLAMA_HOST=127.0.0.1:99999 ollama serve")
-        == ("127.0.0.1", "11434")
-    )
+    assert _ollama_bind_from_cmd("OLLAMA_HOST='$HOST:11434' ollama serve") == ("127.0.0.1", "11434")
+    assert _ollama_bind_from_cmd("OLLAMA_HOST=127.0.0.1:99999 ollama serve") == ("127.0.0.1", "11434")
 
 
 def test_llama_cpp_linux_bootstrap_prefers_rocm_before_cuda():
@@ -628,10 +619,10 @@ def test_llama_cpp_linux_bootstrap_prefers_rocm_before_cuda():
     assert "mkdir -p ~/bin" in script
     assert script.index("mkdir -p ~/bin") < script.index("cd ~/llama.cpp")
     assert 'command -v hipconfig &>/dev/null || [ -d /opt/rocm ] || [ -n "$ROCM_PATH" ] || [ -n "$HIP_PATH" ]' in script
-    assert 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON' in script
-    assert 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON' in script
-    assert script.index('DGGML_HIP=ON') < script.index('DGGML_CUDA=ON')
-    assert 'ROCm/HIP detected — building llama-server with HIP support' in script
+    assert "cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON" in script
+    assert "cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON" in script
+    assert script.index("DGGML_HIP=ON") < script.index("DGGML_CUDA=ON")
+    assert "ROCm/HIP detected — building llama-server with HIP support" in script
 
 
 def test_llama_cpp_linux_bootstrap_checks_cudart_before_cuda_build():
@@ -640,17 +631,17 @@ def test_llama_cpp_linux_bootstrap_checks_cudart_before_cuda_build():
     _append_llama_cpp_linux_accel_build_lines(runner_lines)
     script = "\n".join(runner_lines)
 
-    assert '_odysseus_has_cudart' in script
+    assert "_odysseus_has_cudart" in script
     assert "grep -q 'libcudart\\.so'" in script
     # lib64 and lib variants for CUDA_HOME and /usr/local/cuda
-    assert '$_cuh/lib64/libcudart.so' in script
-    assert '$_cuh/lib/libcudart.so' in script
-    assert '/usr/local/cuda/lib64/libcudart.so' in script
-    assert '/usr/local/cuda/lib/libcudart.so' in script
+    assert "$_cuh/lib64/libcudart.so" in script
+    assert "$_cuh/lib/libcudart.so" in script
+    assert "/usr/local/cuda/lib64/libcudart.so" in script
+    assert "/usr/local/cuda/lib/libcudart.so" in script
     # pip-installed nvidia runtime wheel sibling path
-    assert 'cuda_runtime/lib/libcudart.so' in script
+    assert "cuda_runtime/lib/libcudart.so" in script
     # entire helper definition precedes the CUDA cmake invocation
-    assert script.index('_odysseus_has_cudart') < script.index('DGGML_CUDA=ON')
+    assert script.index("_odysseus_has_cudart") < script.index("DGGML_CUDA=ON")
 
 
 def test_llama_cpp_linux_bootstrap_cuda_cmake_present_when_cudart_found():
@@ -659,8 +650,8 @@ def test_llama_cpp_linux_bootstrap_cuda_cmake_present_when_cudart_found():
     _append_llama_cpp_linux_accel_build_lines(runner_lines)
     script = "\n".join(runner_lines)
 
-    assert 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON' in script
-    assert 'CUDA nvcc + cudart found' in script
+    assert "cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON" in script
+    assert "CUDA nvcc + cudart found" in script
 
 
 def test_llama_cpp_linux_bootstrap_nvcc_without_cudart_warns_and_falls_back():
@@ -669,14 +660,17 @@ def test_llama_cpp_linux_bootstrap_nvcc_without_cudart_warns_and_falls_back():
     _append_llama_cpp_linux_accel_build_lines(runner_lines)
     script = "\n".join(runner_lines)
 
-    assert 'WARNING: nvcc found but CUDA runtime (libcudart.so) is not visible — building llama-server for CPU only.' in script
-    assert 'GPU inference will not be available for this llama.cpp build.' in script
-    assert 'libcudart is installed' in script
+    assert (
+        "WARNING: nvcc found but CUDA runtime (libcudart.so) is not visible — building llama-server for CPU only."
+        in script
+    )
+    assert "GPU inference will not be available for this llama.cpp build." in script
+    assert "libcudart is installed" in script
     # The CPU-only cmake fallback must appear inside the nvcc branch (before the
     # outer else that handles no-GPU-toolchain). Verify it appears at least once
     # before the outer "no HIP/CUDA toolchain" warning.
-    cpu_cmake = 'cmake -B build -DCMAKE_BUILD_TYPE=Release &&'
-    no_toolchain_warn = 'WARNING: no HIP/CUDA/Vulkan toolchain found'
+    cpu_cmake = "cmake -B build -DCMAKE_BUILD_TYPE=Release &&"
+    no_toolchain_warn = "WARNING: no HIP/CUDA/Vulkan toolchain found"
     assert cpu_cmake in script
     assert script.index(cpu_cmake) < script.index(no_toolchain_warn)
 
@@ -693,8 +687,8 @@ def test_llama_cpp_linux_bootstrap_keeps_cpu_fallback_when_no_gpu_toolchain():
     _append_llama_cpp_linux_accel_build_lines(runner_lines)
     script = "\n".join(runner_lines)
 
-    assert 'WARNING: no HIP/CUDA/Vulkan toolchain found — building llama-server for CPU only.' in script
-    assert 'Install Vulkan (libvulkan-dev) / ROCm for AMD GPUs or CUDA tooling for NVIDIA' in script
+    assert "WARNING: no HIP/CUDA/Vulkan toolchain found — building llama-server for CPU only." in script
+    assert "Install Vulkan (libvulkan-dev) / ROCm for AMD GPUs or CUDA tooling for NVIDIA" in script
 
 
 def test_llama_cpp_rebuild_cmd_clears_cached_build_paths():
@@ -707,16 +701,18 @@ def test_llama_cpp_rebuild_cmd_clears_cached_build_paths():
     # Recreates ~/bin so a never-served host does not error on a missing dir.
     assert 'mkdir -p "$HOME/bin"' in cmd
     # Diagnosis-only on the destructive side: it must not install or fetch.
-    assert 'pip install' not in cmd
-    assert 'git clone' not in cmd
-    assert 'curl' not in cmd and 'wget' not in cmd
+    assert "pip install" not in cmd
+    assert "git clone" not in cmd
+    assert "curl" not in cmd and "wget" not in cmd
 
 
 def test_local_windows_download_pid_tracks_inner_bash_and_stop_kills_tree():
     routes_src = (Path(__file__).resolve().parents[1] / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
-    running_src = (Path(__file__).resolve().parents[1] / "static" / "js" / "cookbookRunning.js").read_text(encoding="utf-8")
+    running_src = (Path(__file__).resolve().parents[1] / "static" / "js" / "cookbookRunning.js").read_text(
+        encoding="utf-8"
+    )
 
-    assert 'printf \'%s\\\\n\' \\"$$\\" > {pp}' in routes_src
+    assert "printf '%s\\\\n' \\\"$$\\\" > {pp}" in routes_src
     assert "function Stop-Tree([int]$Id)" in running_src
     assert "('ParentProcessId = ' + $Id)" in running_src
     assert "Stop-Tree ([int]$p)" in running_src
@@ -725,6 +721,7 @@ def test_local_windows_download_pid_tracks_inner_bash_and_stop_kills_tree():
 def test_llama_cpp_rebuild_cmd_runs_clean_on_a_fresh_home(tmp_path):
     """The command should succeed even when neither path exists yet."""
     import os
+
     from core.platform_compat import find_bash, git_bash_path
 
     bash = find_bash() or "bash"
@@ -732,7 +729,11 @@ def test_llama_cpp_rebuild_cmd_runs_clean_on_a_fresh_home(tmp_path):
     env["HOME"] = git_bash_path(tmp_path)
     result = subprocess.run(
         [bash, "-c", _llama_cpp_rebuild_cmd()],
-        capture_output=True, text=True, env=env, timeout=10,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+        check=False,
     )
 
     assert result.returncode == 0, result.stderr
@@ -862,16 +863,17 @@ def test_cached_model_scan_uses_huggingface_cache_env(tmp_path):
 
 # ── #1219 / #1459: keep big dependency wheel builds off the home pip cache ──
 
+
 def test_pip_install_no_cache_injects_flag():
     from routes.cookbook_helpers import _pip_install_no_cache
-    assert _pip_install_no_cache("python -m pip install vllm") == \
-        "python -m pip install --no-cache-dir vllm"
-    assert _pip_install_no_cache("pip install -q huggingface-hub") == \
-        "pip install --no-cache-dir -q huggingface-hub"
+
+    assert _pip_install_no_cache("python -m pip install vllm") == "python -m pip install --no-cache-dir vllm"
+    assert _pip_install_no_cache("pip install -q huggingface-hub") == "pip install --no-cache-dir -q huggingface-hub"
 
 
 def test_pip_install_no_cache_is_idempotent_and_scoped():
     from routes.cookbook_helpers import _pip_install_no_cache
+
     # already present -> unchanged
     already = "pip install --no-cache-dir vllm"
     assert _pip_install_no_cache(already) == already

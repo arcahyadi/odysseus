@@ -20,9 +20,9 @@ import pytest
 from fastapi import Request
 from fastapi.datastructures import State
 
-from services.memory.skills import SkillsManager
-from services.memory.skill_format import slugify
 from routes.skills_routes import setup_skills_routes
+from services.memory.skill_format import slugify
+from services.memory.skills import SkillsManager
 
 
 def _write_skill_md(skills_root: Path, category: str, name: str, owner: str) -> Path:
@@ -77,8 +77,12 @@ def _md_named(name: str) -> str:
 
 
 def _request(user: str, body: dict | None = None) -> Request:
-    scope = {"type": "http", "app": type("App", (), {"state": State()})(),
-             "state": {"current_user": user}, "headers": []}
+    scope = {
+        "type": "http",
+        "app": type("App", (), {"state": State()})(),
+        "state": {"current_user": user},
+        "headers": [],
+    }
     if body is None:
         return Request(scope=scope)
 
@@ -89,8 +93,7 @@ def _request(user: str, body: dict | None = None) -> Request:
 
 
 def _handler(router, path: str, method: str):
-    return next(r.endpoint for r in router.routes
-               if r.path == path and method in r.methods)
+    return next(r.endpoint for r in router.routes if r.path == path and method in r.methods)
 
 
 @pytest.mark.asyncio

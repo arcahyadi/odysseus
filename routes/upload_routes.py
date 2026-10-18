@@ -1,16 +1,17 @@
 # routes/upload_routes.py
-import os
-import time
-import json
 import asyncio
+import json
+import logging
+import os
 import shutil
+import time
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Request, File, UploadFile, HTTPException
-from typing import List
-import logging
+
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+
+from core.database import GalleryImage, SessionLocal
 from core.middleware import require_admin
-from core.database import SessionLocal, GalleryImage
 from src.auth_helpers import effective_user
 from src.constants import GENERATED_IMAGES_DIR
 from src.upload_handler import count_recent_uploads
@@ -20,11 +21,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 UPLOAD_RESPONSE_HEADERS = {"X-Content-Type-Options": "nosniff"}
 
+
 def setup_upload_routes(upload_handler):
     """Setup upload routes with the provided handler"""
 
     def _upload_root() -> str:
         from src.constants import UPLOAD_DIR
+
         return os.path.realpath(getattr(upload_handler, "upload_dir", UPLOAD_DIR))
 
     def _path_inside_upload_dir(path: str) -> bool:
@@ -35,6 +38,7 @@ def setup_upload_routes(upload_handler):
 
     def _resolve_upload_path(file_id: str) -> str:
         from src.constants import UPLOAD_DIR
+
         upload_root = getattr(upload_handler, "upload_dir", UPLOAD_DIR)
         direct = os.path.join(upload_root, file_id)
         if os.path.lexists(direct):
@@ -99,17 +103,19 @@ def setup_upload_routes(upload_handler):
             shutil.copy2(source_path, dest_path)
 
             image_id = str(uuid.uuid4())
-            db.add(GalleryImage(
-                id=image_id,
-                filename=filename,
-                prompt=meta.get("name") or "Chat upload",
-                model="chat-upload",
-                owner=owner,
-                file_hash=file_hash,
-                width=meta.get("width"),
-                height=meta.get("height"),
-                file_size=meta.get("size"),
-            ))
+            db.add(
+                GalleryImage(
+                    id=image_id,
+                    filename=filename,
+                    prompt=meta.get("name") or "Chat upload",
+                    model="chat-upload",
+                    owner=owner,
+                    file_hash=file_hash,
+                    width=meta.get("width"),
+                    height=meta.get("height"),
+                    file_size=meta.get("size"),
+                )
+            )
             db.commit()
             return image_id
         except Exception as e:
@@ -118,13 +124,13 @@ def setup_upload_routes(upload_handler):
             return None
         finally:
             db.close()
-    
+
     @router.post("")
-    async def api_upload(request: Request, files: List[UploadFile] = File(...)):
+    async def api_upload(request: Request, files: list[UploadFile] = File(...)):
         """Upload files with enhanced security and organization."""
         if not files:
             raise HTTPException(400, "No files uploaded")
-            
+
         client_ip = request.client.host if request.client else "unknown"
         out = []
 
@@ -134,16 +140,13 @@ def setup_upload_routes(upload_handler):
         # uploads and tripped the limit (issue #1346: "attach more than one file
         # → the model doesn't even see them"). save_upload still enforces the
         # per-minute sliding-window rate limit per file.
-        recent_uploads = count_recent_uploads(
-            upload_handler.upload_rate_log.get(client_ip, []), time.time()
-        )
+        recent_uploads = count_recent_uploads(upload_handler.upload_rate_log.get(client_ip, []), time.time())
 
         if recent_uploads >= upload_handler.max_concurrent_uploads:
             raise HTTPException(
-                status_code=429,
-                detail=f"Maximum concurrent uploads ({upload_handler.max_concurrent_uploads}) exceeded"
+                status_code=429, detail=f"Maximum concurrent uploads ({upload_handler.max_concurrent_uploads}) exceeded"
             )
-        
+
         for u in files:
             try:
                 owner = effective_user(request)
@@ -158,7 +161,7 @@ def setup_upload_routes(upload_handler):
                     "uploaded_at": meta["uploaded_at"],
                     "width": meta.get("width"),
                     "height": meta.get("height"),
-                    "is_duplicate": meta.get("is_duplicate", False)
+                    "is_duplicate": meta.get("is_duplicate", False),
                 }
                 if gallery_id:
                     item["gallery_id"] = gallery_id
@@ -168,12 +171,12 @@ def setup_upload_routes(upload_handler):
             except Exception as e:
                 logger.error(f"Failed to process upload {u.filename}: {str(e)}")
                 continue
-        
+
         if not out:
             raise HTTPException(500, "All file uploads failed")
-            
+
         return {"files": out}
-    
+
     @router.post("/cleanup")
     async def manual_cleanup(request: Request):
         """Manually trigger cleanup of old uploads."""
@@ -199,6 +202,7 @@ def setup_upload_routes(upload_handler):
         if not upload_handler.validate_upload_id(file_id):
             raise HTTPException(400, "Invalid file ID")
         import mimetypes as _mt
+
         # Look up original filename and owner from uploads.json
         original_name = file_id
         info = None
@@ -221,15 +225,16 @@ def setup_upload_routes(upload_handler):
         path = _resolve_upload_path(file_id)
         mime = (info or {}).get("mime") or _mt.guess_type(path)[0] or "application/octet-stream"
         from fastapi.responses import FileResponse
+
         # Downscaled thumbnail for image previews — generated once and cached.
         if thumb and mime.startswith("image/"):
             try:
                 from PIL import Image, ImageOps
+
                 thumb_dir = os.path.join(_upload_root(), ".thumbs")
                 os.makedirs(thumb_dir, exist_ok=True)
                 thumb_path = os.path.join(thumb_dir, file_id + ".jpg")
-                if (not os.path.exists(thumb_path)
-                        or os.path.getmtime(thumb_path) < os.path.getmtime(path)):
+                if not os.path.exists(thumb_path) or os.path.getmtime(thumb_path) < os.path.getmtime(path):
                     im = Image.open(path)
                     # iPhone / camera JPEGs encode rotation in EXIF rather than
                     # the pixel data. Browsers honour that on the original via
@@ -286,6 +291,7 @@ def setup_upload_routes(upload_handler):
                 raise HTTPException(404, "File not found")
         path = _resolve_upload_path(file_id)
         import mimetypes as _mt
+
         mime = (info or {}).get("mime") or _mt.guess_type(path)[0] or ""
         if not mime.startswith("image/"):
             raise HTTPException(400, "Not an image")
@@ -297,6 +303,7 @@ def setup_upload_routes(upload_handler):
             except Exception as e:
                 logger.warning(f"Vision cache read failed for {file_id}: {e}")
         from src.document_processor import analyze_image_with_vl
+
         try:
             text = analyze_image_with_vl(path, owner=current_user) or ""
         except Exception as e:
@@ -341,5 +348,5 @@ def setup_upload_routes(upload_handler):
         while True:
             await asyncio.sleep(3600)
             upload_handler.cleanup_rate_limits()
-    
+
     return router, periodic_rate_limit_cleanup

@@ -574,6 +574,9 @@ if (window.visualViewport) {
   });
 }
 </script>
+<!-- HTMX + Alpine.js — progressive enhancement, loaded after DOM -->
+<script defer src="/static/lib/htmx.min.js"></script>
+<script defer src="/static/lib/alpine.min.js"></script>
 <script type="module" nonce="{{CSP_NONCE}}">
 // Drive the login page's bg effect off the user's saved theme. The
 // sync bootstrap above already set the body class + effect CSS vars so

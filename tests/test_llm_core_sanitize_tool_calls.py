@@ -16,14 +16,23 @@ uncaught.
 
 This test drives the real producer (_append_tool_results) into the sanitizer.
 """
+
 import sys
 from unittest.mock import MagicMock
 
 # Mock heavy dependencies before importing (mirrors tests/test_agent_loop.py).
 for mod in [
-    'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
-    'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
-    'src.database', 'src.agent_tools', 'core.models', 'core.database',
+    "sqlalchemy",
+    "sqlalchemy.orm",
+    "sqlalchemy.ext",
+    "sqlalchemy.ext.declarative",
+    "sqlalchemy.ext.hybrid",
+    "sqlalchemy.sql",
+    "sqlalchemy.sql.expression",
+    "src.database",
+    "src.agent_tools",
+    "core.models",
+    "core.database",
 ]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
@@ -33,13 +42,11 @@ from src.llm_core import _sanitize_llm_messages
 
 
 def test_sanitize_keeps_no_prose_assistant_tool_call_message():
-    native = [{"id": "call_1", "name": "web_fetch",
-               "arguments": '{"url": "https://example.com"}'}]
+    native = [{"id": "call_1", "name": "web_fetch", "arguments": '{"url": "https://example.com"}'}]
     messages = []
     # Model emitted only a tool call, no prose -> _append_tool_results sets the
     # assistant message's content to None (cb13d09).
-    _append_tool_results(messages, "", native, [{}], ["page text"],
-                         used_native=True, round_num=1)
+    _append_tool_results(messages, "", native, [{}], ["page text"], used_native=True, round_num=1)
     assert messages[0]["role"] == "assistant"
     assert messages[0]["content"] is None  # producer contract (cb13d09)
 
@@ -49,8 +56,7 @@ def test_sanitize_keeps_no_prose_assistant_tool_call_message():
     # The assistant tool-call message must survive sanitization, otherwise the
     # following tool result is dangling and the provider call breaks.
     assert "assistant" in roles, (
-        "sanitize dropped the no-prose assistant tool-call message; the tool "
-        "result is left dangling"
+        "sanitize dropped the no-prose assistant tool-call message; the tool result is left dangling"
     )
     assistant = next(m for m in out if m["role"] == "assistant")
     assert assistant.get("tool_calls"), "assistant tool_calls were lost"
@@ -91,8 +97,11 @@ def test_sanitize_merges_search_results_and_user_query():
     # preface (system policy + search results) + session messages (latest user query)
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "UNTRUSTED SOURCE DATA\nSource: web search results\n<<<UNTRUSTED_SOURCE_DATA>>>\nHere are some web search results about python.\n<<<END_UNTRUSTED_SOURCE_DATA>>>"},
-        {"role": "user", "content": "What is the latest version of python?"}
+        {
+            "role": "user",
+            "content": "UNTRUSTED SOURCE DATA\nSource: web search results\n<<<UNTRUSTED_SOURCE_DATA>>>\nHere are some web search results about python.\n<<<END_UNTRUSTED_SOURCE_DATA>>>",
+        },
+        {"role": "user", "content": "What is the latest version of python?"},
     ]
 
     out = _sanitize_llm_messages(messages)
@@ -116,7 +125,7 @@ def test_build_anthropic_payload_alternating_roles():
     messages_with_consecutive = [
         {"role": "system", "content": "system prompt"},
         {"role": "user", "content": "web search results"},
-        {"role": "user", "content": "user query"}
+        {"role": "user", "content": "user query"},
     ]
 
     # Sanitize and merge
@@ -125,12 +134,7 @@ def test_build_anthropic_payload_alternating_roles():
     # Verify that the sanitized output merges the consecutive user messages
     assert len(sanitized) == 2
 
-    payload = _build_anthropic_payload(
-        model="claude-3-5-sonnet",
-        messages=sanitized,
-        temperature=0.7,
-        max_tokens=1024
-    )
+    payload = _build_anthropic_payload(model="claude-3-5-sonnet", messages=sanitized, temperature=0.7, max_tokens=1024)
 
     # Anthropic payload has 'messages' list which contains roles alternation.
     # Assert that the final message payload alternates correctly (no consecutive same role).
@@ -138,6 +142,3 @@ def test_build_anthropic_payload_alternating_roles():
     assert len(anth_messages) == 1
     assert anth_messages[0]["role"] == "user"
     assert anth_messages[0]["content"] == "web search results\n\nuser query"
-
-
-

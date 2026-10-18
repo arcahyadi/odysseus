@@ -6,7 +6,7 @@ These are simple datacontainers. All persistence is handled by SessionManager.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from .session_manager import SessionManager
@@ -34,11 +34,12 @@ get_session_manager = get_session_manager_instance
 @dataclass
 class ChatMessage:
     """A single chat message."""
+
     role: str
     content: str
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dict for API responses."""
         result = {"role": self.role, "content": self.content}
         if self.metadata:
@@ -69,9 +70,9 @@ class Session:
     model: str
     rag: bool = False
     archived: bool = False
-    headers: Optional[Dict[str, str]] = None
-    history: List[ChatMessage] = None
-    owner: Optional[str] = None
+    headers: dict[str, str] | None = None
+    history: list[ChatMessage] = None
+    owner: str | None = None
     is_important: bool = False
     message_count: int = 0
 
@@ -83,12 +84,12 @@ class Session:
             self.history = []
 
     @property
-    def _history(self) -> List[ChatMessage]:
+    def _history(self) -> list[ChatMessage]:
         """Compatibility alias for callers that still reference ``_history``."""
         return self.history
 
     @_history.setter
-    def _history(self, messages: List[ChatMessage]):
+    def _history(self, messages: list[ChatMessage]):
         self.history = messages
 
     def add_message(self, message: ChatMessage):
@@ -106,7 +107,7 @@ class Session:
         if _SESSION_MANAGER_INSTANCE:
             _SESSION_MANAGER_INSTANCE._persist_message(self.id, message)
 
-    def get_context_messages(self) -> List[Dict[str, Any]]:
+    def get_context_messages(self) -> list[dict[str, Any]]:
         """Get messages in format for LLM API.
 
         Slash-command / setup replies are persisted to history so they render
@@ -116,11 +117,7 @@ class Session:
         the model. Display/history-load paths use the raw ``history`` and are
         unaffected.
         """
-        return [
-            msg.to_dict()
-            for msg in self.history
-            if (msg.metadata or {}).get("source") != "slash"
-        ]
+        return [msg.to_dict() for msg in self.history if (msg.metadata or {}).get("source") != "slash"]
 
     def get(self, key: str, default=None):
         """Dict-like access for compatibility."""

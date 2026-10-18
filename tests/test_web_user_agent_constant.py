@@ -4,6 +4,7 @@ Guards the dedup: web_fetch / web_search outbound UAs go through
 WEB_FETCH_USER_AGENT, so a stale or bare Mozilla string cannot be re-inlined in
 the search sources.
 """
+
 from pathlib import Path
 
 _SEARCH = Path(__file__).resolve().parent.parent / "services" / "search"

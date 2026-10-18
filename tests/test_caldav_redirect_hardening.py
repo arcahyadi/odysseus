@@ -88,8 +88,8 @@ def test_sync_and_writeback_construct_clients_through_the_helper():
     """Guard against a raw DAVClient (redirects enabled) creeping back in.
     Every DAVClient on the sync/write-back paths must go through
     ``_build_dav_client`` so the redirect protection can't be bypassed."""
-    sync_src = (caldav_sync.__file__)
-    wb_src = (caldav_writeback.__file__)
+    sync_src = caldav_sync.__file__
+    wb_src = caldav_writeback.__file__
     with open(sync_src, encoding="utf-8") as f:
         sync_text = f.read()
     with open(wb_src, encoding="utf-8") as f:

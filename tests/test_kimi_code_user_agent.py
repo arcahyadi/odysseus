@@ -1,9 +1,9 @@
 """Kimi Code User-Agent fallback list and 403 detection."""
+
 from src.llm_core import (
-    KIMI_CODE_USER_AGENTS,
     KIMI_CODE_USER_AGENT,
+    KIMI_CODE_USER_AGENTS,
     _is_kimi_code_access_denied,
-    _is_kimi_code_url,
     _kimi_code_base_key,
     _kimi_code_ua_cache,
     _kimi_code_ua_candidates,
@@ -14,7 +14,7 @@ from src.llm_core import (
 
 class TestKimiCodeUserAgents:
     def test_default_is_first_fallback(self):
-        assert KIMI_CODE_USER_AGENT == KIMI_CODE_USER_AGENTS[0]
+        assert KIMI_CODE_USER_AGENTS[0] == KIMI_CODE_USER_AGENT
 
     def test_multiple_fallbacks_configured(self):
         assert len(KIMI_CODE_USER_AGENTS) >= 3

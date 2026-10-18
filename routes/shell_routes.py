@@ -9,13 +9,14 @@ import re
 import shlex
 import shutil
 import subprocess
-import uuid
 import tempfile
+import uuid
 from collections import namedtuple
 from pathlib import Path
-from typing import Dict, Any
-from core.platform_compat import IS_APPLE_SILICON, which_tool
+from typing import Any
+
 from core.middleware import INTERNAL_TOOL_USER
+from core.platform_compat import IS_APPLE_SILICON, which_tool
 from src.optional_deps import prepare_optional_dependency_import
 
 # POSIX-only: `pty`/`fcntl` transitively import `termios`, which does NOT exist
@@ -33,7 +34,7 @@ except ImportError as exc:
 else:
     _PTY_IMPORT_ERROR = None
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -116,7 +117,7 @@ def _running_in_container(dockerenv_path="/.dockerenv", cgroup_path="/proc/1/cgr
     if os.path.exists(dockerenv_path):
         return True
     try:
-        with open(cgroup_path, "r", encoding="utf-8") as fh:
+        with open(cgroup_path, encoding="utf-8") as fh:
             contents = fh.read()
     except OSError:
         return False
@@ -180,10 +181,7 @@ def _package_installed_from_probe(name: str, probe: dict) -> bool:
             and (dists.get("torch") or modules.get("torch", {}).get("real_module"))
         )
     if name == "hf_transfer":
-        return bool(
-            dists.get("hf-transfer")
-            or modules.get("hf_transfer", {}).get("real_module")
-        )
+        return bool(dists.get("hf-transfer") or modules.get("hf_transfer", {}).get("real_module"))
     return bool(dists.get(name) or modules.get(name, {}).get("real_module"))
 
 
@@ -208,14 +206,8 @@ def _package_status_note(name: str, probe: dict) -> str:
         if binaries.get("llama-server"):
             parts.append(f"native llama-server: {binaries['llama-server']}")
         if dists.get("llama-cpp-python"):
-            parts.append(
-                f"python package: llama-cpp-python {dists['llama-cpp-python']}"
-            )
-        return (
-            "; ".join(parts)
-            if parts
-            else "No native llama-server or llama-cpp-python server package found."
-        )
+            parts.append(f"python package: llama-cpp-python {dists['llama-cpp-python']}")
+        return "; ".join(parts) if parts else "No native llama-server or llama-cpp-python server package found."
     if name == "diffusers":
         if _package_installed_from_probe(name, probe):
             return f"diffusers {dists.get('diffusers', 'available')} with torch {dists.get('torch', 'available')}"
@@ -225,9 +217,7 @@ def _package_status_note(name: str, probe: dict) -> str:
     return ""
 
 
-def _package_pip_update_status(
-    pkg: dict, probe: dict | None = None
-) -> PackageUpdateStatus:
+def _package_pip_update_status(pkg: dict, probe: dict | None = None) -> PackageUpdateStatus:
     """Return whether the Dependencies UI should offer a generic pip update.
 
     "Installed" means Cookbook can use the dependency. It does not always mean
@@ -242,21 +232,11 @@ def _package_pip_update_status(
         )
 
     if pkg.get("kind") == "system" or not pkg.get("pip"):
-        return PackageUpdateStatus(
-            False, "Update this system dependency outside Odysseus."
-        )
+        return PackageUpdateStatus(False, "Update this system dependency outside Odysseus.")
 
     name = pkg.get("name")
-    binaries = (
-        probe.get("binaries")
-        if isinstance(probe, dict) and isinstance(probe.get("binaries"), dict)
-        else {}
-    )
-    dists = (
-        probe.get("dists")
-        if isinstance(probe, dict) and isinstance(probe.get("dists"), dict)
-        else {}
-    )
+    binaries = probe.get("binaries") if isinstance(probe, dict) and isinstance(probe.get("binaries"), dict) else {}
+    dists = probe.get("dists") if isinstance(probe, dict) and isinstance(probe.get("dists"), dict) else {}
 
     if name == "llama_cpp" and binaries.get("llama-server"):
         return PackageUpdateStatus(
@@ -269,9 +249,7 @@ def _package_pip_update_status(
             "Using a vLLM CLI on PATH without Python package metadata; update it outside Odysseus.",
         )
 
-    return PackageUpdateStatus(
-        True, "Update uses pip in the selected Python environment."
-    )
+    return PackageUpdateStatus(True, "Update uses pip in the selected Python environment.")
 
 
 def _prepend_user_install_bins_to_path() -> None:
@@ -290,9 +268,7 @@ def _prepend_user_install_bins_to_path() -> None:
         candidates = []
     candidates.append(os.path.expanduser("~/.local/bin"))
 
-    parts = (
-        os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
-    )
+    parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
     changed = False
     for path in reversed([p for p in candidates if p]):
         if path not in parts:
@@ -402,9 +378,7 @@ PTY_UNSUPPORTED_ERROR = "pty_unsupported"
 
 class ShellExecRequest(BaseModel):
     command: str
-    timeout: int | None = (
-        None  # optional override; 0 = no timeout (run until client disconnects)
-    )
+    timeout: int | None = None  # optional override; 0 = no timeout (run until client disconnects)
     use_pty: bool = False  # use pseudo-TTY (for progress bars)
     use_tmux: bool = False  # run in tmux session (survives browser disconnect)
 
@@ -431,7 +405,7 @@ async def _create_shell(command: str, **kwargs):
     return await asyncio.create_subprocess_shell(command, **kwargs)
 
 
-async def _exec_shell(command: str, timeout: int = EXEC_TIMEOUT) -> Dict[str, Any]:
+async def _exec_shell(command: str, timeout: int = EXEC_TIMEOUT) -> dict[str, Any]:
     """Run a shell command and return stdout/stderr/exit_code."""
     proc = None
     try:
@@ -445,7 +419,7 @@ async def _exec_shell(command: str, timeout: int = EXEC_TIMEOUT) -> Dict[str, An
         stdout = stdout_b.decode(errors="replace")[:MAX_OUTPUT]
         stderr = stderr_b.decode(errors="replace")[:MAX_OUTPUT]
         return {"stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
-    except asyncio.TimeoutError:
+    except TimeoutError:
         if proc:
             try:
                 proc.kill()
@@ -519,7 +493,7 @@ async def _generate_pty(cmd: str, timeout: int, request: Request):
                     loop.run_in_executor(None, _pty_read, master_fd),
                     timeout=2.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except OSError:
                 break
@@ -628,9 +602,7 @@ async def _generate_tmux(cmd: str, request: Request):
         encoding="utf-8",
     )
     script_path.chmod(0o755)
-    logger.info(
-        "tmux wrapper script created: session=%s path=%s", session_id, script_path
-    )
+    logger.info("tmux wrapper script created: session=%s path=%s", session_id, script_path)
 
     tmux_cmd = f"tmux new-session -d -s {session_id} {shlex.quote(str(script_path))}"
 
@@ -662,9 +634,7 @@ async def _generate_tmux(cmd: str, request: Request):
         # Read new lines from log
         try:
             if log_path.exists():
-                lines = log_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
                 new_lines = lines[lines_sent:]
                 for line in new_lines:
                     if line.startswith(":::EXIT_CODE:::"):
@@ -692,9 +662,7 @@ async def _generate_tmux(cmd: str, request: Request):
             # Session ended — do one final read
             await asyncio.sleep(0.5)
             if log_path.exists():
-                lines = log_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
                 for line in lines[lines_sent:]:
                     if line.startswith(":::EXIT_CODE:::"):
                         try:
@@ -736,8 +704,7 @@ async def _generate_win_detached(cmd: str, request: Request):
     if bash:
         script_path = TMUX_LOG_DIR / f"{session_id}.sh"
         script_path.write_text(
-            f"{cmd} > {shlex.quote(git_bash_path(log_path))} 2>&1\n"
-            f"echo $? > {shlex.quote(git_bash_path(exit_path))}\n",
+            f"{cmd} > {shlex.quote(git_bash_path(log_path))} 2>&1\necho $? > {shlex.quote(git_bash_path(exit_path))}\n",
             encoding="utf-8",
         )
         argv = [bash, str(script_path)]
@@ -745,9 +712,7 @@ async def _generate_win_detached(cmd: str, request: Request):
         script_path = TMUX_LOG_DIR / f"{session_id}.cmd"
         # cmd.exe wrapper: run, redirect all output to the log, record exit code.
         script_path.write_text(
-            "@echo off\r\n"
-            f'call {cmd} > "{log_path}" 2>&1\r\n'
-            f'echo %ERRORLEVEL%> "{exit_path}"\r\n',
+            f'@echo off\r\ncall {cmd} > "{log_path}" 2>&1\r\necho %ERRORLEVEL%> "{exit_path}"\r\n',
             encoding="utf-8",
         )
         argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
@@ -775,9 +740,7 @@ async def _generate_win_detached(cmd: str, request: Request):
             return
         try:
             if log_path.exists():
-                lines = log_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
                 for line in lines[lines_sent:]:
                     yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
                 lines_sent = len(lines)
@@ -789,18 +752,11 @@ async def _generate_win_detached(cmd: str, request: Request):
             await asyncio.sleep(0.3)
             try:
                 if log_path.exists():
-                    lines = log_path.read_text(
-                        encoding="utf-8", errors="replace"
-                    ).splitlines()
+                    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
                     for line in lines[lines_sent:]:
                         yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
                     lines_sent = len(lines)
-                exit_code = int(
-                    (
-                        exit_path.read_text(encoding="utf-8", errors="replace").strip()
-                        or "0"
-                    )
-                )
+                exit_code = int(exit_path.read_text(encoding="utf-8", errors="replace").strip() or "0")
             except Exception:
                 exit_code = 0
             break
@@ -818,7 +774,7 @@ def setup_shell_routes() -> APIRouter:
     router = APIRouter(tags=["shell"])
 
     @router.post("/api/shell/exec")
-    async def shell_exec(request: Request, req: ShellExecRequest) -> Dict[str, Any]:
+    async def shell_exec(request: Request, req: ShellExecRequest) -> dict[str, Any]:
         """Execute a shell command and return output. Admin only."""
         _require_admin(request)
         cmd = req.command.strip()
@@ -826,9 +782,7 @@ def setup_shell_routes() -> APIRouter:
             return {"stdout": "", "stderr": "No command provided", "exit_code": 1}
 
         logger.info("User shell exec requested: length=%d", len(cmd))
-        result = await _exec_shell(
-            cmd, timeout=req.timeout if req.timeout is not None else EXEC_TIMEOUT
-        )
+        result = await _exec_shell(cmd, timeout=req.timeout if req.timeout is not None else EXEC_TIMEOUT)
         return result
 
     @router.post("/api/shell/stream")
@@ -858,11 +812,7 @@ def setup_shell_routes() -> APIRouter:
         if use_tmux:
             # tmux is POSIX-only; Windows uses a detached-process + logfile tail
             # that preserves the "survives disconnect" behaviour.
-            gen = (
-                _generate_win_detached(cmd, request)
-                if IS_WINDOWS
-                else _generate_tmux(cmd, request)
-            )
+            gen = _generate_win_detached(cmd, request) if IS_WINDOWS else _generate_tmux(cmd, request)
             return StreamingResponse(gen, media_type="text/event-stream")
 
         if use_pty and not IS_WINDOWS:
@@ -925,14 +875,14 @@ def setup_shell_routes() -> APIRouter:
                     if deadline:
                         remaining = deadline - loop.time()
                         if remaining <= 0:
-                            raise asyncio.TimeoutError()
+                            raise TimeoutError()
                         wait = min(remaining, 2.0)
                     else:
                         wait = 2.0
 
                     try:
                         name, text = await asyncio.wait_for(q.get(), timeout=wait)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         if await request.is_disconnected():
                             if proc:
                                 proc.kill()
@@ -947,7 +897,7 @@ def setup_shell_routes() -> APIRouter:
                 await proc.wait()
                 yield f"data: {json.dumps({'exit_code': proc.returncode})}\n\n"
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if proc:
                     try:
                         proc.kill()
@@ -994,26 +944,89 @@ def setup_shell_routes() -> APIRouter:
     # are added only when the detected backend needs them.
     _PKG_NAMES = {
         # canonical-name → {os_id: [actual_pkg_names_on_this_os]}
-        "cmake":           {"debian": ["cmake"], "arch": ["cmake"], "fedora": ["cmake"], "alpine": ["cmake"], "suse": ["cmake"], "macos": ["cmake"]},
-        "build-essential": {"debian": ["build-essential"], "arch": ["base-devel"], "fedora": ["gcc", "gcc-c++", "make"], "alpine": ["build-base"], "suse": ["gcc-c++", "make"], "macos": []},
-        "g++":             {"debian": ["g++"], "arch": ["gcc"], "fedora": ["gcc-c++"], "alpine": ["g++"], "suse": ["gcc-c++"], "macos": []},
-        "gcc":             {"debian": ["gcc"], "arch": ["gcc"], "fedora": ["gcc"], "alpine": ["gcc"], "suse": ["gcc"], "macos": []},
-        "make":            {"debian": ["make"], "arch": ["make"], "fedora": ["make"], "alpine": ["make"], "suse": ["make"], "macos": []},
-        "git":             {"debian": ["git"], "arch": ["git"], "fedora": ["git"], "alpine": ["git"], "suse": ["git"], "macos": ["git"]},
-        "tmux":            {"debian": ["tmux"], "arch": ["tmux"], "fedora": ["tmux"], "alpine": ["tmux"], "suse": ["tmux"], "macos": ["tmux"]},
+        "cmake": {
+            "debian": ["cmake"],
+            "arch": ["cmake"],
+            "fedora": ["cmake"],
+            "alpine": ["cmake"],
+            "suse": ["cmake"],
+            "macos": ["cmake"],
+        },
+        "build-essential": {
+            "debian": ["build-essential"],
+            "arch": ["base-devel"],
+            "fedora": ["gcc", "gcc-c++", "make"],
+            "alpine": ["build-base"],
+            "suse": ["gcc-c++", "make"],
+            "macos": [],
+        },
+        "g++": {
+            "debian": ["g++"],
+            "arch": ["gcc"],
+            "fedora": ["gcc-c++"],
+            "alpine": ["g++"],
+            "suse": ["gcc-c++"],
+            "macos": [],
+        },
+        "gcc": {"debian": ["gcc"], "arch": ["gcc"], "fedora": ["gcc"], "alpine": ["gcc"], "suse": ["gcc"], "macos": []},
+        "make": {
+            "debian": ["make"],
+            "arch": ["make"],
+            "fedora": ["make"],
+            "alpine": ["make"],
+            "suse": ["make"],
+            "macos": [],
+        },
+        "git": {
+            "debian": ["git"],
+            "arch": ["git"],
+            "fedora": ["git"],
+            "alpine": ["git"],
+            "suse": ["git"],
+            "macos": ["git"],
+        },
+        "tmux": {
+            "debian": ["tmux"],
+            "arch": ["tmux"],
+            "fedora": ["tmux"],
+            "alpine": ["tmux"],
+            "suse": ["tmux"],
+            "macos": ["tmux"],
+        },
     }
     _BACKEND_EXTRAS = {
-        "cuda":   {"debian": ["nvidia-cuda-toolkit"], "arch": ["cuda"], "fedora": ["cuda-toolkit"], "alpine": [], "suse": ["cuda"], "macos": []},
-        "rocm":   {"debian": ["rocm-dev"], "arch": ["rocm-hip-sdk"], "fedora": ["rocm-devel"], "alpine": [], "suse": ["rocm-dev"], "macos": []},
-        "vulkan": {"debian": ["libvulkan-dev", "vulkan-tools"], "arch": ["vulkan-headers", "vulkan-tools"], "fedora": ["vulkan-headers", "vulkan-tools"], "alpine": ["vulkan-loader-dev", "vulkan-tools"], "suse": ["vulkan-devel", "vulkan-tools"], "macos": []},
+        "cuda": {
+            "debian": ["nvidia-cuda-toolkit"],
+            "arch": ["cuda"],
+            "fedora": ["cuda-toolkit"],
+            "alpine": [],
+            "suse": ["cuda"],
+            "macos": [],
+        },
+        "rocm": {
+            "debian": ["rocm-dev"],
+            "arch": ["rocm-hip-sdk"],
+            "fedora": ["rocm-devel"],
+            "alpine": [],
+            "suse": ["rocm-dev"],
+            "macos": [],
+        },
+        "vulkan": {
+            "debian": ["libvulkan-dev", "vulkan-tools"],
+            "arch": ["vulkan-headers", "vulkan-tools"],
+            "fedora": ["vulkan-headers", "vulkan-tools"],
+            "alpine": ["vulkan-loader-dev", "vulkan-tools"],
+            "suse": ["vulkan-devel", "vulkan-tools"],
+            "macos": [],
+        },
     }
     _PKG_MGR = {
         "debian": "sudo apt install -y {pkgs}",
-        "arch":   "sudo pacman -S --needed {pkgs}",
+        "arch": "sudo pacman -S --needed {pkgs}",
         "fedora": "sudo dnf install -y {pkgs}",
         "alpine": "sudo apk add {pkgs}",
-        "suse":   "sudo zypper install -n {pkgs}",
-        "macos":  "brew install {pkgs}",
+        "suse": "sudo zypper install -n {pkgs}",
+        "macos": "brew install {pkgs}",
     }
 
     def _install_cmd_for_target(os_id: str, backend: str, missing: list[str]) -> str:
@@ -1025,13 +1038,15 @@ def setup_shell_routes() -> APIRouter:
         for m in missing:
             for p in _PKG_NAMES.get(m, {}).get(os_id, []):
                 if p not in seen:
-                    pkgs.append(p); seen.add(p)
+                    pkgs.append(p)
+                    seen.add(p)
         # Add backend-specific extras only when the build would actually
         # consume them (a CUDA toolkit isn't useful on a Vulkan box).
         backend = (backend or "").lower()
         for p in _BACKEND_EXTRAS.get(backend, {}).get(os_id, []):
             if p not in seen:
-                pkgs.append(p); seen.add(p)
+                pkgs.append(p)
+                seen.add(p)
         if not pkgs:
             return ""
         return _PKG_MGR[os_id].format(pkgs=" ".join(pkgs))
@@ -1054,8 +1069,8 @@ def setup_shell_routes() -> APIRouter:
         _require_admin(request)
         _reject_cross_site(request)
         import importlib.metadata as importlib_metadata
-        import shlex
         import json as _json
+        import shlex
         import site
         import sys
 
@@ -1193,16 +1208,8 @@ def setup_shell_routes() -> APIRouter:
         remote_status: dict = {}
         remote_details: dict = {}
         remote_probe_error = ""
-        remote_names = [
-            p["name"]
-            for p in packages
-            if p.get("target") == "remote" and p.get("kind") != "system"
-        ]
-        remote_system_names = [
-            p["name"]
-            for p in packages
-            if p.get("target") == "remote" and p.get("kind") == "system"
-        ]
+        remote_names = [p["name"] for p in packages if p.get("target") == "remote" and p.get("kind") != "system"]
+        remote_system_names = [p["name"] for p in packages if p.get("target") == "remote" and p.get("kind") == "system"]
         if host and remote_names:
             try:
                 py = _package_probe_script(remote_names)
@@ -1277,9 +1284,7 @@ def setup_shell_routes() -> APIRouter:
                 checks = []
                 for name in all_system_names:
                     qn = shlex.quote(name)
-                    checks.append(
-                        f"if command -v {qn} >/dev/null 2>&1; then echo {qn}=1; else echo {qn}=0; fi"
-                    )
+                    checks.append(f"if command -v {qn} >/dev/null 2>&1; then echo {qn}=1; else echo {qn}=0; fi")
                 checks.append("echo '---OSREL---'; cat /etc/os-release 2>/dev/null || true")
                 inner = " ; ".join(checks)
                 argv = _ssh_base_argv(host, ssh_port) + [inner]
@@ -1293,7 +1298,8 @@ def setup_shell_routes() -> APIRouter:
                 _section, _osrel_lines = "probe", []
                 for line in txt.splitlines():
                     if line.strip() == "---OSREL---":
-                        _section = "osrel"; continue
+                        _section = "osrel"
+                        continue
                     if _section == "osrel":
                         _osrel_lines.append(line)
                         continue
@@ -1348,9 +1354,7 @@ def setup_shell_routes() -> APIRouter:
                     pkg["installed"] = shutil.which(pkg["name"]) is not None
             elif pkg["name"] == "llama_cpp" and shutil.which("llama-server"):
                 pkg["installed"] = True
-                pkg["status_note"] = (
-                    f"native llama-server: {shutil.which('llama-server')}"
-                )
+                pkg["status_note"] = f"native llama-server: {shutil.which('llama-server')}"
                 probe = {
                     "binaries": {"llama-server": shutil.which("llama-server")},
                     "dists": {},
@@ -1377,11 +1381,16 @@ def setup_shell_routes() -> APIRouter:
                     pkg["installed"] = False
                 except importlib_metadata.PackageNotFoundError:
                     pkg["installed"] = False
-                except Exception:
+                except (Exception, SystemExit):
                     # Installed but crashes on import — e.g. a CUDA build of
                     # llama-cpp-python raising FileNotFoundError when the CUDA
-                    # toolkit dir is absent. One broken optional package must not
-                    # 500 the entire packages panel; report it as not usable.
+                    # toolkit dir is absent, or rembg calling sys.exit(1) when no
+                    # onnxruntime backend can be loaded. SystemExit is a
+                    # BaseException, not Exception, so without catching it here a
+                    # single sys.exit-on-import package escapes and takes down the
+                    # whole packages panel / worker (the panel hangs forever). One
+                    # broken optional package must not 500 — or hang — the entire
+                    # panel; report it as not usable.
                     pkg["installed"] = False
 
             # llama_cpp partial-state probe: when the package is installed
@@ -1417,14 +1426,16 @@ def setup_shell_routes() -> APIRouter:
                         probe = (
                             f'{_vp}python3 -c "import llama_cpp; import sys; '
                             'sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" '
-                            '&& echo llama_cpp_gpu=1 || echo llama_cpp_gpu=0; '
-                            'command -v nvidia-smi >/dev/null 2>&1 '
+                            "&& echo llama_cpp_gpu=1 || echo llama_cpp_gpu=0; "
+                            "command -v nvidia-smi >/dev/null 2>&1 "
                             '&& nvidia-smi -L 2>/dev/null | grep -q "GPU " '
-                            '&& echo nvidia=1 || echo nvidia=0'
+                            "&& echo nvidia=1 || echo nvidia=0"
                         )
                         argv = _ssh_base_argv(host, ssh_port) + [probe]
                         proc = await asyncio.create_subprocess_exec(
-                            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                            *argv,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
                         )
                         out, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
                         txt = out.decode("utf-8", errors="replace")
@@ -1437,13 +1448,16 @@ def setup_shell_routes() -> APIRouter:
                 else:
                     try:
                         import llama_cpp as _lcp  # type: ignore
+
                         _gpu_capable = bool(_lcp.llama_supports_gpu_offload())
                     except Exception:
                         _gpu_capable = False
                     _has_nvidia_target = shutil.which("nvidia-smi") is not None
                 if (not _gpu_capable) and _has_nvidia_target:
                     pkg["partial"] = True
-                    pkg["partial_reason"] = "Installed but CPU-only wheel — GPU detected on this target. Upgrade to a CUDA wheel for ~10× faster inference."
+                    pkg["partial_reason"] = (
+                        "Installed but CPU-only wheel — GPU detected on this target. Upgrade to a CUDA wheel for ~10× faster inference."
+                    )
                     pkg["partial_action"] = "reinstall_llama_cpp_cuda"
             # Attach per-package system_prereqs status. We probed each
             # prereq name above; surface "Missing build deps: …" ONLY
@@ -1477,7 +1491,11 @@ def setup_shell_routes() -> APIRouter:
                         pkg["install_cmd_os"] = target_os_id
                         pkg["install_cmd_backend"] = (backend or "").lower()
                     else:
-                        _hint = "Missing build deps: " + ", ".join(_missing) + ". Install via apt: cmake build-essential git / pacman: cmake base-devel git / dnf: cmake gcc-c++ make git / brew: cmake git."
+                        _hint = (
+                            "Missing build deps: "
+                            + ", ".join(_missing)
+                            + ". Install via apt: cmake build-essential git / pacman: cmake base-devel git / dnf: cmake gcc-c++ make git / brew: cmake git."
+                        )
                     _existing_note = pkg.get("status_note") or ""
                     pkg["status_note"] = (_existing_note + " — " + _hint) if _existing_note else _hint
                     pkg["build_deps_missing"] = _missing
@@ -1562,21 +1580,33 @@ def setup_shell_routes() -> APIRouter:
         ALLOWED = {"cmake", "build-essential", "g++", "gcc", "git", "tmux", "make"}
         pkgs = [str(p).strip() for p in raw if str(p).strip() in ALLOWED]
         if not pkgs:
-            return {"ok": False, "error": "no installable packages requested (allowlist: " + ", ".join(sorted(ALLOWED)) + ")"}
+            return {
+                "ok": False,
+                "error": "no installable packages requested (allowlist: " + ", ".join(sorted(ALLOWED)) + ")",
+            }
+
         # Re-map to the right package name per OS. apt/dpkg use the names
         # as-is; pacman has base-devel for build-essential, etc.
-        def _apt(names): return list(names)
+        def _apt(names):
+            return list(names)
+
         def _pacman(names):
             return ["base-devel" if n == "build-essential" else n for n in names]
+
         def _dnf(names):
             out = []
             for n in names:
-                if n == "build-essential": out += ["gcc", "gcc-c++", "make"]
-                elif n == "g++": out += ["gcc-c++"]
-                else: out.append(n)
+                if n == "build-essential":
+                    out += ["gcc", "gcc-c++", "make"]
+                elif n == "g++":
+                    out += ["gcc-c++"]
+                else:
+                    out.append(n)
             return out
+
         def _brew(names):
             return [n for n in names if n not in ("build-essential", "g++", "gcc", "make")]
+
         # Build a single shell snippet that detects the package manager and
         # runs the right install. Non-interactive sudo (-n) only — if sudo
         # asks for a password the script reports it instead of hanging.
@@ -1589,18 +1619,20 @@ def setup_shell_routes() -> APIRouter:
         # left stderr empty and the frontend toast fell through to a
         # bare "HTTP 200" instead of surfacing the real reason.
         script = (
-            'set -e; '
-            'if ! sudo -n true 2>/dev/null; then '
-            '  echo "ERROR: passwordless sudo unavailable on this target. Run once: sudo apt install -y ' + " ".join(pkgs) + ' (or your distro equivalent: pacman -S, dnf install, brew install). After that, Cookbook can install the rest." >&2; exit 2; fi; '
-            'if command -v apt-get >/dev/null 2>&1; then '
-            f'  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {apt_pkgs}; '
-            'elif command -v pacman >/dev/null 2>&1; then '
-            f'  sudo -n pacman -Sy --needed --noconfirm {pac_pkgs}; '
-            'elif command -v dnf >/dev/null 2>&1; then '
-            f'  sudo -n dnf install -y {dnf_pkgs}; '
-            'elif command -v brew >/dev/null 2>&1; then '
-            f'  brew install {brew_pkgs}; '
-            'else '
+            "set -e; "
+            "if ! sudo -n true 2>/dev/null; then "
+            '  echo "ERROR: passwordless sudo unavailable on this target. Run once: sudo apt install -y '
+            + " ".join(pkgs)
+            + ' (or your distro equivalent: pacman -S, dnf install, brew install). After that, Cookbook can install the rest." >&2; exit 2; fi; '
+            "if command -v apt-get >/dev/null 2>&1; then "
+            f"  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {apt_pkgs}; "
+            "elif command -v pacman >/dev/null 2>&1; then "
+            f"  sudo -n pacman -Sy --needed --noconfirm {pac_pkgs}; "
+            "elif command -v dnf >/dev/null 2>&1; then "
+            f"  sudo -n dnf install -y {dnf_pkgs}; "
+            "elif command -v brew >/dev/null 2>&1; then "
+            f"  brew install {brew_pkgs}; "
+            "else "
             '  echo "ERROR: no supported package manager (apt/pacman/dnf/brew) on this target." >&2; exit 3; fi'
         )
         try:
@@ -1615,9 +1647,9 @@ def setup_shell_routes() -> APIRouter:
                 *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             out, err = await asyncio.wait_for(proc.communicate(), timeout=180)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"ok": False, "error": "Install timed out after 180s"}
-        ok = (proc.returncode == 0)
+        ok = proc.returncode == 0
         # Combine stderr + (last lines of stdout) into a single error
         # blob when ok=False — some package managers print useful failure
         # context to stdout, and a script that exits via `echo ...; exit N`
@@ -1660,11 +1692,7 @@ def setup_shell_routes() -> APIRouter:
         update_source = bool(body.get("update_source"))
         cmd = _llama_cpp_rebuild_cmd(update_source=update_source)
         try:
-            argv = (
-                (_ssh_base_argv(host, ssh_port) + [cmd])
-                if host
-                else ["bash", "-lc", cmd]
-            )
+            argv = (_ssh_base_argv(host, ssh_port) + [cmd]) if host else ["bash", "-lc", cmd]
         except ValueError as e:
             raise HTTPException(400, str(e))
         try:
@@ -1672,7 +1700,7 @@ def setup_shell_routes() -> APIRouter:
                 *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"ok": False, "error": "Rebuild-engine command timed out."}
         if proc.returncode == 0:
             return {"ok": True, "output": out.decode("utf-8", errors="replace")[-400:]}

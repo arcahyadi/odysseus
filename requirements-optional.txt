@@ -34,3 +34,33 @@ PyMuPDF
 # [all]/Azure/audio extras (cloud + heavy). Pinned to a release >30 days old per
 # the dependency-age discussion in issue #485.
 markitdown[docx,pptx,xlsx,xls]==0.1.6
+
+# LLM quality evaluation (faithfulness, relevancy, hallucination, bias, toxicity).
+# Install for pytest-native AI output testing. CI job: tests/quality/.
+# Kill-switch: ODYSSEUS_DEEPEVAL=off skips when no LLM is available.
+deepeval
+
+# Advanced PDF extraction with layout awareness, table extraction,
+# multi-column reading order, and heading detection. Docling (MIT, IBM)
+# replaces basic pypdf text extraction with Markdown output that preserves
+# structure. Gated by the ODYSSEUS_DOCLING kill-switch (off by default);
+# without it the core uses pypdf as before.
+docling
+
+# Prefect — scheduled data pipelines (RAG reindex, memory cleanup, model updates,
+# backups). OFF by default; set ODYSSEUS_PREFECT=on to use Prefect instead of
+# the built-in task_scheduler. Requires Prefect server (`docker compose --profile
+# automation up -d`) or Prefect Cloud.
+prefect
+
+# RAG quality evaluation — context precision/recall, faithfulness, answer
+# relevancy.  Only needed for tests/quality/test_rag_quality.py and manual
+# benchmarking.  Gated behind the ODYSSEUS_RAGAS=on kill-switch.
+ragas
+
+# Tree-sitter — incremental syntax parsing for agent code tools.
+# Complements CBM (graph-level) with syntax-level precision: AST, symbols,
+# function signatures, call sites, structural diffs. Multi-language.
+# Gated behind the ODYSSEUS_TREESITTER=on kill-switch.
+tree-sitter
+tree-sitter-python

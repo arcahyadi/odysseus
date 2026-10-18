@@ -18,8 +18,7 @@ def _dr():
 
 def test_example_echo_returns_only_the_real_array():
     text = (
-        'Example: ["query one", "query two", "query three"]\n'
-        '["impact of AI on jobs", "AI automation statistics 2026"]'
+        'Example: ["query one", "query two", "query three"]\n["impact of AI on jobs", "AI automation statistics 2026"]'
     )
     assert _dr()._parse_json_array(text) == [
         "impact of AI on jobs",

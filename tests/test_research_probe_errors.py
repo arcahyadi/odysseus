@@ -4,6 +4,7 @@ Deep Research probes the selected model before starting a long run. When the
 upstream returned a concrete model/API error, the probe used to collapse it into
 "Cannot reach model", hiding the real issue from the UI.
 """
+
 import pytest
 from fastapi import HTTPException
 
@@ -18,10 +19,7 @@ def test_probe_failure_preserves_upstream_model_errors():
 
     msg = _format_probe_failure("o3-mini", exc)
 
-    assert msg == (
-        "Model 'o3-mini' probe failed: "
-        "OpenAI returned HTTP 400: Unsupported parameter: temperature"
-    )
+    assert msg == ("Model 'o3-mini' probe failed: OpenAI returned HTTP 400: Unsupported parameter: temperature")
 
 
 def test_probe_failure_keeps_api_key_guidance():

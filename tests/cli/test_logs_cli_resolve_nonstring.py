@@ -4,6 +4,7 @@
 (e.g. None) raised TypeError once any *.log file existed. Non-strings now
 return None (no match).
 """
+
 from tests.helpers.cli_loader import load_script
 
 

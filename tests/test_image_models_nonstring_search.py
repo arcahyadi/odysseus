@@ -1,4 +1,4 @@
-from services.hwfit.image_models import rank_image_models, IMAGE_MODEL_REGISTRY
+from services.hwfit.image_models import IMAGE_MODEL_REGISTRY, rank_image_models
 
 SYS = {"gpu_vram_gb": 0, "has_gpu": False}
 

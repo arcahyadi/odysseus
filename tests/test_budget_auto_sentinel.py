@@ -11,9 +11,9 @@
 import json
 from unittest.mock import patch
 
-import src.settings as settings
 import src.model_context as mc
-from src.context_budget import compute_input_token_budget, DEFAULT_BUDGET, budget_is_explicit
+from src import settings
+from src.context_budget import DEFAULT_BUDGET, budget_is_explicit, compute_input_token_budget
 
 
 def test_default_value_is_the_auto_sentinel():
@@ -35,7 +35,7 @@ def test_saving_an_unrelated_setting_does_not_re_cap_the_budget(tmp_path, monkey
     # Simulate a real settings save: a handler loads the merged dict (defaults +
     # saved) and persists it after the user changes one *unrelated* setting.
     merged = settings.load_settings()
-    merged["search_result_count"] = 9                  # unrelated user change
+    merged["search_result_count"] = 9  # unrelated user change
     settings.save_settings(merged)
     settings._settings_cache = None
 
@@ -64,8 +64,8 @@ def test_auto_stays_conservative_on_unknown_window():
 
 
 def test_nondefault_value_is_an_explicit_cap():
-    assert compute_input_token_budget(20000, 131072, explicit=True) == 20000      # honoured
-    assert compute_input_token_budget(200000, 32000, explicit=True) == 32000      # clamped to window
+    assert compute_input_token_budget(20000, 131072, explicit=True) == 20000  # honoured
+    assert compute_input_token_budget(200000, 32000, explicit=True) == 32000  # clamped to window
 
 
 def test_get_context_length_known_surfaces_endpoint_proven_vs_fallback():

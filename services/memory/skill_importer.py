@@ -1,11 +1,10 @@
 """Import SKILL.md bundles from public GitHub (or skills.sh → GitHub) URLs."""
+
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -18,13 +17,30 @@ MAX_FILES = 64
 MAX_TOTAL_BYTES = 2_000_000
 MAX_FILE_BYTES = 400_000
 ALLOWED_SUFFIXES = (
-    ".md", ".txt", ".json", ".yaml", ".yml", ".py", ".sh", ".toml",
-    ".js", ".ts", ".css", ".html", ".xml", ".csv",
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".py",
+    ".sh",
+    ".toml",
+    ".js",
+    ".ts",
+    ".css",
+    ".html",
+    ".xml",
+    ".csv",
 )
 TEXT_NAMES = {"skill.md", "license", "license.md", "readme.md"}
-_GITHUB_HOSTS = frozenset({
-    "github.com", "www.github.com", "api.github.com", "raw.githubusercontent.com",
-})
+_GITHUB_HOSTS = frozenset(
+    {
+        "github.com",
+        "www.github.com",
+        "api.github.com",
+        "raw.githubusercontent.com",
+    }
+)
 
 
 def _github_host(url: str) -> str:
@@ -34,9 +50,7 @@ def _github_host(url: str) -> str:
 def _assert_github_url(url: str, *, context: str = "URL") -> None:
     host = _github_host(url)
     if host not in _GITHUB_HOSTS:
-        raise SkillImportError(
-            f"{context} must stay on GitHub (got {host or 'unknown host'})"
-        )
+        raise SkillImportError(f"{context} must stay on GitHub (got {host or 'unknown host'})")
 
 
 @dataclass
@@ -154,8 +168,7 @@ def _github_response_error(response: httpx.Response) -> SkillImportError:
     low = detail.lower()
     if status == 403 and "rate limit" in low:
         return SkillImportError(
-            "GitHub API rate limit exceeded — try again in a bit"
-            + (f" ({detail})" if detail else "")
+            "GitHub API rate limit exceeded — try again in a bit" + (f" ({detail})" if detail else "")
         )
     if status == 404:
         return SkillImportError("path not found on GitHub")
@@ -186,7 +199,7 @@ def _fetch_text(url: str) -> str:
         raise SkillImportError(f"non-text file: {url}") from e
 
 
-def _list_github_dir(src: ResolvedSource, rel_dir: str, out: Dict[str, str], *, depth: int = 0) -> None:
+def _list_github_dir(src: ResolvedSource, rel_dir: str, out: dict[str, str], *, depth: int = 0) -> None:
     if depth > 4 or len(out) >= MAX_FILES:
         return
     url = _api_contents_url(src, rel_dir)
@@ -227,10 +240,10 @@ def _list_github_dir(src: ResolvedSource, rel_dir: str, out: Dict[str, str], *, 
         out[rel] = text
 
 
-def fetch_skill_bundle(url: str) -> Tuple[Dict[str, str], ResolvedSource]:
+def fetch_skill_bundle(url: str) -> tuple[dict[str, str], ResolvedSource]:
     """Download SKILL.md and sibling text assets. Returns relative_path → content."""
     src = parse_skill_source(url)
-    files: Dict[str, str] = {}
+    files: dict[str, str] = {}
 
     path = _safe_relpath(src.path) if src.path else ""
     if path.lower().endswith("skill.md"):
@@ -266,13 +279,11 @@ def fetch_skill_bundle(url: str) -> Tuple[Dict[str, str], ResolvedSource]:
         try:
             files["SKILL.md"] = _fetch_text(_raw_url(src, "SKILL.md"))
         except Exception as e:
-            raise SkillImportError(
-                "No SKILL.md found — link to a skill folder or SKILL.md on GitHub"
-            ) from e
+            raise SkillImportError("No SKILL.md found — link to a skill folder or SKILL.md on GitHub") from e
     return files, src
 
 
-def pick_skill_md(files: Dict[str, str]) -> Tuple[str, str]:
+def pick_skill_md(files: dict[str, str]) -> tuple[str, str]:
     for rel, content in files.items():
         if rel.lower().endswith("skill.md"):
             return rel, content

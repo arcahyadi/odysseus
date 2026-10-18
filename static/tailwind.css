@@ -1,0 +1,90 @@
+/* Tailwind CSS v4 — Odysseus Design System
+ * Build: npx tailwindcss -i static/tailwind.css -o static/css/style.tailwind.min.css --minify
+ */
+
+@import "tailwindcss";
+
+/* ─── Theme — Odysseus dark theme tokens ─── */
+@theme {
+  --color-odysseus-bg: var(--bg);
+  --color-odysseus-fg: var(--fg);
+  --color-odysseus-panel: var(--panel);
+  --color-odysseus-border: var(--border);
+  --color-odysseus-red: var(--red);
+  --color-odysseus-green: var(--green);
+  --color-odysseus-warn: var(--warn);
+
+  --color-syntax-bg: var(--hl-bg);
+  --color-syntax-fg: var(--hl-fg);
+  --color-syntax-keyword: var(--hl-keyword);
+  --color-syntax-string: var(--hl-string);
+  --color-syntax-comment: var(--hl-comment);
+  --color-syntax-function: var(--hl-function);
+  --color-syntax-number: var(--hl-number);
+
+  --color-semantic-error: var(--color-error);
+  --color-semantic-success: var(--color-success);
+  --color-semantic-warning: var(--color-warning);
+  --color-semantic-danger: var(--color-danger);
+  --color-semantic-muted: var(--color-muted);
+  --color-semantic-accent: var(--color-accent);
+
+  --font-mono: 'Fira Code', monospace;
+  --font-dyslexic: 'OpenDyslexic', sans-serif;
+}
+
+/* ─── Base layer ─── */
+@layer base {
+  html {
+    scrollbar-color: var(--red) var(--panel);
+    scrollbar-width: thin;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: 'Fira Code', monospace;
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+  }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: var(--panel); }
+  ::-webkit-scrollbar-thumb { background: var(--red); border-radius: 4px; }
+}
+
+/* ─── Component layer ─── */
+@layer components {
+  .btn {
+    @apply rounded px-3 py-1.5 text-sm transition-colors duration-150;
+    background: var(--color-accent);
+    color: white;
+  }
+  .btn:hover { opacity: 0.9; }
+
+  .modal {
+    @apply fixed inset-0 z-50 flex items-center justify-center;
+  }
+
+  .modal-content {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    @apply rounded-lg shadow-2xl max-h-[85dvh] overflow-y-auto;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    @apply rounded-lg p-4;
+  }
+
+  .input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    font-family: 'Fira Code', monospace;
+    @apply rounded px-3 py-2 text-sm outline-none transition-colors duration-150;
+  }
+  .input:focus { border-color: var(--color-accent); }
+}

@@ -1,9 +1,6 @@
 """Cookbook HF token persistence and lookup."""
 
 import json
-import os
-
-import pytest
 
 from routes.cookbook_helpers import load_stored_hf_token
 from src.secret_storage import encrypt

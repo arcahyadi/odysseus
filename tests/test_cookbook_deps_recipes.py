@@ -8,11 +8,10 @@ docker variant in the Dependencies panel returned
 The other llama.cpp reference in routes/cookbook_routes.py already uses
 ggml-org; this guards the JS recipe so the two stay aligned.
 """
+
 from pathlib import Path
 
-RECIPES_JS = (
-    Path(__file__).resolve().parent.parent / "static" / "js" / "cookbook-deps-recipes.js"
-)
+RECIPES_JS = Path(__file__).resolve().parent.parent / "static" / "js" / "cookbook-deps-recipes.js"
 
 
 def test_llama_cpp_docker_recipe_uses_ggml_org_namespace():
@@ -22,6 +21,5 @@ def test_llama_cpp_docker_recipe_uses_ggml_org_namespace():
         "Expected the llama.cpp docker recipe to pull from the ggml-org namespace."
     )
     assert "ghcr.io/ggerganov/llama.cpp" not in source, (
-        "The ggerganov GHCR namespace no longer publishes llama.cpp images. "
-        "Use ghcr.io/ggml-org/llama.cpp:server-cuda."
+        "The ggerganov GHCR namespace no longer publishes llama.cpp images. Use ghcr.io/ggml-org/llama.cpp:server-cuda."
     )

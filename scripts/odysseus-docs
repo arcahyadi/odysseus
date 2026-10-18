@@ -16,17 +16,22 @@ Reads `data/app.db` directly.
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, sys
-from pathlib import Path
+import argparse
+import os
+import sys
 
 try:
-    from core.database import SessionLocal, Document, DocumentVersion
+    from core.database import Document, DocumentVersion, SessionLocal
+
     quiet_logs()
 except ModuleNotFoundError as e:
     sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
@@ -37,7 +42,7 @@ def _text_len(value) -> int:
     return len(value) if isinstance(value, str) else 0
 
 
-def _serialize(d: "Document", include_content: bool = False) -> dict:
+def _serialize(d: Document, include_content: bool = False) -> dict:
     out = {
         "id": d.id,
         "title": d.title,
@@ -86,17 +91,24 @@ def cmd_versions(args):
         d = db.get(Document, args.id)
         if not d:
             fail(f"no document with id {args.id!r}")
-        rows = db.query(DocumentVersion).filter(
-            DocumentVersion.document_id == args.id
-        ).order_by(DocumentVersion.version_number.desc()).all()
-        emit([
-            {
-                "version_number": v.version_number,
-                "summary": v.summary or "",
-                "source": v.source or "ai",
-                "content_length": _text_len(v.content),
-            } for v in rows
-        ], args)
+        rows = (
+            db.query(DocumentVersion)
+            .filter(DocumentVersion.document_id == args.id)
+            .order_by(DocumentVersion.version_number.desc())
+            .all()
+        )
+        emit(
+            [
+                {
+                    "version_number": v.version_number,
+                    "summary": v.summary or "",
+                    "source": v.source or "ai",
+                    "content_length": _text_len(v.content),
+                }
+                for v in rows
+            ],
+            args,
+        )
     finally:
         db.close()
 
@@ -113,10 +125,14 @@ def cmd_export(args):
             content = d.current_content or ""
             version = d.version_count or 1
         else:
-            v = db.query(DocumentVersion).filter(
-                DocumentVersion.document_id == args.id,
-                DocumentVersion.version_number == args.version,
-            ).first()
+            v = (
+                db.query(DocumentVersion)
+                .filter(
+                    DocumentVersion.document_id == args.id,
+                    DocumentVersion.version_number == args.version,
+                )
+                .first()
+            )
             if not v:
                 fail(f"no version {args.version} on doc {args.id!r}")
             content = v.content or ""
@@ -126,12 +142,15 @@ def cmd_export(args):
             if not content.endswith("\n"):
                 sys.stdout.write("\n")
             return
-        emit({
-            "id": d.id,
-            "title": d.title,
-            "version": version,
-            "content": content,
-        }, args)
+        emit(
+            {
+                "id": d.id,
+                "title": d.title,
+                "version": version,
+                "content": content,
+            },
+            args,
+        )
     finally:
         db.close()
 
@@ -140,9 +159,13 @@ def cmd_search(args):
     db = SessionLocal()
     try:
         like = f"%{args.query}%"
-        rows = db.query(Document).filter(
-            (Document.title.ilike(like)) | (Document.current_content.ilike(like))
-        ).order_by(Document.updated_at.desc()).limit(args.limit).all()
+        rows = (
+            db.query(Document)
+            .filter((Document.title.ilike(like)) | (Document.current_content.ilike(like)))
+            .order_by(Document.updated_at.desc())
+            .limit(args.limit)
+            .all()
+        )
         emit([_serialize(d) for d in rows], args)
     finally:
         db.close()

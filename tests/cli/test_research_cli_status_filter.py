@@ -48,11 +48,17 @@ def test_status_complete_matches_writer_done_records(tmp_path, monkeypatch):
     """`--status complete` must return the records the writer marked `done`.
     Without the alias this filter is silently empty on any real corpus."""
     cli = _load_cli()
-    ids = _run_list(cli, tmp_path, monkeypatch, status="complete", records={
-        "rp-done":      {"query": "finished one", "status": "done",      "started_at": "2026-01-02"},
-        "rp-running":   {"query": "still running", "status": "running",  "started_at": "2026-01-01"},
-        "rp-cancelled": {"query": "user stopped",  "status": "cancelled","started_at": "2025-12-31"},
-    })
+    ids = _run_list(
+        cli,
+        tmp_path,
+        monkeypatch,
+        status="complete",
+        records={
+            "rp-done": {"query": "finished one", "status": "done", "started_at": "2026-01-02"},
+            "rp-running": {"query": "still running", "status": "running", "started_at": "2026-01-01"},
+            "rp-cancelled": {"query": "user stopped", "status": "cancelled", "started_at": "2025-12-31"},
+        },
+    )
     assert ids == ["rp-done"], (
         "--status complete should alias to the writer's stored 'done' value; "
         f"got {ids}. The alias map in `_STATUS_CLI_TO_STORED` was bypassed."
@@ -64,28 +70,46 @@ def test_status_running_still_matches_verbatim(tmp_path, monkeypatch):
     A blanket map that turned every CLI choice into a stored variant would
     re-introduce the empty-result bug on the running/cancelled/error paths."""
     cli = _load_cli()
-    ids = _run_list(cli, tmp_path, monkeypatch, status="running", records={
-        "rp-done":    {"query": "finished",     "status": "done"},
-        "rp-running": {"query": "still running", "status": "running"},
-    })
+    ids = _run_list(
+        cli,
+        tmp_path,
+        monkeypatch,
+        status="running",
+        records={
+            "rp-done": {"query": "finished", "status": "done"},
+            "rp-running": {"query": "still running", "status": "running"},
+        },
+    )
     assert ids == ["rp-running"], f"--status running must match verbatim; got {ids}"
 
 
 def test_status_cancelled_still_matches_verbatim(tmp_path, monkeypatch):
     cli = _load_cli()
-    ids = _run_list(cli, tmp_path, monkeypatch, status="cancelled", records={
-        "rp-done":      {"query": "finished",  "status": "done"},
-        "rp-cancelled": {"query": "user stop", "status": "cancelled"},
-    })
+    ids = _run_list(
+        cli,
+        tmp_path,
+        monkeypatch,
+        status="cancelled",
+        records={
+            "rp-done": {"query": "finished", "status": "done"},
+            "rp-cancelled": {"query": "user stop", "status": "cancelled"},
+        },
+    )
     assert ids == ["rp-cancelled"]
 
 
 def test_status_error_still_matches_verbatim(tmp_path, monkeypatch):
     cli = _load_cli()
-    ids = _run_list(cli, tmp_path, monkeypatch, status="error", records={
-        "rp-done":  {"query": "finished", "status": "done"},
-        "rp-error": {"query": "crashed",  "status": "error"},
-    })
+    ids = _run_list(
+        cli,
+        tmp_path,
+        monkeypatch,
+        status="error",
+        records={
+            "rp-done": {"query": "finished", "status": "done"},
+            "rp-error": {"query": "crashed", "status": "error"},
+        },
+    )
     assert ids == ["rp-error"]
 
 
@@ -95,12 +119,15 @@ def test_status_filter_tolerates_missing_or_non_string_status(tmp_path, monkeypa
     existing `_load_path` already drops non-dict blobs; this guards the
     next layer."""
     cli = _load_cli()
-    ids = _run_list(cli, tmp_path, monkeypatch, status="complete", records={
-        "rp-good":  {"query": "ok",  "status": "done"},
-        "rp-blank": {"query": "no status field"},
-        "rp-typed": {"query": "non-string", "status": 42},
-    })
-    assert ids == ["rp-good"], (
-        "--status complete should only match the writer's 'done' string; "
-        f"got {ids}."
+    ids = _run_list(
+        cli,
+        tmp_path,
+        monkeypatch,
+        status="complete",
+        records={
+            "rp-good": {"query": "ok", "status": "done"},
+            "rp-blank": {"query": "no status field"},
+            "rp-typed": {"query": "non-string", "status": 42},
+        },
     )
+    assert ids == ["rp-good"], f"--status complete should only match the writer's 'done' string; got {ids}."

@@ -13,9 +13,7 @@ class TestResearchSessionIdValidation(unittest.TestCase):
         self.assertIsNotNone(_SESSION_ID_RE.fullmatch("rp-abc123def456"))
 
     def test_accepts_standard_uuid(self):
-        self.assertIsNotNone(
-            _SESSION_ID_RE.fullmatch("550e8400-e29b-41d4-a716-446655440000")
-        )
+        self.assertIsNotNone(_SESSION_ID_RE.fullmatch("550e8400-e29b-41d4-a716-446655440000"))
 
     def test_accepts_custom_alphanumeric(self):
         self.assertIsNotNone(_SESSION_ID_RE.fullmatch("custom-id-123"))

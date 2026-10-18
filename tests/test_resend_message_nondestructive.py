@@ -7,7 +7,6 @@ must opt into truncating/replacing from the selected message.
 
 from pathlib import Path
 
-
 _REPO = Path(__file__).resolve().parent.parent
 _CHAT_JS = _REPO / "static" / "js" / "chat.js"
 _CHAT_RENDERER_JS = _REPO / "static" / "js" / "chatRenderer.js"

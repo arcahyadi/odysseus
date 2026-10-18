@@ -12,7 +12,7 @@ from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -56,8 +56,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     try:
         import httpx
-        from src.settings import load_settings, get_setting
+
         from src.ai_interaction import _resolve_model
+        from src.settings import get_setting, load_settings
 
         if not get_setting("image_gen_enabled", True):
             return [TextContent(type="text", text="Error: Image generation is disabled by the administrator.")]
@@ -89,9 +90,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         valid_gpt_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}
         valid_dalle3_sizes = {"1024x1024", "1024x1792", "1792x1024"}
-        if is_gpt_image and size not in valid_gpt_sizes:
-            size = "1024x1024"
-        elif not is_gpt_image and size not in valid_dalle3_sizes:
+        if is_gpt_image and size not in valid_gpt_sizes or not is_gpt_image and size not in valid_dalle3_sizes:
             size = "1024x1024"
 
         payload = {"model": model_id, "prompt": prompt, "n": 1, "size": size}
@@ -105,10 +104,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 error_text = resp.text[:500]
                 try:
                     err_json = resp.json()
-                    error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
+                    error_text = (
+                        err_json.get("error", {}).get("message", error_text)
+                        if isinstance(err_json.get("error"), dict)
+                        else str(err_json.get("error", error_text))
+                    )
                 except Exception:
                     pass
-                return [TextContent(type="text", text=f"Error: Image generation failed ({resp.status_code}): {error_text}")]
+                return [
+                    TextContent(type="text", text=f"Error: Image generation failed ({resp.status_code}): {error_text}")
+                ]
 
             data = resp.json()
             images = data.get("data", [])
@@ -132,16 +137,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
                 # Save to gallery
                 try:
-                    from src.database import SessionLocal, GalleryImage
+                    from src.database import GalleryImage, SessionLocal
+
                     db = SessionLocal()
-                    db.add(GalleryImage(
-                        id=str(uuid.uuid4()),
-                        filename=filename,
-                        prompt=prompt,
-                        model=model_id,
-                        size=size,
-                        quality=payload.get("quality", "medium"),
-                    ))
+                    db.add(
+                        GalleryImage(
+                            id=str(uuid.uuid4()),
+                            filename=filename,
+                            prompt=prompt,
+                            model=model_id,
+                            size=size,
+                            quality=payload.get("quality", "medium"),
+                        )
+                    )
                     db.commit()
                     db.close()
                 except Exception:
@@ -154,11 +162,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             # "Direct link:" rather than an "image_url:" label — small models copied the
             # label token ("image_url") into the link href, producing a broken link.
-            result = (
-                f"Generated image for: {prompt[:100]}\n"
-                f"Direct link: {image_url}\n"
-                f"model: {model_id}\nsize: {size}"
-            )
+            result = f"Generated image for: {prompt[:100]}\nDirect link: {image_url}\nmodel: {model_id}\nsize: {size}"
             return [TextContent(type="text", text=result)]
 
     except httpx.TimeoutException:

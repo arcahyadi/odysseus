@@ -4,6 +4,7 @@
 `if redact_env and env_obj:` then called `env_obj.items()` -> AttributeError.
 Guard with isinstance(dict).
 """
+
 from types import SimpleNamespace
 
 from tests.helpers.cli_loader import load_script
@@ -11,8 +12,18 @@ from tests.helpers.db_stubs import make_core_db_stub
 
 
 def _srv(env):
-    return SimpleNamespace(id="s1", name="n", transport="stdio", command="c", args="[]",
-                           env=env, url=None, is_enabled=1, oauth_config=None, created_at=None)
+    return SimpleNamespace(
+        id="s1",
+        name="n",
+        transport="stdio",
+        command="c",
+        args="[]",
+        env=env,
+        url=None,
+        is_enabled=1,
+        oauth_config=None,
+        created_at=None,
+    )
 
 
 def test_serialize_handles_list_env(monkeypatch):

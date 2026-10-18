@@ -7,13 +7,12 @@ matched any record. The fix keeps "complete" as the CLI value and maps it to
 the stored "done" at filter time, so the on-disk corpus stays the source of
 truth and the documented CLI surface keeps working.
 """
+
 import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,7 +34,8 @@ def test_complete_is_a_valid_status_choice():
 
 
 def test_filter_returns_completed_runs(tmp_path, monkeypatch):
-    cli = _load_cli(); cli._DATA_DIR = tmp_path
+    cli = _load_cli()
+    cli._DATA_DIR = tmp_path
     (tmp_path / "r1.json").write_text(json.dumps({"query": "q1", "status": "done"}))
     (tmp_path / "r2.json").write_text(json.dumps({"query": "q2", "status": "running"}))
     emitted = []
@@ -47,7 +47,8 @@ def test_filter_returns_completed_runs(tmp_path, monkeypatch):
 
 
 def test_verbatim_status_still_filters(tmp_path, monkeypatch):
-    cli = _load_cli(); cli._DATA_DIR = tmp_path
+    cli = _load_cli()
+    cli._DATA_DIR = tmp_path
     (tmp_path / "r1.json").write_text(json.dumps({"query": "q1", "status": "done"}))
     (tmp_path / "r2.json").write_text(json.dumps({"query": "q2", "status": "running"}))
     emitted = []

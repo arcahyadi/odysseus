@@ -4,7 +4,7 @@ import types
 import pytest
 from fastapi import HTTPException
 
-import routes.embedding_routes as embedding_routes
+from routes import embedding_routes
 
 
 def _install_fastembed_stub(monkeypatch):

@@ -37,6 +37,7 @@ def _run_node(script: str) -> dict:
         capture_output=True,
         timeout=15,
         text=True,
+        check=False,
     )
     if res.returncode != 0:
         raise AssertionError(f"node failed:\n{res.stderr}")
@@ -47,6 +48,7 @@ def _run_node(script: str) -> dict:
 
 
 # ── state.js ───────────────────────────────────────────────────────
+
 
 def test_state_reset_preserves_config(node_available):
     """`state.reset()` clears transient flags but leaves config
@@ -116,6 +118,7 @@ def test_state_reset_resets_probed_set(node_available):
 
 
 # ── icons.js ───────────────────────────────────────────────────────
+
 
 def test_svg_icon_exports_are_valid_svg(node_available):
     """Every name matching the icon-export naming pattern (`*_ICON`,

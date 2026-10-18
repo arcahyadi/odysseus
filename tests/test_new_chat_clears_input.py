@@ -10,6 +10,7 @@ does not call showWelcomeScreen, so real drafts aren't erased.
 chatRenderer.js pulls in browser globals, so it can't be imported under node;
 this guards the fix at the source level so it can't be silently dropped.
 """
+
 import re
 from pathlib import Path
 
@@ -20,7 +21,7 @@ def _show_welcome_body() -> str:
     text = SRC.read_text(encoding="utf-8")
     start = text.index("export function showWelcomeScreen()")
     # Body runs until the next top-level `export function` / `function ` decl.
-    rest = text[start + len("export function showWelcomeScreen()"):]
+    rest = text[start + len("export function showWelcomeScreen()") :]
     m = re.search(r"\nexport function |\nfunction ", rest)
     return rest[: m.start()] if m else rest
 

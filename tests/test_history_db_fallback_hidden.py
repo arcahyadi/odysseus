@@ -13,6 +13,7 @@ get_session_history depends on the DB, the session manager and a FastAPI
 request, so this pins the regression at the source level (as other route tests
 in this repo do).
 """
+
 import ast
 from pathlib import Path
 
@@ -33,6 +34,5 @@ def test_db_fallback_filters_hidden_from_response():
     assert marker in src, "expected the DB fallback block in get_session_history"
     db_section = src.split(marker, 1)[1]
     assert "hidden" in db_section, (
-        "the DB-fallback path must filter `hidden` messages from the response "
-        "to match the in-memory path"
+        "the DB-fallback path must filter `hidden` messages from the response to match the in-memory path"
     )

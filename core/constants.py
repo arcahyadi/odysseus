@@ -8,5 +8,8 @@ there is exactly one place that defines paths and reads ODYSSEUS_DATA_DIR.
 internal_api_base() also lives in src.constants now and is re-exported here so
 existing `from core.constants import internal_api_base` callers keep working.
 """
+
 from src.constants import *  # noqa: F401,F403
-from src.constants import internal_api_base  # noqa: F401  (explicit: functions aren't covered by some linters' * checks)
+from src.constants import (
+    internal_api_base,  # noqa: F401  (explicit: functions aren't covered by some linters' * checks)
+)

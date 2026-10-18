@@ -17,6 +17,7 @@ Designed to live in `scripts/`. Symlink it onto `$PATH` (`ln -s
 $PWD/scripts/odysseus ~/.local/bin/odysseus`) to use it without typing
 the full path.
 """
+
 from __future__ import annotations
 
 import os
@@ -78,14 +79,12 @@ def _print_listing() -> None:
     sys.stdout.write("Usage:  odysseus <subcommand> [args...]\n\n")
     sys.stdout.write("Available subcommands:\n")
     subs = _list_subcommands()
-    width = max((len(p.name[len("odysseus-"):]) for p in subs), default=10)
+    width = max((len(p.name[len("odysseus-") :]) for p in subs), default=10)
     for p in subs:
-        name = p.name[len("odysseus-"):]
+        name = p.name[len("odysseus-") :]
         desc = _short_help(p)
         sys.stdout.write(f"  {name:<{width + 2}}{desc}\n")
-    sys.stdout.write(
-        "\nRun `odysseus help <subcommand>` for that tool's own --help.\n"
-    )
+    sys.stdout.write("\nRun `odysseus help <subcommand>` for that tool's own --help.\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,10 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     name = argv[0]
     sub = SCRIPTS_DIR / f"odysseus-{name}"
     if not _is_runnable_subcommand(sub):
-        sys.stderr.write(
-            f"odysseus: unknown subcommand {name!r}. "
-            f"Try `odysseus help` to see available ones.\n"
-        )
+        sys.stderr.write(f"odysseus: unknown subcommand {name!r}. Try `odysseus help` to see available ones.\n")
         return 1
     # Run the subcommand with the project's venv Python so dependencies
     # (bcrypt, sqlalchemy, fastapi, ...) resolve. Fall back to whatever

@@ -12,11 +12,9 @@ def _emoji_endpoint():
 
 
 def test_svg_safety_rejects_active_or_external_svg_content():
-    assert emoji_routes._is_safe_svg(
-        b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>'
-    )
+    assert emoji_routes._is_safe_svg(b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>')
 
-    assert not emoji_routes._is_safe_svg(b'<svg><script>alert(1)</script></svg>')
+    assert not emoji_routes._is_safe_svg(b"<svg><script>alert(1)</script></svg>")
     assert not emoji_routes._is_safe_svg(b'<svg onload="alert(1)"></svg>')
     assert not emoji_routes._is_safe_svg(b'<svg><image href="https://example.com/x.png"/></svg>')
     assert not emoji_routes._is_safe_svg(b"<svg>" + b"a" * (emoji_routes._MAX_SVG_BYTES + 1))

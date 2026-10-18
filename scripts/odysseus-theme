@@ -18,14 +18,22 @@ keeping your manual tweaks).
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, shutil, subprocess, sys, tempfile
-from pathlib import Path
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
 
 _USER_PREFS_PATH = _REPO_ROOT / "data" / "user_prefs.json"
 _THEME_JS = _REPO_ROOT / "static" / "js" / "theme.js"
@@ -51,9 +59,7 @@ def _save_prefs(data: dict) -> None:
     # Backup so a bad write doesn't nuke everyone's theme.
     if _USER_PREFS_PATH.exists():
         try:
-            (_USER_PREFS_PATH.with_suffix(_USER_PREFS_PATH.suffix + ".bak")).write_bytes(
-                _USER_PREFS_PATH.read_bytes()
-            )
+            (_USER_PREFS_PATH.with_suffix(_USER_PREFS_PATH.suffix + ".bak")).write_bytes(_USER_PREFS_PATH.read_bytes())
         except Exception:
             pass
     tmp = _USER_PREFS_PATH.with_suffix(_USER_PREFS_PATH.suffix + ".tmp")
@@ -75,7 +81,10 @@ def _builtin_preset_names() -> list[str]:
         try:
             out = subprocess.run(
                 ["node", "--input-type=module", "-e", script],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
             )
             if out.returncode == 0:
                 lines = [l for l in out.stdout.splitlines() if l.strip()]
@@ -88,6 +97,7 @@ def _builtin_preset_names() -> list[str]:
     # (exactly 2 leading spaces) so nested `advanced: { userBubbleBg: ... }`
     # entries don't leak into the preset list.
     import re
+
     src = _THEME_JS.read_text()
     m = re.search(r"export\s+const\s+THEMES\s*=\s*\{(.*?)\n\};", src, re.DOTALL)
     if not m:
@@ -98,6 +108,7 @@ def _builtin_preset_names() -> list[str]:
 
 # ─── list ────────────────────────────────────────────────────────────
 
+
 def cmd_list(args):
     names = _builtin_preset_names()
     emit({"presets": names, "count": len(names)}, args)
@@ -105,23 +116,27 @@ def cmd_list(args):
 
 # ─── users ───────────────────────────────────────────────────────────
 
+
 def cmd_users(args):
     users = _load_prefs().get("_users", {})
     out = []
     for username, prefs in users.items():
         theme = (prefs or {}).get("theme") or {}
-        out.append({
-            "user": username,
-            "preset": theme.get("name") or "",
-            "has_custom_colors": bool(theme.get("colors")),
-            "font": theme.get("font") or "",
-            "density": theme.get("density") or "",
-        })
+        out.append(
+            {
+                "user": username,
+                "preset": theme.get("name") or "",
+                "has_custom_colors": bool(theme.get("colors")),
+                "font": theme.get("font") or "",
+                "density": theme.get("density") or "",
+            }
+        )
     out.sort(key=lambda r: r["user"])
     emit(out, args)
 
 
 # ─── get ─────────────────────────────────────────────────────────────
+
 
 def cmd_get(args):
     users = _load_prefs().get("_users", {})
@@ -137,12 +152,11 @@ def cmd_get(args):
 
 # ─── set ─────────────────────────────────────────────────────────────
 
+
 def cmd_set(args):
     valid = _builtin_preset_names()
     if valid and args.preset not in valid:
-        fail(
-            f"unknown preset {args.preset!r}. Available: {', '.join(valid) or '(none discovered)'}"
-        )
+        fail(f"unknown preset {args.preset!r}. Available: {', '.join(valid) or '(none discovered)'}")
     data = _load_prefs()
     users = data.setdefault("_users", {})
     user_prefs = users.setdefault(args.user, {})
@@ -156,6 +170,7 @@ def cmd_set(args):
 
 
 # ─── export ──────────────────────────────────────────────────────────
+
 
 def cmd_export(args):
     users = _load_prefs().get("_users", {})
@@ -184,8 +199,7 @@ def _build_parser():
     ps = sub.add_parser("set", parents=[common])
     ps.add_argument("--user", required=True)
     ps.add_argument("--preset", required=True)
-    ps.add_argument("--keep-colors", action="store_true",
-                    help="don't clear custom color overrides")
+    ps.add_argument("--keep-colors", action="store_true", help="don't clear custom color overrides")
     ps.set_defaults(func=cmd_set)
 
     pe = sub.add_parser("export", parents=[common])

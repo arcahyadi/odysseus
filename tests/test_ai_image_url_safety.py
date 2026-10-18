@@ -34,7 +34,8 @@ def _patch_generation(monkeypatch, image_url):
         post = _post
 
     import httpx
-    import src.settings as settings
+
+    from src import settings
 
     monkeypatch.setattr(settings, "load_settings", lambda: {})
     monkeypatch.setattr(httpx, "AsyncClient", _AsyncClient)
@@ -51,7 +52,8 @@ def _patch_generation(monkeypatch, image_url):
 
 async def test_generate_image_validates_provider_url_before_download(monkeypatch):
     import httpx
-    import src.url_safety as url_safety
+
+    from src import url_safety
 
     provider_url = "https://images.example.com/generated.png?sig=abc"
     events = []
@@ -79,7 +81,8 @@ async def test_generate_image_validates_provider_url_before_download(monkeypatch
 
 async def test_generate_image_rejects_unsafe_provider_url_without_download(monkeypatch):
     import httpx
-    import src.url_safety as url_safety
+
+    from src import url_safety
 
     unsafe_url = "http://169.254.169.254/latest/meta-data"
     events = []
@@ -98,7 +101,6 @@ async def test_generate_image_rejects_unsafe_provider_url_without_download(monke
     result = await ai_interaction.do_generate_image("draw a chair\ndall-e-3")
 
     assert result["error"] == (
-        "Image API returned unsafe image URL: "
-        "link-local address blocked (SSRF metadata risk): 169.254.169.254"
+        "Image API returned unsafe image URL: link-local address blocked (SSRF metadata risk): 169.254.169.254"
     )
     assert events == [("check", unsafe_url, False)]

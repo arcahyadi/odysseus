@@ -1,3 +1,6 @@
+# Model Router LiteLLM — abstraction multi-provider (Phase 2).
+litellm
+pyyaml
 fastapi
 uvicorn
 python-multipart
@@ -17,6 +20,7 @@ numpy
 # ChromaDB service); fastembed runs local ONNX embeddings.
 chromadb-client
 fastembed
+rank-bm25
 youtube-transcript-api
 # Markdown rendering for research reports (src/visual_report.py).
 # Imported at module-top so it's a hard core dep, not optional.
@@ -37,13 +41,52 @@ python-dateutil
 caldav
 cryptography
 bcrypt
-mcp
+mcp>=1.9,<2
 pyotp
 qrcode[pil]
 croniter
 pytest
 pytest-asyncio
+# OpenTelemetry — distributed tracing (CNCF, Apache 2.0)
+# Kill-switch: set ODYSSEUS_OTEL=off to disable all tracing overhead.
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-sqlalchemy
+opentelemetry-instrumentation-httpx
+opentelemetry-exporter-otlp
 # starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+
+# Channel Gateway — activer selon les canaux utilisés
+discord.py>=2.4.0
+python-telegram-bot>=21.0
+# Mem0 — intelligent fact extraction from conversations (Phase 6).
+# Auto-extracts structured entities, preferences, decisions from chat text.
+# Wraps existing ChromaDB vector store for minimal new infrastructure.
+mem0ai
+# Letta/MemGPT — virtual context management for small models.
+# Pages data in/out of context automatically, solves prompt/context bloat.
+letta-client
+# Apprise — notification unifiée 100+ canaux (remplace adapters custom)
+apprise
+# LangGraph — StateGraph orchestration (ODYSSEUS_LANGGRAPH kill-switch).
+# Optional: only needed when ODYSSEUS_LANGGRAPH=on.
+langgraph
+langgraph-checkpoint-sqlite
+# PostgreSQL + pgvector — production database backend (Agent A20).
+# asyncpg: high-performance async PostgreSQL driver for SQLAlchemy.
+# pgvector: vector similarity search column type for PostgreSQL.
+asyncpg
+pgvector
+# Qdrant — production-grade vector DB (opt-in via ODYSSEUS_QDRANT=on)
+qdrant-client
+# Meilisearch — full-text search (typo-tolerant, faceted)
+# Used by services/search/meilisearch_client.py when ODYSSEUS_MEILISEARCH=on
+meilisearch>=0.31.0
+# LangFuse — LLM tracing & observability dashboard (MIT, self-hosted).
+# Kill-switch: ODYSSEUS_LANGFUSE=off (default). When on, traces go to
+# LangFuse instead of / alongside JSONL.
+langfuse

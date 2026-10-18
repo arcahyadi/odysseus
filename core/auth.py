@@ -5,13 +5,12 @@ Config stored in data/auth.json. Uses bcrypt directly.
 
 import enum
 import json
+import logging
 import os
 import secrets
 import threading
 import time
-import logging
-from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any
 
 import bcrypt
 import pyotp
@@ -41,7 +40,9 @@ DEFAULT_PRIVILEGES = {
 }
 
 # Admins get everything
-ADMIN_PRIVILEGES = {k: (True if isinstance(v, bool) else (0 if isinstance(v, int) else [])) for k, v in DEFAULT_PRIVILEGES.items()}
+ADMIN_PRIVILEGES = {
+    k: (True if isinstance(v, bool) else (0 if isinstance(v, int) else [])) for k, v in DEFAULT_PRIVILEGES.items()
+}
 ADMIN_PRIVILEGES["allowed_models_restricted"] = False
 # Admins must never be blocked from using models — the generic dict
 # comprehension above flips every boolean default to True, which would be
@@ -49,6 +50,7 @@ ADMIN_PRIVILEGES["allowed_models_restricted"] = False
 ADMIN_PRIVILEGES["block_all_models"] = False
 
 from src.constants import AUTH_FILE, PASSWORD_MIN_LENGTH
+
 DEFAULT_AUTH_PATH = AUTH_FILE
 TOKEN_TTL = 60 * 60 * 24 * 7  # 7 days
 
@@ -69,7 +71,7 @@ TOKEN_TTL = 60 * 60 * 24 * 7  # 7 days
 RESERVED_USERNAMES = frozenset({INTERNAL_TOOL_USER, "api", "demo", "system"})
 
 
-def normalize_known_username(users: Dict[str, Any], username: str | None) -> Optional[str]:
+def normalize_known_username(users: dict[str, Any], username: str | None) -> str | None:
     """Return a normalized username only when it exists in the auth user map."""
     key = str(username or "").strip().lower()
     if not key or key not in users:
@@ -88,10 +90,11 @@ def _verify_password(password: str, hashed: str) -> bool:
 class SetAdminResult(enum.Enum):
     """Outcome of AuthManager.set_admin, so callers can map each case to a
     precise response instead of guessing from a bare bool."""
+
     OK = "ok"
     USER_NOT_FOUND = "user_not_found"
-    NOT_AUTHORIZED = "not_authorized"   # requester is not an admin
-    LAST_ADMIN = "last_admin"           # would remove the last remaining admin
+    NOT_AUTHORIZED = "not_authorized"  # requester is not an admin
+    LAST_ADMIN = "last_admin"  # would remove the last remaining admin
 
 
 class AuthManager:
@@ -100,8 +103,8 @@ class AuthManager:
     def __init__(self, auth_path: str = DEFAULT_AUTH_PATH):
         self.auth_path = auth_path
         self._sessions_path = os.path.join(os.path.dirname(auth_path), "sessions.json")
-        self._config: Dict[str, Any] = {}
-        self._sessions: Dict[str, Dict[str, Any]] = {}  # token -> {username, expiry}
+        self._config: dict[str, Any] = {}
+        self._sessions: dict[str, dict[str, Any]] = {}  # token -> {username, expiry}
         # Guards mutations of self._sessions and the on-disk sessions.json.
         # Validate/create/revoke run concurrently from the FastAPI threadpool.
         self._sessions_lock = threading.RLock()
@@ -121,17 +124,14 @@ class AuthManager:
     def _load(self):
         try:
             if os.path.exists(self.auth_path):
-                with open(self.auth_path, "r", encoding="utf-8") as f:
+                with open(self.auth_path, encoding="utf-8") as f:
                     self._config = json.load(f)
                 # Normalize all stored usernames to lowercase so they match
                 # the .strip().lower() applied at login/verify time. Fixes
                 # "Invalid credentials" when auth.json was written with
                 # mixed-case keys (e.g. via manual edit or a future migration).
                 if "users" in self._config:
-                    self._config["users"] = {
-                        k.strip().lower(): v
-                        for k, v in self._config["users"].items()
-                    }
+                    self._config["users"] = {k.strip().lower(): v for k, v in self._config["users"].items()}
                 logger.info("Auth config loaded")
             else:
                 self._config = {}
@@ -144,7 +144,7 @@ class AuthManager:
         """Load persisted session tokens from disk, pruning expired ones."""
         try:
             if os.path.exists(self._sessions_path):
-                with open(self._sessions_path, "r", encoding="utf-8") as f:
+                with open(self._sessions_path, encoding="utf-8") as f:
                     data = json.load(f)
                 now = time.time()
                 self._sessions = {k: v for k, v in data.items() if v.get("expiry", 0) > now}
@@ -176,16 +176,17 @@ class AuthManager:
                 )
                 old_user = "admin"
             old_hash = self._config["password_hash"]
-            self._config = {
-                "users": {
-                    old_user: {
-                        "password_hash": old_hash,
-                        "created": time.time(),
-                        "is_admin": True,
+            with self._config_lock:
+                self._config = {
+                    "users": {
+                        old_user: {
+                            "password_hash": old_hash,
+                            "created": time.time(),
+                            "is_admin": True,
+                        }
                     }
                 }
-            }
-            self._save()
+                self._save()
             logger.info(f"Migrated single-user auth to multi-user (admin: {old_user})")
 
     def _drop_reserved_loaded_users(self):
@@ -204,8 +205,9 @@ class AuthManager:
                 continue
             normalized[key] = data
         if removed or normalized != users:
-            self._config["users"] = normalized
-            self._save()
+            with self._config_lock:
+                self._config["users"] = normalized
+                self._save()
         if removed:
             logger.warning(
                 "Removed reserved username(s) from auth config: %s",
@@ -227,7 +229,7 @@ class AuthManager:
         _atomic_write_json(self.auth_path, self._config, indent=2)
 
     @property
-    def users(self) -> Dict[str, Any]:
+    def users(self) -> dict[str, Any]:
         return self._config.get("users", {})
 
     @property
@@ -309,13 +311,12 @@ class AuthManager:
             # rows behind. If the token store is unavailable, fail closed and
             # keep the user/session state intact so the admin can retry.
             try:
-                from core.database import get_db_session, ApiToken
+                from core.database import ApiToken, get_db_session
+
                 with get_db_session() as db:
                     removed_tokens = db.query(ApiToken).filter(ApiToken.owner == username).delete()
                 if removed_tokens:
-                    logger.info(
-                        f"Revoked {removed_tokens} API token(s) owned by deleted user '{username}'"
-                    )
+                    logger.info(f"Revoked {removed_tokens} API token(s) owned by deleted user '{username}'")
             except Exception:
                 logger.warning(f"Failed to revoke API tokens for deleted user '{username}'")
                 return False
@@ -326,8 +327,7 @@ class AuthManager:
         # cookie keeps authenticating.
         revoked = 0
         with self._sessions_lock:
-            to_drop = [tok for tok, sess in self._sessions.items()
-                       if (sess or {}).get("username") == username]
+            to_drop = [tok for tok, sess in self._sessions.items() if (sess or {}).get("username") == username]
             for tok in to_drop:
                 self._sessions.pop(tok, None)
                 revoked += 1
@@ -367,20 +367,23 @@ class AuthManager:
             self._save_sessions()
         logger.info(
             "Renamed user '%s' -> '%s' (by %s); updated %d active session(s)",
-            old_username, new_username, requesting_user, renamed_sessions,
+            old_username,
+            new_username,
+            requesting_user,
+            renamed_sessions,
         )
         return True
 
     def is_admin(self, username: str) -> bool:
         return self.users.get(username, {}).get("is_admin", False)
 
-    def list_users(self) -> List[Dict[str, Any]]:
+    def list_users(self) -> list[dict[str, Any]]:
         return [
             {"username": u, "is_admin": d.get("is_admin", False), "privileges": self.get_privileges(u)}
             for u, d in self.users.items()
         ]
 
-    def get_privileges(self, username: str) -> Dict[str, Any]:
+    def get_privileges(self, username: str) -> dict[str, Any]:
         """Get privileges for a user. Admins get all privileges."""
         user = self.users.get(username, {})
         if user.get("is_admin"):
@@ -389,7 +392,7 @@ class AuthManager:
         stored = user.get("privileges", {})
         return {**DEFAULT_PRIVILEGES, **stored}
 
-    def set_privileges(self, username: str, privileges: Dict[str, Any]) -> bool:
+    def set_privileges(self, username: str, privileges: dict[str, Any]) -> bool:
         """Update privileges for a user. Can't modify admin privileges."""
         username = username.strip().lower()
         with self._config_lock:
@@ -407,8 +410,7 @@ class AuthManager:
         logger.info(f"Updated privileges for '{username}': {current}")
         return True
 
-    def set_admin(self, username: str, is_admin: bool,
-                  requesting_user: str) -> SetAdminResult:
+    def set_admin(self, username: str, is_admin: bool, requesting_user: str) -> SetAdminResult:
         """Promote/demote an existing user to/from admin. Admin only.
 
         Refuses to remove the last remaining admin so the instance can never
@@ -452,19 +454,14 @@ class AuthManager:
                 # While is_admin is set the stored map is inert: get_privileges
                 # short-circuits to ADMIN_PRIVILEGES and set_privileges refuses
                 # admins, so only set_admin ever touches the stash.
-                target["privileges_before_admin"] = dict(
-                    target.get("privileges") or DEFAULT_PRIVILEGES
-                )
+                target["privileges_before_admin"] = dict(target.get("privileges") or DEFAULT_PRIVILEGES)
                 target["privileges"] = dict(ADMIN_PRIVILEGES)
             else:
                 # Restore the stashed pre-admin map. Fall back to defaults for
                 # users created as admins (their stored map is ADMIN_PRIVILEGES,
                 # which must not leak past demotion — e.g. can_use_bash) and
                 # for admins promoted before the stash existed.
-                target["privileges"] = dict(
-                    target.pop("privileges_before_admin", None)
-                    or DEFAULT_PRIVILEGES
-                )
+                target["privileges"] = dict(target.pop("privileges_before_admin", None) or DEFAULT_PRIVILEGES)
                 target["is_admin"] = False
             self._save()
         logger.info("Set is_admin=%s for '%s' (by '%s')", is_admin, username, requesting_user)
@@ -490,7 +487,7 @@ class AuthManager:
         user = self.users.get(username.strip().lower(), {})
         return bool(user.get("totp_enabled"))
 
-    def totp_generate_secret(self, username: str) -> Optional[str]:
+    def totp_generate_secret(self, username: str) -> str | None:
         """Generate a new TOTP secret for a user. Returns the secret (not yet enabled)."""
         username = username.strip().lower()
         if username not in self.users:
@@ -576,14 +573,14 @@ class AuthManager:
             return False
         return _verify_password(password, self.users[username]["password_hash"])
 
-    def create_session(self, username: str, password: str) -> Optional[str]:
+    def create_session(self, username: str, password: str) -> str | None:
         """Verify credentials and return a session token, or None."""
         username = username.strip().lower()
         if not self.verify_password(username, password):
             return None
         return self.create_session_trusted(username)
 
-    def create_session_trusted(self, username: str) -> Optional[str]:
+    def create_session_trusted(self, username: str) -> str | None:
         """Issue a session token for an already-verified user.
         Call only after verify_password (and TOTP if enabled) have passed."""
         username = username.strip().lower()
@@ -600,7 +597,7 @@ class AuthManager:
         self._save_sessions()
         return token
 
-    def validate_token(self, token: Optional[str]) -> bool:
+    def validate_token(self, token: str | None) -> bool:
         if not token:
             return False
         expired = False
@@ -612,20 +609,19 @@ class AuthManager:
             if time.time() > session["expiry"]:
                 self._sessions.pop(token, None)
                 expired = True
-            else:
-                # SECURITY: if the user record has since been removed (admin
-                # deleted them while their cookie was still valid), drop the
-                # session so the next request kicks them out instead of
-                # silently authenticating against a non-existent account.
-                if session.get("username") not in self.users:
-                    self._sessions.pop(token, None)
-                    deleted_user = True
+            # SECURITY: if the user record has since been removed (admin
+            # deleted them while their cookie was still valid), drop the
+            # session so the next request kicks them out instead of
+            # silently authenticating against a non-existent account.
+            elif session.get("username") not in self.users:
+                self._sessions.pop(token, None)
+                deleted_user = True
         if expired or deleted_user:
             self._save_sessions()
             return False
         return True
 
-    def get_username_for_token(self, token: Optional[str]) -> Optional[str]:
+    def get_username_for_token(self, token: str | None) -> str | None:
         """Return the username associated with a valid token."""
         if not token:
             return None
@@ -655,13 +651,14 @@ class AuthManager:
             self._sessions.pop(token, None)
         self._save_sessions()
 
-    def revoke_user_sessions(self, username: str, except_token: Optional[str] = None) -> int:
+    def revoke_user_sessions(self, username: str, except_token: str | None = None) -> int:
         """Revoke active browser sessions for a user, optionally preserving one."""
         username = username.strip().lower()
         revoked = 0
         with self._sessions_lock:
             to_drop = [
-                token for token, session in self._sessions.items()
+                token
+                for token, session in self._sessions.items()
                 if token != except_token and (session or {}).get("username") == username
             ]
             for token in to_drop:
@@ -671,7 +668,7 @@ class AuthManager:
                 self._save_sessions()
         return revoked
 
-    def status(self, token: Optional[str]) -> Dict[str, Any]:
+    def status(self, token: str | None) -> dict[str, Any]:
         username = self.get_username_for_token(token)
         authenticated = username is not None
         result = {

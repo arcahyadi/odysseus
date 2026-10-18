@@ -1,0 +1,55 @@
+# ruff.toml — Odysseus Agent OS linting config
+# Rules: pycodestyle (E), Pyflakes (F), isort (I), pep8-naming (N),
+#         pyupgrade (UP), flake8-bugbear (B), flake8-simplify (SIM),
+#         pylint (PL), flake8-comprehensions (C4), flake8-2020 (YTT),
+#         flake8-annotations (ANN) — only for public API stubs
+
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # Pyflakes (undefined names, unused imports)
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "PL",   # pylint
+    "YTT",  # flake8-2020
+]
+ignore = [
+    "E501",   # line-too-long (handled by formatter)
+    "B904",   # raise-without-from-inside-except (too strict for this codebase)
+    "PLR0913",# too-many-arguments
+    "PLR0911",# too-many-return-statements
+    "PLR0912",# too-many-branches
+    "PLR0915",# too-many-statements
+    "N802",   # function name should be lowercase (legacy naming)
+    "N803",   # argument name should be lowercase (legacy naming)
+    "N806",   # variable in function should be lowercase (legacy naming)
+    "N815",   # mixedCamelCase class constant
+    "N816",   # mixedCamelCase global/instance var
+    "SIM115", # open-file-with-context-handler (false positives with wrapped handles)
+    "PLR0917",# too-many-positional
+    "PLR2004",# magic-value-comparison
+    "C408",   # unnecessary-collection-call (dict() -> {} style)
+    "SIM108", # use ternary operator (some cases are clearer with if/else)
+    # UP038 removed in ruff 0.15
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[lint.per-file-ignores]
+"tests/*" = [
+    "N802", "N803", "N806",
+    "S101",
+    "PLR2004",
+]
+"scripts/*" = []
+"static/js/*" = []

@@ -8,9 +8,9 @@ Proves the two properties the review asked for:
 Follows the direct-helper + mocked-DB style of tests/test_null_owner_gates.py.
 """
 
+import importlib
 import os
 import sys
-import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -64,6 +64,7 @@ with preserve_import_state(*_MANAGED):
     import routes.session_routes as SR  # noqa: E402
 
 from fastapi import HTTPException  # noqa: E402
+
 from src.auth_helpers import effective_user  # noqa: E402
 
 
@@ -72,6 +73,7 @@ def _req(**state):
 
 
 # --- effective_user: who a request is attributed to ------------------------
+
 
 def test_cookie_user_is_unchanged():
     # The whole point: browser/cookie callers behave exactly as before.
@@ -89,6 +91,7 @@ def test_bearer_token_without_owner_does_not_escalate():
 
 
 # --- _verify_session_owner: bearer tokens cannot cross owners ---------------
+
 
 def _session_local_returning(owner_value):
     """Mock SessionLocal whose query(...).filter(...).first() yields a row with

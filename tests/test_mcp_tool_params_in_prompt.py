@@ -41,8 +41,8 @@ def test_get_all_tools_carries_input_schema():
 def test_prompt_descriptions_surface_param_names_and_required():
     text = _mgr_with_tool().get_tool_descriptions_for_prompt()
     assert "mcp__srv1__fetch_doc" in text
-    assert "path" in text and "limit" in text   # inputs are surfaced to the model
-    assert "required" in text                   # required-ness is surfaced
+    assert "path" in text and "limit" in text  # inputs are surfaced to the model
+    assert "required" in text  # required-ness is surfaced
 
 
 def test_format_mcp_params_handles_no_params():

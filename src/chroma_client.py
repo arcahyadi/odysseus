@@ -5,13 +5,15 @@ Singleton ChromaDB HTTP client.
 Connects to a ChromaDB instance running as a standalone service.
 """
 
+import logging
 import os
 import socket
-import logging
+from src.app_context import app_context
+
 
 logger = logging.getLogger(__name__)
 
-_client = None
+app_context.caches.chroma_client = None
 
 # A short connect probe so an unreachable ChromaDB fails fast instead of
 # blocking on the OS connection timeout (~30-60s, WinError 10060 on Windows),
@@ -34,16 +36,14 @@ def get_chroma_client():
     Raises RuntimeError with a clear install hint if the `chromadb` package
     is not installed — it's an optional dependency (RAG + memory vectors).
     """
-    global _client
-    if _client is not None:
-        return _client
+    if app_context.caches.chroma_client is not None:
+        return app_context.caches.chroma_client
 
     try:
         import chromadb
     except ImportError as e:
         raise RuntimeError(
-            "ChromaDB integration is not installed. Install the optional "
-            "dependency with: pip install chromadb-client"
+            "ChromaDB integration is not installed. Install the optional dependency with: pip install chromadb-client"
         ) from e
 
     host = os.getenv("CHROMADB_HOST", "localhost")
@@ -60,14 +60,13 @@ def get_chroma_client():
 
     # Health check before caching — if the port is open but the service isn't
     # healthy yet (e.g. still starting), don't poison the singleton with a dead
-    # client; leave _client unset so the next call retries.
+    # client; leave app_context.caches.chroma_client unset so the next call retries.
     client.heartbeat()
-    _client = client
+    app_context.caches.chroma_client = client
     logger.info(f"ChromaDB connected: {host}:{port}")
-    return _client
+    return app_context.caches.chroma_client
 
 
 def reset_client():
     """Reset the singleton (e.g. after config change)."""
-    global _client
-    _client = None
+    app_context.caches.chroma_client = None

@@ -14,10 +14,11 @@ live (pick up where it is).
 Durability scope: in-memory, survives as long as the server process runs (tab
 close / navigation / refresh). It does NOT survive a server restart.
 """
+
 import asyncio
 import json
 import logging
-from typing import AsyncGenerator, Dict, Optional
+from collections.abc import AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +27,14 @@ class _Run:
     __slots__ = ("buffer", "subscribers", "status", "task", "evict_task")
 
     def __init__(self) -> None:
-        self.buffer: list = []          # ordered SSE event strings (replay log)
-        self.subscribers: set = set()   # one asyncio.Queue per connected client
-        self.status: str = "running"    # running | done | error | stopped
-        self.task: Optional[asyncio.Task] = None
-        self.evict_task: Optional[asyncio.Task] = None
+        self.buffer: list = []  # ordered SSE event strings (replay log)
+        self.subscribers: set = set()  # one asyncio.Queue per connected client
+        self.status: str = "running"  # running | done | error | stopped
+        self.task: asyncio.Task | None = None
+        self.evict_task: asyncio.Task | None = None
 
 
-_RUNS: Dict[str, _Run] = {}
+_RUNS: dict[str, _Run] = {}
 
 # How long a FINISHED run (and its full replay buffer) is retained after the
 # last subscriber disconnects, so a reconnect within the window can still
@@ -80,13 +81,12 @@ def is_active(session_id: str) -> bool:
     return bool(r and r.status == "running")
 
 
-def get_status(session_id: str) -> Optional[str]:
+def get_status(session_id: str) -> str | None:
     r = _RUNS.get(session_id)
     return r.status if r else None
 
 
-async def _drain(session_id: str, agen: AsyncGenerator[str, None],
-                 prev_task: Optional[asyncio.Task] = None) -> None:
+async def _drain(session_id: str, agen: AsyncGenerator[str, None], prev_task: asyncio.Task | None = None) -> None:
     """Pull every event from the wrapped generator into the run buffer, fanning
     each out to live subscribers. Runs to completion regardless of subscribers."""
     run = _RUNS.get(session_id)
@@ -100,7 +100,7 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         try:
             await asyncio.wait({prev_task})
         except asyncio.CancelledError:
-            raise            # our own cancellation — propagate
+            raise  # our own cancellation — propagate
         except Exception:
             pass
     try:
@@ -121,8 +121,7 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         run.status = "error"
         _publish(
             run,
-            "event: error\n"
-            f"data: {json.dumps({'error': 'Agent run failed before completion.', 'status': 500})}\n\n",
+            f"event: error\ndata: {json.dumps({'error': 'Agent run failed before completion.', 'status': 500})}\n\n",
         )
         _publish(run, "data: [DONE]\n\n")
     finally:
@@ -142,11 +141,11 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
     prev = _RUNS.get(session_id)
-    prev_task: Optional[asyncio.Task] = None
+    prev_task: asyncio.Task | None = None
     if prev:
         if prev.task and not prev.task.done():
             prev.task.cancel()
-            prev_task = prev.task   # new run awaits this before it starts writing
+            prev_task = prev.task  # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
     run = _Run()
@@ -162,7 +161,7 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
     if run is None:
         return
     q: asyncio.Queue = asyncio.Queue()
-    run.subscribers.add(q)            # register BEFORE replaying so nothing is missed
+    run.subscribers.add(q)  # register BEFORE replaying so nothing is missed
     # A live subscriber is connected — don't let a pending grace timer evict
     # the run out from under it mid-replay.
     if run.evict_task and not run.evict_task.done():
@@ -178,7 +177,7 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
         while True:
             try:
                 seq, ev = await asyncio.wait_for(q.get(), timeout=10.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Keep slow local models/proxies alive while they prefill before
                 # the first token. SSE comments are ignored by the UI but reset
                 # browser/proxy idle timers, which prevents "empty response"
@@ -188,12 +187,12 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
                     yield f": heartbeat {heartbeat_idx}\n\n"
                     continue
                 seq, ev = (None, None)
-            if seq is None:            # end sentinel
-                while next_seq < len(run.buffer):   # flush any tail the sentinel raced
+            if seq is None:  # end sentinel
+                while next_seq < len(run.buffer):  # flush any tail the sentinel raced
                     yield run.buffer[next_seq]
                     next_seq += 1
                 break
-            if seq >= next_seq:        # skip events already replayed from the buffer
+            if seq >= next_seq:  # skip events already replayed from the buffer
                 yield ev
                 next_seq = seq + 1
     finally:

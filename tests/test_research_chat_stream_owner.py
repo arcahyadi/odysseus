@@ -1,7 +1,6 @@
 """Verify that research launched from the chat stream passes owner to start_research."""
 
 import ast
-import textwrap
 from pathlib import Path
 
 _CHAT_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "chat_routes.py"
@@ -30,6 +29,4 @@ def test_chat_stream_start_research_passes_owner():
 
     for call in calls:
         kwarg_names = [kw.arg for kw in call.keywords]
-        assert "owner" in kwarg_names, (
-            f"start_research call at line {call.lineno} is missing owner= keyword argument"
-        )
+        assert "owner" in kwarg_names, f"start_research call at line {call.lineno} is missing owner= keyword argument"

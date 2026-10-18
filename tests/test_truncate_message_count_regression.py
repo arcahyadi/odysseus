@@ -9,6 +9,7 @@ inconsistent with the actual rows. get_session relies on message_count>0 to
 decide whether to lazily hydrate from the DB, so an inflated count is a latent
 correctness hazard.
 """
+
 import os
 import tempfile
 
@@ -20,11 +21,14 @@ def _make_manager():
 
     # Import after DATABASE_URL is set so the engine binds to the temp DB.
     import importlib
-    import core.database as database
+
+    from core import database
+
     importlib.reload(database)
     database.Base.metadata.create_all(bind=database.engine)
 
     import core.session_manager as sm_mod
+
     importlib.reload(sm_mod)
     return sm_mod.SessionManager(), database, sm_mod
 
@@ -34,8 +38,7 @@ def test_truncate_keep_count_exceeds_total_does_not_inflate_count():
 
     sm, database, sm_mod = _make_manager()
     sid = "short-session"
-    sm.create_session(session_id=sid, name="t", endpoint_url="x",
-                      model="m", rag=False, owner="u")
+    sm.create_session(session_id=sid, name="t", endpoint_url="x", model="m", rag=False, owner="u")
     for i in range(3):
         sm.add_message(sid, ChatMessage("user", f"msg{i}"))
 
@@ -46,15 +49,12 @@ def test_truncate_keep_count_exceeds_total_does_not_inflate_count():
     try:
         DbSession = database.Session
         DbChatMessage = database.ChatMessage
-        rows = db.query(DbChatMessage).filter(
-            DbChatMessage.session_id == sid).count()
+        rows = db.query(DbChatMessage).filter(DbChatMessage.session_id == sid).count()
         db_session = db.query(DbSession).filter(DbSession.id == sid).first()
         # Nothing should have been deleted (only 3 messages exist).
         assert rows == 3
         # message_count must reflect the real number of rows, not keep_count.
-        assert db_session.message_count == 3, (
-            f"message_count={db_session.message_count} but only {rows} rows exist"
-        )
+        assert db_session.message_count == 3, f"message_count={db_session.message_count} but only {rows} rows exist"
     finally:
         db.close()
 
@@ -64,8 +64,7 @@ def test_truncate_keeps_history_alias_for_context_messages():
 
     sm, database, sm_mod = _make_manager()
     sid = "alias-after-truncate"
-    sm.create_session(session_id=sid, name="t", endpoint_url="x",
-                      model="m", rag=False, owner="u")
+    sm.create_session(session_id=sid, name="t", endpoint_url="x", model="m", rag=False, owner="u")
     for i in range(3):
         sm.add_message(sid, ChatMessage("user", f"msg{i}"))
 

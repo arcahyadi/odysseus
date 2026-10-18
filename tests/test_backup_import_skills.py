@@ -6,8 +6,8 @@ exported backups (often ``[]``), so calling save() raised AttributeError,
 returned a 500 HTML page, and the UI reported a misleading JSON.parse error
 from res.json().
 """
+
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import routes.backup_routes as br

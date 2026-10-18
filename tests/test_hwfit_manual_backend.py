@@ -7,7 +7,7 @@ notably that "metal" is honoured (Apple Silicon is GGUF-only via llama.cpp /
 Ollama) instead of being silently coerced to CUDA.
 """
 
-from routes.hwfit_routes import _apply_manual_hardware, _MANUAL_BACKENDS
+from routes.hwfit_routes import _MANUAL_BACKENDS, _apply_manual_hardware
 from services.hwfit.fit import rank_models
 from services.hwfit.models import get_models
 
@@ -41,7 +41,7 @@ def test_manual_metal_vram_and_count_math():
 
 def test_manual_backend_whitelist_matches_fit_backends():
     """Guard against drift: every manual backend must be one fit.py understands."""
-    assert _MANUAL_BACKENDS == {"cuda", "rocm", "metal", "cpu_x86", "cpu_arm"}
+    assert {"cuda", "rocm", "metal", "cpu_x86", "cpu_arm"} == _MANUAL_BACKENDS
 
 
 def test_unknown_manual_backend_falls_back_to_cuda():
@@ -74,12 +74,14 @@ def test_simulated_metal_box_only_recommends_gguf():
     repos the Mac can't serve."""
     system = _apply_manual_hardware(
         {"backend": "cuda", "available_ram_gb": 32.0, "total_ram_gb": 64.0},
-        manual_mode="gpu", manual_vram_gb="48", manual_backend="metal",
+        manual_mode="gpu",
+        manual_vram_gb="48",
+        manual_backend="metal",
     )
     catalog = {m["name"]: m for m in get_models()}
     unservable = [
-        r["name"] for r in rank_models(system, limit=900)
-        if not (catalog.get(r["name"], {}).get("is_gguf")
-                or catalog.get(r["name"], {}).get("gguf_sources"))
+        r["name"]
+        for r in rank_models(system, limit=900)
+        if not (catalog.get(r["name"], {}).get("is_gguf") or catalog.get(r["name"], {}).get("gguf_sources"))
     ]
     assert unservable == [], f"{len(unservable)} non-GGUF models on simulated Metal, e.g. {unservable[:3]}"

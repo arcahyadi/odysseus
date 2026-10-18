@@ -30,12 +30,12 @@ _OPENMOJI_BASE = "https://cdn.jsdelivr.net/npm/openmoji@15.0.0/black/svg"
 _CODE_RE = re.compile(r"^[0-9a-f]{2,6}(?:-[0-9a-f]{2,6})*$")
 _MAX_SVG_BYTES = 256 * 1024
 _BLOCKED_SVG_RE = re.compile(
-    br"<\s*(?:script|foreignObject|iframe|object|embed|image)\b|"
-    br"\bon[a-z0-9_-]+\s*=",
+    rb"<\s*(?:script|foreignObject|iframe|object|embed|image)\b|"
+    rb"\bon[a-z0-9_-]+\s*=",
     re.IGNORECASE,
 )
 _EXTERNAL_REF_RE = re.compile(
-    br"\b(?:href|xlink:href)\s*=\s*['\"](?:https?:|//|data:|javascript:)",
+    rb"\b(?:href|xlink:href)\s*=\s*['\"](?:https?:|//|data:|javascript:)",
     re.IGNORECASE,
 )
 _SVG_SECURITY_HEADERS = {

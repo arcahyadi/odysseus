@@ -38,8 +38,6 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
-
 
 # Point every data-dir-using dependency (core.database, secret_storage,
 # routes.email_helpers, ...) at a per-process tmp dir BEFORE any
@@ -64,7 +62,7 @@ async def test_auto_summarize_pass_logs_out_imap_on_select_failure(monkeypatch):
     post-connect path is the first un-guarded IMAP call, so forcing
     it to raise lands us in the outer `except` cleanly without any
     of the inner try/except scans swallowing the error first."""
-    import routes.email_pollers as email_pollers
+    from routes import email_pollers
 
     captured = {}
 
@@ -94,12 +92,11 @@ async def test_auto_summarize_pass_logs_out_imap_on_select_failure(monkeypatch):
     monkeypatch.setattr(email_pollers, "_load_settings", fake_load_settings)
 
     result = await email_pollers._auto_summarize_pass_single(
-        account_id="acct-1", progress_cb=None,
+        account_id="acct-1",
+        progress_cb=None,
     )
 
-    assert captured.get("connect_called") is True, (
-        "test setup: _imap_connect must be reached for the leak to apply"
-    )
+    assert captured.get("connect_called") is True, "test setup: _imap_connect must be reached for the leak to apply"
     assert captured.get("logout_calls", 0) >= 1, (
         f"conn.logout() must be called at least once on the error path "
         f"(IMAP leak fix). Got logout_calls={captured.get('logout_calls')}, "

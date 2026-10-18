@@ -28,9 +28,7 @@ def handler_cls(monkeypatch):
     monkeypatch.setitem(sys.modules, "services.research", sub)
     name = "services.research.research_handler"
     monkeypatch.delitem(sys.modules, name, raising=False)
-    spec = importlib.util.spec_from_file_location(
-        name, "services/research/research_handler.py"
-    )
+    spec = importlib.util.spec_from_file_location(name, "services/research/research_handler.py")
     mod = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, mod)
     spec.loader.exec_module(mod)
@@ -63,9 +61,7 @@ def test_junk_first_no_longer_suppresses_the_good_finding(handler_cls):
 
 
 def test_evidence_is_checked_when_summary_missing(handler_cls):
-    out = handler_cls._extract_sources(
-        [{"url": "http://a", "title": "T", "evidence": "Concrete evidence text"}]
-    )
+    out = handler_cls._extract_sources([{"url": "http://a", "title": "T", "evidence": "Concrete evidence text"}])
     assert out == [{"url": "http://a", "title": "T"}]
 
 

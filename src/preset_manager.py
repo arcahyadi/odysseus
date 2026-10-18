@@ -1,9 +1,10 @@
-import os
 import json
 import logging
-from typing import Dict, Any
+import os
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
 
 class PresetManager:
     DEFAULT_PRESETS = {
@@ -11,7 +12,7 @@ class PresetManager:
             "name": "Code Analyze",
             "temperature": 0.2,
             "max_tokens": 8000,
-            "system_prompt": """You are a code analyzer. 
+            "system_prompt": """You are a code analyzer.
 ANALYSIS FORMAT:
 - Issues: [specific problems found]
 - Security: [vulnerabilities if any]
@@ -19,7 +20,7 @@ ANALYSIS FORMAT:
 - Fix: [concrete solutions with code examples]
 
 Start directly with findings. No preamble. If input isn't code, state: "Input is not code. Please provide code to analyze."
-"""
+""",
         },
         "brainstorm": {
             "name": "Brainstorm",
@@ -27,7 +28,7 @@ Start directly with findings. No preamble. If input isn't code, state: "Input is
             "max_tokens": 4096,
             "system_prompt": """You are a creative ideation assistant focused on divergent thinking.
 
-Generate diverse, unexpected ideas that span from practical to experimental. 
+Generate diverse, unexpected ideas that span from practical to experimental.
 - Mix conventional and unconventional approaches
 - Connect unrelated concepts to spark innovation
 - Consider multiple perspectives and contexts
@@ -35,7 +36,7 @@ Generate diverse, unexpected ideas that span from practical to experimental.
 - Challenge assumptions without being absurd for absurdity's sake
 
 Structure ideas clearly but allow creative freedom in presentation. Aim for quantity and variety over filtering.
-"""
+""",
         },
         "reason": {
             "name": "Reason",
@@ -51,7 +52,7 @@ Structure all responses using clear logical progression:
 5. Conclude with justified answer
 
 Use precise language. Show causal relationships explicitly. Quantify uncertainty where applicable.
-"""
+""",
         },
         "custom": {
             "name": "Custom",
@@ -61,21 +62,21 @@ Use precise language. Show causal relationships explicitly. Quantify uncertainty
             "inject_prefix": "",
             "inject_suffix": "",
             "enabled": False,
-        }
+        },
     }
-    
+
     def __init__(self, data_dir: str):
         self.presets_file = os.path.join(data_dir, "presets.json")
         self.presets = self.load()
-    
-    def load(self) -> Dict[str, Any]:
+
+    def load(self) -> dict[str, Any]:
         """Load presets from file, creating defaults if needed"""
         if not os.path.exists(self.presets_file):
             self.save(self.DEFAULT_PRESETS)
             return self.DEFAULT_PRESETS.copy()
-        
+
         try:
-            with open(self.presets_file, 'r', encoding="utf-8") as f:
+            with open(self.presets_file, encoding="utf-8") as f:
                 presets = json.load(f)
             if not isinstance(presets, dict):
                 logger.error("Error loading presets: expected an object")
@@ -102,17 +103,15 @@ Use precise language. Show causal relationships explicitly. Quantify uncertainty
             # served by GET /api/presets). There is no delete path for the
             # built-in keys, so this never clobbers an intentional removal.
             # Defaults first, loaded values win — user edits are preserved.
-            if isinstance(presets, dict) and any(
-                k not in presets for k in self.DEFAULT_PRESETS
-            ):
+            if isinstance(presets, dict) and any(k not in presets for k in self.DEFAULT_PRESETS):
                 presets = {**self.DEFAULT_PRESETS, **presets}
                 self.save(presets)
             return presets
         except Exception as e:
             logger.error(f"Error loading presets: {e}")
             return self.DEFAULT_PRESETS.copy()
-    
-    def save(self, presets: Dict[str, Any]) -> bool:
+
+    def save(self, presets: dict[str, Any]) -> bool:
         """Save presets to file"""
         try:
             # Atomic write (tmp file + os.replace) so a crash or serialization
@@ -120,17 +119,18 @@ Use precise language. Show causal relationships explicitly. Quantify uncertainty
             # preset. Lazy import keeps this module free of the heavy core
             # package import graph at load time.
             from core.atomic_io import atomic_write_json
+
             atomic_write_json(self.presets_file, presets, indent=2)
             self.presets = presets
             return True
         except Exception as e:
             logger.error(f"Error saving presets: {e}")
             return False
-    
-    def get(self, preset_id: str) -> Dict[str, Any]:
+
+    def get(self, preset_id: str) -> dict[str, Any]:
         """Get a specific preset"""
         return self.presets.get(preset_id)
-    
+
     def update_custom(
         self,
         temperature: float,
@@ -153,8 +153,8 @@ Use precise language. Show causal relationships explicitly. Quantify uncertainty
             "enabled": enabled,
         }
         return self.save(self.presets)
-    
-    def get_all(self) -> Dict[str, Any]:
+
+    def get_all(self) -> dict[str, Any]:
         """Get all presets"""
         return self.presets.copy()
 

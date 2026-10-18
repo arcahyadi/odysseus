@@ -135,6 +135,7 @@ def main() -> int:
             method = "GET"
             if len(sys.argv) >= 4:
                 from urllib.parse import quote
+
                 path = f"/api/codex/cookbook/cached?host={quote(sys.argv[3])}"
             else:
                 path = "/api/codex/cookbook/cached"
@@ -145,6 +146,7 @@ def main() -> int:
             body = None
         elif action == "preset" and len(sys.argv) >= 4:
             from urllib.parse import quote
+
             method = "POST"
             path = f"/api/codex/cookbook/preset/{quote(sys.argv[3])}"
             body = None
@@ -152,8 +154,10 @@ def main() -> int:
             method = "POST"
             path = "/api/codex/cookbook/adopt"
             payload = {"tmux_session": sys.argv[3], "model": sys.argv[4]}
-            if len(sys.argv) >= 6: payload["host"] = sys.argv[5]
-            if len(sys.argv) >= 7: payload["port"] = int(sys.argv[6])
+            if len(sys.argv) >= 6:
+                payload["host"] = sys.argv[5]
+            if len(sys.argv) >= 7:
+                payload["port"] = int(sys.argv[6])
             body = json.dumps(payload)
         elif action == "serve" and len(sys.argv) >= 5:
             method = "POST"

@@ -10,6 +10,7 @@ Earlier Claude models (Opus 4.6 and below, every Sonnet/Haiku) still accept
 temperature in [0.0, 1.0], so the omission is version-gated — the clamp-to-[0,1]
 behavior for those models (test_llm_core_anthropic_temp_clamp.py) is unchanged.
 """
+
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
@@ -69,9 +70,7 @@ def test_non_string_model_is_handled_without_crashing(model):
 
 
 def _payload(model, temperature=0.0):
-    return _build_anthropic_payload(
-        model, [{"role": "user", "content": "hi"}], temperature, 100
-    )
+    return _build_anthropic_payload(model, [{"role": "user", "content": "hi"}], temperature, 100)
 
 
 def test_payload_omits_temperature_for_opus_47_plus():

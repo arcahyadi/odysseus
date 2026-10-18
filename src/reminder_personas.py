@@ -70,9 +70,7 @@ def synthesis_system_prompt(persona_id: str) -> str:
         # Persona drives the voice; the synthesis-instruction stays attached
         # so the model knows it's writing a short reminder, not a chat reply.
         return (
-            persona_prompt
-            + "\n\n"
-            + "You are now writing a single one-line reminder for the user. "
-              "Keep it under 18 words and in the voice above."
+            persona_prompt + "\n\n" + "You are now writing a single one-line reminder for the user. "
+            "Keep it under 18 words and in the voice above."
         )
     return _DEFAULT_SYNTHESIS_TONE

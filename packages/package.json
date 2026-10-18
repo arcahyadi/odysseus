@@ -1,0 +1,27 @@
+{
+  "private": true,
+  "name": "@agentos/sfd-workspace",
+  "version": "0.1.0",
+  "workspaces": [
+    "sfd-eventbus",
+    "sfd-memory",
+    "sfd-durable",
+    "sfd-prefs",
+    "sfd-classify",
+    "sfd-security",
+    "sfd-discovery",
+    "sfd-heartbeat",
+    "sfd-phase",
+    "sfd-visual"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "clean": "rm -rf */dist"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.9.3",
+    "vitest": "^2.0.0"
+  }
+}

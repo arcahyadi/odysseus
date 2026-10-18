@@ -17,23 +17,24 @@ Subcommands:
     delete     Delete an event by UID
 """
 
-
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
 
 import argparse
-import json
 import logging
 import os
 import sys
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
+
 
 def quiet_logs() -> None:
     level_name = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -47,12 +48,11 @@ def quiet_logs() -> None:
 quiet_logs()
 
 try:
-    from core.database import SessionLocal, CalendarCal, CalendarEvent
+    from core.database import CalendarCal, CalendarEvent, SessionLocal
+
     quiet_logs()
 except ModuleNotFoundError as e:
-    sys.stderr.write(
-        f"error: {e}\nhint: run from repo root with venv active.\n"
-    )
+    sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
     sys.exit(2)
 
 
@@ -69,13 +69,13 @@ def _parse_dt(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
-def _calendar_name(ev: "CalendarEvent") -> str:
+def _calendar_name(ev: CalendarEvent) -> str:
     cal = getattr(ev, "calendar", None)
     name = getattr(cal, "name", "") if cal else ""
     return name if isinstance(name, str) else ""
 
 
-def _serialize_event(ev: "CalendarEvent") -> dict:
+def _serialize_event(ev: CalendarEvent) -> dict:
     return {
         "uid": ev.uid,
         "calendar_id": ev.calendar_id,
@@ -84,18 +84,19 @@ def _serialize_event(ev: "CalendarEvent") -> dict:
         "description": ev.description or "",
         "location": ev.location or "",
         "dtstart": ev.dtstart.isoformat() + ("Z" if ev.is_utc else "") if ev.dtstart else "",
-        "dtend":   ev.dtend.isoformat()   + ("Z" if ev.is_utc else "") if ev.dtend else "",
+        "dtend": ev.dtend.isoformat() + ("Z" if ev.is_utc else "") if ev.dtend else "",
         "all_day": bool(ev.all_day),
-        "is_utc":  bool(ev.is_utc),
-        "rrule":   ev.rrule or "",
-        "color":   ev.color or "",
-        "status":  ev.status or "",
+        "is_utc": bool(ev.is_utc),
+        "rrule": ev.rrule or "",
+        "color": ev.color or "",
+        "status": ev.status or "",
         "importance": ev.importance or "",
         "event_type": ev.event_type or "",
     }
 
 
 # ─── list ────────────────────────────────────────────────────────────
+
 
 def cmd_list(args) -> None:
     """List events in a date range. Defaults to next 30 days from today."""
@@ -124,6 +125,7 @@ def cmd_list(args) -> None:
 
 # ─── show ────────────────────────────────────────────────────────────
 
+
 def cmd_show(args) -> None:
     db = SessionLocal()
     try:
@@ -137,24 +139,30 @@ def cmd_show(args) -> None:
 
 # ─── calendars ───────────────────────────────────────────────────────
 
+
 def cmd_calendars(args) -> None:
     db = SessionLocal()
     try:
         cals = db.query(CalendarCal).order_by(CalendarCal.name.asc()).all()
-        emit([
-            {
-                "id": c.id,
-                "name": c.name,
-                "color": c.color or "",
-                "source": c.source or "local",
-                "event_count": len(c.events),
-            } for c in cals
-        ], args)
+        emit(
+            [
+                {
+                    "id": c.id,
+                    "name": c.name,
+                    "color": c.color or "",
+                    "source": c.source or "local",
+                    "event_count": len(c.events),
+                }
+                for c in cals
+            ],
+            args,
+        )
     finally:
         db.close()
 
 
 # ─── create ──────────────────────────────────────────────────────────
+
 
 def cmd_create(args) -> None:
     """Create an event. --start/--end accept YYYY-MM-DD or ISO 8601.
@@ -195,6 +203,7 @@ def cmd_create(args) -> None:
 
 # ─── delete ──────────────────────────────────────────────────────────
 
+
 def cmd_delete(args) -> None:
     db = SessionLocal()
     try:
@@ -210,6 +219,7 @@ def cmd_delete(args) -> None:
 
 
 # ─── argparse ────────────────────────────────────────────────────────
+
 
 def _build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
@@ -245,7 +255,9 @@ def _build_parser() -> argparse.ArgumentParser:
     pcr.add_argument("--location", default="")
     pcr.add_argument("--all-day", action="store_true")
     pcr.add_argument("--importance", choices=["low", "normal", "high", "critical"], default="normal")
-    pcr.add_argument("--event-type", choices=["work", "personal", "health", "travel", "meal", "social", "admin", "other"])
+    pcr.add_argument(
+        "--event-type", choices=["work", "personal", "health", "travel", "meal", "social", "admin", "other"]
+    )
     pcr.set_defaults(func=cmd_create)
 
     pd = sub.add_parser("delete", help="delete an event by UID", parents=[common])

@@ -4,6 +4,7 @@
 try, so a non-string `directory` in the tool args (e.g. a number) raised
 AttributeError out of call_tool. Coerce non-strings to "".
 """
+
 import asyncio
 
 import pytest

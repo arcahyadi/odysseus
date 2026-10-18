@@ -8,7 +8,6 @@ remove the card and decrement `_libraryTotal`, but the header/chips render from
 
 from pathlib import Path
 
-
 SRC = Path(__file__).resolve().parent.parent / "static/js/documentLibrary.js"
 
 

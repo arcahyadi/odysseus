@@ -1,13 +1,14 @@
 # routes/memory_routes.py
-from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
-from typing import Dict, Any, Optional, List
 import json
+import logging
 import os
 import re
 import tempfile
 import time
 from datetime import datetime
-import logging
+from typing import Any
+
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 # Leading list-marker like "1.", "12)", or "3:" plus surrounding whitespace.
 # Strips one prefix per call so import-from-LLM-output doesn't leave the
@@ -21,16 +22,17 @@ def _strip_list_prefix(text: str) -> str:
         return text
     return _LIST_PREFIX_RE.sub("", text, count=1).strip()
 
-from services.memory import MemoryManager
-from core.session_manager import SessionManager
-from src.request_models import MemoryAddRequest
+
 from core.database import SessionLocal
-from src.llm_core import llm_call_async
+from core.session_manager import SessionManager
+from services.memory import MemoryManager
 from services.memory.memory_extractor import audit_memories
 from src.auth_helpers import get_current_user, require_user
 from src.endpoint_resolver import resolve_endpoint
+from src.llm_core import llm_call_async
+from src.request_models import MemoryAddRequest
 from src.task_endpoint import resolve_task_endpoint
-from src.upload_limits import read_upload_limited, MEMORY_IMPORT_MAX_BYTES
+from src.upload_limits import MEMORY_IMPORT_MAX_BYTES, read_upload_limited
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     """Set up memory-related routes."""
     router = APIRouter(prefix="/api/memory", tags=["memory"])
 
-    def _owner(request: Request) -> Optional[str]:
+    def _owner(request: Request) -> str | None:
         return get_current_user(request)
 
     def _assert_session_owner(session_obj, user):
@@ -54,7 +56,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if user is not None and getattr(session_obj, "owner", None) != user:
             raise HTTPException(404, "Session not found")
 
-    def _verify_memory_owner(memory: dict, user: Optional[str]):
+    def _verify_memory_owner(memory: dict, user: str | None):
         """Raise 404 if user doesn't own this memory.
 
         SECURITY: strict ownership — previously `mem_owner and mem_owner != user`
@@ -77,17 +79,14 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             "query": query,
             "total_memories": len(memories),
             "relevant_count": len(relevant),
-            "relevant_memories": [{"text": m["text"], "category": m.get("category", "unknown")}
-                                 for m in relevant]
+            "relevant_memories": [{"text": m["text"], "category": m.get("category", "unknown")} for m in relevant],
         }
 
-    @router.post("/add", response_model=Dict[str, Any])
-    async def api_add_memory(
-        request: Request,
-        memory_data: Optional[MemoryAddRequest] = None
-    ):
+    @router.post("/add", response_model=dict[str, Any])
+    async def api_add_memory(request: Request, memory_data: MemoryAddRequest | None = None):
         """Add a new memory entry with optional category, source, and session reference."""
         from src.auth_helpers import require_privilege
+
         require_privilege(request, "can_manage_memory")
         if memory_data is None:
             form = await request.form()
@@ -95,7 +94,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 text=form.get("text"),
                 category=form.get("category", "fact"),
                 source=form.get("source", "user"),
-                session_id=form.get("session_id")
+                session_id=form.get("session_id"),
             )
 
         user = _owner(request)
@@ -124,6 +123,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             memory_vector.add(new_entry["id"], text)
         try:
             from src.event_bus import fire_event
+
             fire_event("memory_added", user)
         except Exception:
             logger.debug("memory_added event dispatch failed", exc_info=True)
@@ -136,7 +136,9 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         return {"memory": memory_manager.load(owner=user)}
 
     @router.post("/search")
-    def search_memories(request: Request, query: str = Form(...), session_id: str = Form(None), category: str = Form(None)):
+    def search_memories(
+        request: Request, query: str = Form(...), session_id: str = Form(None), category: str = Form(None)
+    ):
         """Search across all memories with optional filters."""
         user = _owner(request)
         memories = memory_manager.load(owner=user)
@@ -216,11 +218,11 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             "session_id": session_id,
             "session_name": session_name,
             "memory_count": len(session_memories),
-            "memories": session_memories
+            "memories": session_memories,
         }
 
     @router.post("/extract")
-    async def extract_memory(request: Request, session: str = Form(...)) -> Dict[str, List[str]]:
+    async def extract_memory(request: Request, session: str = Form(...)) -> dict[str, list[str]]:
         """Analyze a session's chat history and return memory suggestions."""
         require_user(request)
         try:
@@ -290,9 +292,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             except KeyError:
                 pass
 
-        endpoint_url, model, headers = resolve_task_endpoint(
-            fallback_url, fallback_model, fallback_headers, owner=user
-        )
+        endpoint_url, model, headers = resolve_task_endpoint(fallback_url, fallback_model, fallback_headers, owner=user)
 
         if not endpoint_url or not model:
             raise HTTPException(400, "No default model configured — set one in Settings")
@@ -322,12 +322,11 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
 
     @router.post("/import")
     async def import_memories_from_file(
-        request: Request,
-        session: str | None = Form(None),
-        file: UploadFile = File(...)
+        request: Request, session: str | None = Form(None), file: UploadFile = File(...)
     ):
         """Extract memory suggestions from an uploaded file (PDF, TXT, MD, etc.)."""
         from src.auth_helpers import require_privilege
+
         require_privilege(request, "can_manage_memory")
 
         endpoint_url = None
@@ -356,7 +355,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 )
         else:
             endpoint_url, model, headers = resolve_task_endpoint(owner=user)
-    
+
         if not endpoint_url or not model:
             raise HTTPException(400, "No LLM model configured. Set a default model in Settings.")
 
@@ -371,6 +370,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         # Extract text based on file type
         if ext == ".pdf":
             from src.document_processor import _process_pdf
+
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                 tmp.write(content)
                 tmp_path = tmp.name
@@ -383,6 +383,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 text = content.decode("utf-8")
             except UnicodeDecodeError:
                 from charset_normalizer import detect
+
                 encoding = (detect(content) or {}).get("encoding") or "utf-8"
                 text = content.decode(encoding, errors="replace")
 
@@ -405,15 +406,19 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 direct = []
                 for item in parsed:
                     if isinstance(item, dict) and item.get("text"):
-                        direct.append({
-                            "text": _strip_list_prefix(str(item["text"])),
-                            "category": item.get("category") or "fact",
-                        })
+                        direct.append(
+                            {
+                                "text": _strip_list_prefix(str(item["text"])),
+                                "category": item.get("category") or "fact",
+                            }
+                        )
                     elif isinstance(item, str) and item.strip():
-                        direct.append({
-                            "text": _strip_list_prefix(item.strip()),
-                            "category": "fact",
-                        })
+                        direct.append(
+                            {
+                                "text": _strip_list_prefix(item.strip()),
+                                "category": "fact",
+                            }
+                        )
                 if direct:
                     return {"suggestions": direct, "filename": filename}
 
@@ -495,6 +500,56 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 memory_manager.save(all_mem)
                 return {"ok": True, "pinned": pinned}
         raise HTTPException(404, f"Memory item {memory_id} not found")
+
+    # ── Mem0 structured facts ─────────────────────────────────────────────
+
+    @router.get("/facts")
+    async def get_mem0_facts(request: Request, user_id: str | None = None):
+        """Return structured facts extracted by Mem0 from conversations."""
+        target_user = user_id or _owner(request) or "default"
+
+        # Find Mem0Provider from the active registry
+        try:
+            from src.memory_provider import get_active_registry
+
+            registry = get_active_registry()
+            mem0 = registry.get("mem0") if registry else None
+        except (KeyError, AttributeError):
+            mem0 = None
+
+        if mem0 is None or not getattr(mem0, "enabled", False):
+            raise HTTPException(404, "Mem0 provider not available")
+
+        facts = await mem0.search_facts(target_user, user_id=target_user)
+        return {
+            "user_id": target_user,
+            "facts": facts,
+            "count": len(facts),
+            "provider": "mem0",
+        }
+
+    @router.get("/profile")
+    async def get_mem0_profile(request: Request, user_id: str | None = None):
+        """Return consolidated user profile with extracted facts."""
+        target_user = user_id or _owner(request) or "default"
+
+        try:
+            from src.memory_provider import get_active_registry
+
+            registry = get_active_registry()
+            mem0 = registry.get("mem0") if registry else None
+        except (KeyError, AttributeError):
+            mem0 = None
+
+        if mem0 is None or not getattr(mem0, "enabled", False):
+            raise HTTPException(404, "Mem0 provider not available")
+
+        profile = await mem0.get_user_profile(target_user)
+        return {
+            "user_id": target_user,
+            "profile": profile,
+            "provider": "mem0",
+        }
 
     # Wildcard routes MUST come last — otherwise they swallow /import, /search, etc.
     @router.get("/{memory_id}")

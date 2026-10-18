@@ -8,6 +8,7 @@ guard against a close button shipping without an accessible label again.
 Plain text/regex assertions (no bs4 dependency), matching the lightweight style
 of the other tests in this suite.
 """
+
 import re
 from pathlib import Path
 
@@ -54,3 +55,12 @@ def test_styled_dialogs_manage_focus():
     assert _UI.count("_prevFocus && _prevFocus.focus && _prevFocus.focus()") == 2
     assert _UI.count("e.key === 'Tab'") == 2
 
+
+def test_toast_has_dismiss_button():
+    """Both showToast and showError must include a close button with aria-label."""
+    # Read fresh every time so edits to ui.js are picked up
+    ui = (_REPO / "static" / "js" / "ui.js").read_text(encoding="utf-8")
+    assert "toast-close-btn" in ui
+    assert "aria-label" in ui
+    assert "Dismiss" in ui
+    assert ui.count("toast-close-btn") >= 2

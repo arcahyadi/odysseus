@@ -4,40 +4,241 @@ import math
 import re
 import time
 from collections import Counter
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any
+
 from src.chat_helpers import extract_urls
-from src.youtube_handler import is_youtube_url
-from src.search import comprehensive_web_search, fetch_webpage_content
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
+from src.search import comprehensive_web_search, fetch_webpage_content
+from src.youtube_handler import is_youtube_url
 
 logger = logging.getLogger(__name__)
 
 # ── Stopwords & tokenizer ──
 
 _STOPWORDS = frozenset(
-    "a an the is am are was were be been being have has had do does did "
-    "will would shall should can could may might must need ought dare "
-    "i me my mine we us our ours you your yours he him his she her hers "
-    "it its they them their theirs this that these those "
-    "and but or nor not no so if then else than too also very "
-    "in on at to for of by with from up out about into over after "
-    "what when where which who whom how why all each every some any "
-    "just very really actually like well also still already even "
-    "oh ok okay yes yeah hey hi hello thanks thank please sorry "
-    "much more most own other another such only same here there "
-    "because while during before until since through between both "
-    "few many several some none nothing something anything everything "
-    "get got make made go going went been come came take took "
-    "know think want let say tell give see look find way thing "
-    "don doesn didn won wouldn couldn shouldn wasn weren isn aren haven hasn "
-    "don't doesn't didn't won't wouldn't couldn't shouldn't "
-    "it's i'm i've i'll i'd you're you've you'll he's she's we're we've they're they've "
-    "that's there's here's what's who's how's let's can't".split()
+    [
+        "a",
+        "an",
+        "the",
+        "is",
+        "am",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "can",
+        "could",
+        "may",
+        "might",
+        "must",
+        "need",
+        "ought",
+        "dare",
+        "i",
+        "me",
+        "my",
+        "mine",
+        "we",
+        "us",
+        "our",
+        "ours",
+        "you",
+        "your",
+        "yours",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "hers",
+        "it",
+        "its",
+        "they",
+        "them",
+        "their",
+        "theirs",
+        "this",
+        "that",
+        "these",
+        "those",
+        "and",
+        "but",
+        "or",
+        "nor",
+        "not",
+        "no",
+        "so",
+        "if",
+        "then",
+        "else",
+        "than",
+        "too",
+        "also",
+        "very",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "by",
+        "with",
+        "from",
+        "up",
+        "out",
+        "about",
+        "into",
+        "over",
+        "after",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "how",
+        "why",
+        "all",
+        "each",
+        "every",
+        "some",
+        "any",
+        "just",
+        "very",
+        "really",
+        "actually",
+        "like",
+        "well",
+        "also",
+        "still",
+        "already",
+        "even",
+        "oh",
+        "ok",
+        "okay",
+        "yes",
+        "yeah",
+        "hey",
+        "hi",
+        "hello",
+        "thanks",
+        "thank",
+        "please",
+        "sorry",
+        "much",
+        "more",
+        "most",
+        "own",
+        "other",
+        "another",
+        "such",
+        "only",
+        "same",
+        "here",
+        "there",
+        "because",
+        "while",
+        "during",
+        "before",
+        "until",
+        "since",
+        "through",
+        "between",
+        "both",
+        "few",
+        "many",
+        "several",
+        "some",
+        "none",
+        "nothing",
+        "something",
+        "anything",
+        "everything",
+        "get",
+        "got",
+        "make",
+        "made",
+        "go",
+        "going",
+        "went",
+        "been",
+        "come",
+        "came",
+        "take",
+        "took",
+        "know",
+        "think",
+        "want",
+        "let",
+        "say",
+        "tell",
+        "give",
+        "see",
+        "look",
+        "find",
+        "way",
+        "thing",
+        "don",
+        "doesn",
+        "didn",
+        "won",
+        "wouldn",
+        "couldn",
+        "shouldn",
+        "wasn",
+        "weren",
+        "isn",
+        "aren",
+        "haven",
+        "hasn",
+        "don't",
+        "doesn't",
+        "didn't",
+        "won't",
+        "wouldn't",
+        "couldn't",
+        "shouldn't",
+        "it's",
+        "i'm",
+        "i've",
+        "i'll",
+        "i'd",
+        "you're",
+        "you've",
+        "you'll",
+        "he's",
+        "she's",
+        "we're",
+        "we've",
+        "they're",
+        "they've",
+        "that's",
+        "there's",
+        "here's",
+        "what's",
+        "who's",
+        "how's",
+        "let's",
+        "can't",
+    ]
 )
+
 
 def _content_tokens(text: str) -> list:
     """Extract meaningful content words: no stopwords, min 3 chars, lowercase."""
-    words = re.findall(r'[a-z0-9]+(?:[-_][a-z0-9]+)*', text.lower())
+    words = re.findall(r"[a-z0-9]+(?:[-_][a-z0-9]+)*", text.lower())
     return [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
 
 
@@ -163,14 +364,14 @@ class ChatProcessor:
         use_web: bool = False,
         use_rag: bool = True,
         use_memory: bool = True,
-        time_filter: Optional[str] = None,
-        preset_system_prompt: Optional[str] = None,
-        owner: Optional[str] = None,
-        character_name: Optional[str] = None,
+        time_filter: str | None = None,
+        preset_system_prompt: str | None = None,
+        owner: str | None = None,
+        character_name: str | None = None,
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
-    ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
+    ) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, str]]]:
         """Build the context preface for LLM calls.
 
         Returns:
@@ -194,14 +395,13 @@ class ChatProcessor:
 
         # Add preset system prompt if specified
         if preset_system_prompt:
-            preface.append({
+            preface.append({"role": "system", "content": preset_system_prompt})
+        preface.append(
+            {
                 "role": "system",
-                "content": preset_system_prompt
-            })
-        preface.append({
-            "role": "system",
-            "content": UNTRUSTED_CONTEXT_POLICY,
-        })
+                "content": UNTRUSTED_CONTEXT_POLICY,
+            }
+        )
 
         # Memory: pinned (always included) + extended (RAG-retrieved when relevant)
         self._last_used_memories = []  # track what was injected
@@ -214,12 +414,16 @@ class ChatProcessor:
             _used_ids: list = []
             if pinned:
                 pinned_text = "\n- ".join([m["text"] for m in pinned])
-                preface.append(untrusted_context_message(
-                    "saved memory: pinned user facts",
-                    f"Core facts about the user:\n- {pinned_text}",
-                ))
+                preface.append(
+                    untrusted_context_message(
+                        "saved memory: pinned user facts",
+                        f"Core facts about the user:\n- {pinned_text}",
+                    )
+                )
                 for m in pinned:
-                    self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "pinned"})
+                    self._last_used_memories.append(
+                        {"text": m["text"], "category": m.get("category", "fact"), "type": "pinned"}
+                    )
                     if m.get("id"):
                         _used_ids.append(m["id"])
 
@@ -227,15 +431,16 @@ class ChatProcessor:
                 relevant = self._hybrid_retrieve(message, extended, k=3)
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
-                    preface.append(untrusted_context_message(
-                        "saved memory: retrieved context",
-                        (
-                            "Memory context. Do not reference unless the user asks "
-                            f"about these topics.\n{ext_text}"
-                        ),
-                    ))
+                    preface.append(
+                        untrusted_context_message(
+                            "saved memory: retrieved context",
+                            (f"Memory context. Do not reference unless the user asks about these topics.\n{ext_text}"),
+                        )
+                    )
                     for m in relevant:
-                        self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "recalled"})
+                        self._last_used_memories.append(
+                            {"text": m["text"], "category": m.get("category", "fact"), "type": "recalled"}
+                        )
                         if m.get("id"):
                             _used_ids.append(m["id"])
 
@@ -252,23 +457,25 @@ class ChatProcessor:
         # RAG: search if enabled and rag_manager available, inject only above threshold
         if use_rag:
             try:
-                rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
+                rag_manager = getattr(self.personal_docs_manager, "rag_manager", None)
                 if rag_manager:
                     results = rag_manager.search(message, k=5, owner=owner)
                     # Filter by similarity threshold
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]
                     if relevant:
-                        logger.info(f"RAG: {len(relevant)}/{len(results)} results above threshold {self.RAG_SIMILARITY_THRESHOLD}")
+                        logger.info(
+                            f"RAG: {len(relevant)}/{len(results)} results above threshold {self.RAG_SIMILARITY_THRESHOLD}"
+                        )
                         rag_sources = [
                             {
                                 "filename": r["metadata"].get("filename", r["metadata"].get("source", "unknown")),
                                 "snippet": r["document"][:200],
-                                "similarity": round(r.get("similarity", 0), 3)
+                                "similarity": round(r.get("similarity", 0), 3),
                             }
                             for r in relevant
                         ]
                         rag_content = "Relevant documents:\n\n" + "\n\n---\n\n".join(
-                            f"[{s['filename']}]\n{r['document']}" for s, r in zip(rag_sources, relevant)
+                            f"[{s['filename']}]\n{r['document']}" for s, r in zip(rag_sources, relevant, strict=False)
                         )
                         if len(rag_content) > 10000:
                             rag_content = rag_content[:10000] + "\n[Truncated]"
@@ -286,7 +493,9 @@ class ChatProcessor:
                 preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:
                 logger.error(f"Web search failed: {e}")
-                preface.append({"role": "system", "content": "Web search encountered an error and could not retrieve results."})
+                preface.append(
+                    {"role": "system", "content": "Web search encountered an error and could not retrieve results."}
+                )
 
         # Process non-YouTube URLs in message (YouTube handled by preprocess_message)
         # Skip auto-fetch for long pastes (the user already pasted the content —
@@ -300,12 +509,14 @@ class ChatProcessor:
         if not skip_url_fetch:
             for url in non_yt_urls:
                 result = fetch_webpage_content(url)
-                if result.get('success'):
-                    content = result.get('content', '')[:10000]
-                    preface.append(untrusted_context_message(
-                        f"web page: {url}",
-                        f"Content from {url}:\n\n{content}",
-                    ))
+                if result.get("success"):
+                    content = result.get("content", "")[:10000]
+                    preface.append(
+                        untrusted_context_message(
+                            f"web page: {url}",
+                            f"Content from {url}:\n\n{content}",
+                        )
+                    )
 
         # Skills index — progressive disclosure. Only injected when the
         # model has the `manage_skills` tool available (agent_mode), and
@@ -319,7 +530,7 @@ class ChatProcessor:
                 logger.debug(f"Skills index unavailable: {e}")
                 idx = []
             if idx:
-                by_cat: Dict[str, list] = {}
+                by_cat: dict[str, list] = {}
                 for s in idx:
                     by_cat.setdefault(s.get("category") or "general", []).append(s)
                 lines = ["[Available skills — call manage_skills(action='view', name='...') to load one when relevant]"]

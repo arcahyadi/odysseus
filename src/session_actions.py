@@ -8,18 +8,50 @@ and the task scheduler / builtin actions system.
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 # Names that indicate a throwaway/test session
 _THROWAWAY_NAMES = {
-    "test", "testing", "asdf", "asd", "hello", "hi", "hey",
-    "yo", "sup", "hola", "hii", "hiii", "heyo",
-    "foo", "bar", "baz", "tmp", "temp", "scratch", "untitled",
-    "new chat", "delete", "remove", "junk", "trash", "xxx",
-    "abc", "qwerty", "blah", "stuff", "whatever", "idk",
-    "ok", "lol", "bruh", "hmm", "hm", "meh",
+    "test",
+    "testing",
+    "asdf",
+    "asd",
+    "hello",
+    "hi",
+    "hey",
+    "yo",
+    "sup",
+    "hola",
+    "hii",
+    "hiii",
+    "heyo",
+    "foo",
+    "bar",
+    "baz",
+    "tmp",
+    "temp",
+    "scratch",
+    "untitled",
+    "new chat",
+    "delete",
+    "remove",
+    "junk",
+    "trash",
+    "xxx",
+    "abc",
+    "qwerty",
+    "blah",
+    "stuff",
+    "whatever",
+    "idk",
+    "ok",
+    "lol",
+    "bruh",
+    "hmm",
+    "hm",
+    "meh",
 }
 _THROWAWAY_MAX_MESSAGES = 4
 _FRESH_EMPTY_SESSION_GRACE = timedelta(minutes=10)
@@ -28,14 +60,14 @@ _FRESH_SESSION_GRACE = _FRESH_EMPTY_SESSION_GRACE
 
 def _utcnow_naive() -> datetime:
     """Return naive UTC for existing session DateTime columns."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _as_naive_utc(value):
     if value is None:
         return None
     if getattr(value, "tzinfo", None) is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.astimezone(UTC).replace(tzinfo=None)
     return value
 
 
@@ -65,7 +97,9 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
 
     Returns a human-readable summary of what was done.
     """
-    from core.database import SessionLocal, Session as DbSession, ChatMessage as DbMsg
+    from core.database import ChatMessage as DbMsg
+    from core.database import Session as DbSession
+    from core.database import SessionLocal
     from src.llm_core import llm_call_async
     from src.task_endpoint import resolve_task_endpoint
 
@@ -75,14 +109,18 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
         deleted_empty = 0
         deleted_throwaway = 0
 
-        rows = db.query(DbSession).filter(
-            DbSession.archived == False,
-            *([DbSession.owner == owner] if owner else []),
-        ).all()
+        rows = (
+            db.query(DbSession)
+            .filter(
+                DbSession.archived == False,
+                *([DbSession.owner == owner] if owner else []),
+            )
+            .all()
+        )
 
         cleanup_now = _utcnow_naive()
         for row in rows:
-            if getattr(row, 'is_important', False):
+            if getattr(row, "is_important", False):
                 continue
             created_at = _as_naive_utc(row.created_at or row.updated_at) or _utcnow_naive()
             is_fresh = (_utcnow_naive() - created_at) < _FRESH_EMPTY_SESSION_GRACE
@@ -93,9 +131,7 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             if is_session_recently_active(row, now=cleanup_now):
                 continue
 
-            msg_count = db.query(DbMsg.id).filter(
-                DbMsg.session_id == row.id
-            ).limit(_THROWAWAY_MAX_MESSAGES + 1).count()
+            msg_count = db.query(DbMsg.id).filter(DbMsg.session_id == row.id).limit(_THROWAWAY_MAX_MESSAGES + 1).count()
             should_delete = False
 
             if msg_count == 0:
@@ -105,18 +141,24 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
                 deleted_empty += 1
             elif delete_throwaway and msg_count <= _THROWAWAY_MAX_MESSAGES:
                 name = (row.name or "").strip().lower()
-                first_msg = db.query(DbMsg.content).filter(
-                    DbMsg.session_id == row.id, DbMsg.role == "user"
-                ).order_by(DbMsg.timestamp).first()
+                first_msg = (
+                    db.query(DbMsg.content)
+                    .filter(DbMsg.session_id == row.id, DbMsg.role == "user")
+                    .order_by(DbMsg.timestamp)
+                    .first()
+                )
                 first_text = (first_msg[0] or "").strip().lower() if first_msg else ""
-                assistant_count = db.query(DbMsg.id).filter(
-                    DbMsg.session_id == row.id, DbMsg.role == "assistant"
-                ).limit(1).count()
+                assistant_count = (
+                    db.query(DbMsg.id).filter(DbMsg.session_id == row.id, DbMsg.role == "assistant").limit(1).count()
+                )
 
-                if name in _THROWAWAY_NAMES or name.startswith("chat:") or first_text in _THROWAWAY_NAMES:
-                    should_delete = True
-                    deleted_throwaway += 1
-                elif msg_count == 1 and assistant_count == 0:
+                if (
+                    name in _THROWAWAY_NAMES
+                    or name.startswith("chat:")
+                    or first_text in _THROWAWAY_NAMES
+                    or msg_count == 1
+                    and assistant_count == 0
+                ):
                     should_delete = True
                     deleted_throwaway += 1
                 elif msg_count <= 4 and first_text and len(first_text.split()) <= 8 and len(first_text) <= 80:
@@ -125,9 +167,7 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
                     deleted_throwaway += 1
                 else:
                     # Aggressive: total message text under 250 chars combined = trivial
-                    msg_rows = db.query(DbMsg.content).filter(
-                        DbMsg.session_id == row.id
-                    ).all()
+                    msg_rows = db.query(DbMsg.content).filter(DbMsg.session_id == row.id).all()
                     total_chars = sum(len(m[0] or "") for m in msg_rows)
                     if total_chars <= 250:
                         should_delete = True
@@ -141,20 +181,26 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             logger.info(f"Auto-sort: deleted {deleted_empty} empty + {deleted_throwaway} throwaway sessions")
 
         # ── Phase 2: AI folder assignment ──
-        remaining = db.query(DbSession).filter(
-            DbSession.archived == False,
-            *([DbSession.owner == owner] if owner else []),
-        ).all()
+        remaining = (
+            db.query(DbSession)
+            .filter(
+                DbSession.archived == False,
+                *([DbSession.owner == owner] if owner else []),
+            )
+            .all()
+        )
 
         session_list = []
         for row in remaining:
             if row.name == "Incognito":
                 continue
-            session_list.append({
-                "id": row.id,
-                "name": row.name or "(unnamed)",
-                "current_folder": row.folder,
-            })
+            session_list.append(
+                {
+                    "id": row.id,
+                    "name": row.name or "(unnamed)",
+                    "current_folder": row.folder,
+                }
+            )
 
         if len(session_list) < 2:
             return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Too few remaining to sort."
@@ -183,8 +229,15 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
         try:
             # 16384 (was 4096): large folder JSON + reasoning-model thinking
             # overflowed 4096 and truncated the JSON, so it never parsed.
-            raw = await llm_call_async(url, model, [{"role": "user", "content": prompt}],
-                                       temperature=0.3, max_tokens=16384, headers=headers, timeout=120)
+            raw = await llm_call_async(
+                url,
+                model,
+                [{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=16384,
+                headers=headers,
+                timeout=120,
+            )
         except Exception as e:
             logger.warning(f"Auto-sort LLM call failed: {e}")
             return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."
@@ -197,18 +250,18 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
         except json.JSONDecodeError:
             pass
         if result is None:
-            fence_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', text)
+            fence_match = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text)
             if fence_match:
                 try:
                     result = json.loads(fence_match.group(1).strip())
                 except json.JSONDecodeError:
                     pass
         if result is None:
-            brace_start = text.find('{')
-            brace_end = text.rfind('}')
+            brace_start = text.find("{")
+            brace_end = text.rfind("}")
             if brace_start >= 0 and brace_end > brace_start:
                 try:
-                    result = json.loads(text[brace_start:brace_end + 1])
+                    result = json.loads(text[brace_start : brace_end + 1])
                 except json.JSONDecodeError:
                     pass
         if result is None:

@@ -1,0 +1,218 @@
+# Odysseus AgentOS — Architecture 100% isolée sous Docker
+# ========================================================
+# Principe : chaque composant dans son conteneur, réseau interne,
+# aucun accès host sauf ports explicites.
+#
+# Services :
+#   opencode-daemon  — Daemon OpenCode REST (moteur LLM/sessions/agents)
+#   odysseus-app     — UI FastAPI + provenance_memory + EventBus
+#   tests            — Tests pytest (lancement ponctuel)
+#
+# Réseau : agentos-net (interne, bridge)
+# Volumes : persistants pour data, logs, config
+#
+# Usage:
+#   docker compose -f docker-compose.isolated.yml up -d
+#   docker compose -f docker-compose.isolated.yml run --rm tests
+#   docker compose -f docker-compose.isolated.yml down
+# ========================================================
+
+services:
+  # ================================================================
+  # OpenCode Daemon — moteur LLM, sessions, agents, plugins
+  # Interface REST : http://opencode-daemon:9888/api/
+  # Auth : HTTP Basic Auth (username: opencode, password: configurable)
+  # Pas exposé au host — accessible uniquement via le réseau interne
+  # ================================================================
+  opencode-daemon:
+    build:
+      context: .
+      dockerfile: docker/opencode-daemon/Dockerfile
+    image: odysseus-opencode-daemon:latest
+    container_name: odysseus-opencode-daemon
+    hostname: opencode-daemon
+    # Pas de ports exposés au host — interne au réseau Docker.
+    # Pour debug: décommenter ci-dessous
+    # ports:
+    #   - "127.0.0.1:9888:9888"
+    volumes:
+      # Config OpenCode (providers, agents, permissions)
+      - opencode-daemon-data:/home/opencode/data
+      # Mount de la config host en readonly (optionnel — pour utiliser
+      # les providers déjà configurés sur la machine hôte)
+      # - ./.config/opencode:/home/opencode/.config/opencode:ro
+    environment:
+      - NODE_ENV=production
+      - OPENCODE_HOME=/home/opencode
+      - OPENCODE_DAEMON_PASSWORD=${OPENCODE_DAEMON_PASSWORD:-opencode}
+    networks:
+      - agentos-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const h=require('http'),f=require('fs');const p=f.readFileSync('/home/opencode/.local/state/opencode/password','utf8').trim();const o={hostname:'localhost',port:9888,path:'/api/health',auth:'opencode:'+p};h.get(o,r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>process.exit(d.includes('healthy')?0:1))}).on('error',e=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ================================================================
+  # Odysseus App — UI HTMX + API FastAPI + provenance
+  # Interface : http://localhost:9889/
+  # ================================================================
+  odysseus-app:
+    build:
+      context: .
+      dockerfile: docker/odysseus-app/Dockerfile
+    image: odysseus-app:latest
+    container_name: odysseus-app
+    hostname: odysseus-app
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-9889}:9889"
+    volumes:
+      # Données persistantes (sessions, logs, uploads)
+      - app-data:/app/data
+      - app-logs:/app/logs
+      # Obsidian vault (opt-in)
+      - ${OBSIDIAN_VAULT_PATH:-./data/obsidian-vault}:/app/obsidian-vault:ro
+    environment:
+      # ── Connexion au daemon OpenCode ──
+      - OPENCODE_DAEMON_HOST=opencode-daemon
+      - OPENCODE_DAEMON_PORT=9888
+      - OPENCODE_DAEMON_TIMEOUT=300
+      - OPENCODE_DAEMON_PASSWORD=${OPENCODE_DAEMON_PASSWORD:-opencode}
+      # ── App config ──
+      - AUTH_ENABLED=${AUTH_ENABLED:-false}
+      - LOCALHOST_BYPASS=${LOCALHOST_BYPASS:-true}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/app.db}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
+      - SECURE_COOKIES=${SECURE_COOKIES:-false}
+      # ── LLM Keys (relay au daemon) ──
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # ── Search ──
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+      # ── Mémoire & Observabilité ──
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    networks:
+      - agentos-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    depends_on:
+      opencode-daemon:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:9889/', timeout=5).read(1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ================================================================
+  # Tests — même image que l'app, mais lance pytest
+  # Usage : docker compose -f docker-compose.isolated.yml run --rm tests
+  # ================================================================
+  tests:
+    build:
+      context: .
+      dockerfile: docker/odysseus-app/Dockerfile
+    image: odysseus-app:latest
+    container_name: odysseus-tests
+    profiles:
+      - tests
+    volumes:
+      - .:/app:ro  # mount du code source pour les tests
+    environment:
+      - OPENCODE_DAEMON_HOST=opencode-daemon
+      - OPENCODE_DAEMON_PORT=9888
+      - OPENCODE_DAEMON_TIMEOUT=30
+      - OPENCODE_DAEMON_PASSWORD=${OPENCODE_DAEMON_PASSWORD:-opencode}
+      - DATABASE_URL=sqlite:///./data/test.db
+      - AUTH_ENABLED=false
+      - LOCALHOST_BYPASS=true
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPATH=/app
+    networks:
+      - agentos-net
+    depends_on:
+      opencode-daemon:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: >
+      sh -c "
+        echo '=== Running Odysseus Tests ===' &&
+        python -m pytest tests/ -v --tb=short --maxfail=5 2>&1 ||
+        python -m pytest src/opencode_client.py -v 2>&1
+      "
+
+  # ================================================================
+  # CLI — console interactive dans le contexte du réseau isolé
+  # Usage : docker compose -f docker-compose.isolated.yml run --rm cli
+  # ================================================================
+  cli:
+    build:
+      context: .
+      dockerfile: docker/odysseus-app/Dockerfile
+    image: odysseus-app:latest
+    container_name: odysseus-cli
+    profiles:
+      - cli
+    volumes:
+      - .:/app:ro
+    environment:
+      - OPENCODE_DAEMON_HOST=opencode-daemon
+      - OPENCODE_DAEMON_PORT=9888
+      - OPENCODE_DAEMON_PASSWORD=${OPENCODE_DAEMON_PASSWORD:-opencode}
+      - PYTHONPATH=/app
+      - PYTHONDONTWRITEBYTECODE=1
+    networks:
+      - agentos-net
+    depends_on:
+      opencode-daemon:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Lance un shell Python avec le client pré-configuré
+    entrypoint: ["python", "/app/docker/cli_test.py"]
+
+# ================================================================
+# Volumes persistants
+# ================================================================
+volumes:
+  opencode-daemon-data:
+    driver: local
+  app-data:
+    driver: local
+  app-logs:
+    driver: local
+
+# ================================================================
+# Réseau interne isolé
+# ================================================================
+networks:
+  agentos-net:
+    driver: bridge
+    name: odysseus-isolated-net
+    attachable: true  # permet à d'autres conteneurs de s'y connecter

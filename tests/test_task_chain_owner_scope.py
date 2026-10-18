@@ -15,8 +15,8 @@ from tests.helpers.import_state import clear_fake_database_modules
 clear_fake_database_modules()
 
 import core.database as cdb
-import routes.task_routes as task_routes
 from core.database import ScheduledTask
+from routes import task_routes
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(

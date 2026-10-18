@@ -3,7 +3,20 @@
     "type": "git",
     "url": "https://github.com/pewdiepie-archdaemon/odysseus.git"
   },
+  "scripts": {
+    "css:refactor": "python scripts/refactor-css.py",
+    "css:purge": "purgecss --css static/css/style.min.css --content static/index.html static/login.html 'static/js/**/*.js' --output static/css/",
+    "css:build": "tailwindcss -i static/tailwind.css -o static/css/style.tailwind.min.css --minify",
+    "css:watch": "tailwindcss -i static/tailwind.css -o static/css/style.tailwind.min.css --watch"
+  },
   "devDependencies": {
-    "@antithesishq/bombadil": "^0.6.1"
+    "@antithesishq/bombadil": "^0.6.1",
+    "@faker-js/faker": "^9.0.0",
+    "promptfoo": "^0.108.0",
+    "purgecss": "^7.0.2"
+  },
+  "dependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "tailwindcss": "^4.3.3"
   }
 }

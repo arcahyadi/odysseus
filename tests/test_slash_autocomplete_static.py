@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 _REPO = Path(__file__).resolve().parent.parent
 _AC = (_REPO / "static" / "js" / "slashAutocomplete.js").read_text(encoding="utf-8")
 

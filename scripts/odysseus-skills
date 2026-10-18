@@ -13,17 +13,25 @@ list, inspect, and prune them from the shell.
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, shutil, sys
+import argparse
+import os
+import shutil
+import sys
 from pathlib import Path
 
 try:
     from services.memory.skills import SkillsManager
+
     quiet_logs()
 except ModuleNotFoundError as e:
     sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
@@ -119,12 +127,15 @@ def cmd_export(args):
         if args.raw:
             sys.stdout.write(md_path.read_text())
             return
-        emit({
-            "name": args.name,
-            "category": cat,
-            "path": str(md_path),
-            "content": md_path.read_text(),
-        }, args)
+        emit(
+            {
+                "name": args.name,
+                "category": cat,
+                "path": str(md_path),
+                "content": md_path.read_text(),
+            },
+            args,
+        )
         return
     fail(f"no skill named {args.name!r}")
 

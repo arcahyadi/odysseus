@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "static" / "js" / "toolWindowZOrder.js"
 pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node binary not on PATH")
@@ -27,6 +26,7 @@ def _node_eval(source: str):
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())

@@ -4,10 +4,11 @@ Pure UI-control marker: `execute_tool_block` returns a `plan_update` payload the
 agent loop turns into a `plan_update` SSE event; the frontend replaces the stored
 plan and refreshes the docked plan window. No I/O, does not end the turn.
 """
+
 import asyncio
 import json
 
-from src.agent_tools import ToolBlock, TOOL_TAGS  # import first to avoid circular
+from src.agent_tools import TOOL_TAGS, ToolBlock  # import first to avoid circular
 from src.tool_execution import execute_tool_block
 from src.tool_index import ALWAYS_AVAILABLE, BUILTIN_TOOL_DESCRIPTIONS
 from src.tool_security import is_public_blocked_tool
@@ -22,7 +23,7 @@ def test_valid_plan_returns_marker_and_counts():
     desc, result = _run(json.dumps({"plan": plan}))
     assert result.get("exit_code") == 0
     assert result["plan_update"]["plan"] == plan
-    assert "1/3" in result["output"]   # 1 done of 3
+    assert "1/3" in result["output"]  # 1 done of 3
 
 
 def test_plain_string_accepted():
@@ -41,6 +42,7 @@ def test_registered_everywhere():
     assert "update_plan" in ALWAYS_AVAILABLE
     assert "update_plan" in BUILTIN_TOOL_DESCRIPTIONS
     from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
     assert "update_plan" in {s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS}
     # Not admin/public-gated — any user can drive their own plan.
     assert is_public_blocked_tool("update_plan") is False

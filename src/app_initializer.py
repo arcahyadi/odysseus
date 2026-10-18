@@ -1,36 +1,43 @@
 # src/app_initializer.py
 """Initialize all application components and dependencies."""
-import os
-import logging
-from typing import Dict, Any
 
-from src.constants import (
-    DATA_DIR, PERSONAL_DIR, RUNBOOK_DIR, UPLOAD_DIR,
-    SESSIONS_FILE, DEFAULT_HOST, OPENAI_API_KEY
-)
-from src.memory import MemoryManager
-from src.memory_provider import MemoryProviderRegistry, NativeMemoryProvider
-from services.memory.skills import SkillsManager
-from core.session_manager import SessionManager
+import logging
+import os
+from typing import Any
+
 from core.models import set_session_manager
-from src.personal_docs import PersonalDocsManager
+from core.session_manager import SessionManager
+from services.memory.letta_provider import LettaMemoryProvider
+from services.memory.mem0_provider import Mem0Provider
+from services.memory.skills import SkillsManager
 from src.api_key_manager import APIKeyManager
-from src.preset_manager import PresetManager
-from src.chat_processor import ChatProcessor
-from src.model_discovery import ModelDiscovery
 from src.chat_handler import ChatHandler
+from src.chat_processor import ChatProcessor
+from src.constants import DATA_DIR, DEFAULT_HOST, OPENAI_API_KEY, PERSONAL_DIR, RUNBOOK_DIR, SESSIONS_FILE, UPLOAD_DIR
+from src.memory import MemoryManager
+from src.memory_provider import (
+    AcontextMemoryProvider,
+    MemoryProviderRegistry,
+    NativeMemoryProvider,
+    set_active_registry,
+)
+from src.model_discovery import ModelDiscovery
+from src.personal_docs import PersonalDocsManager
+from src.preset_manager import PresetManager
 from src.research_handler import ResearchHandler
-from src.upload_handler import UploadHandler
 from src.search import update_search_config
+from src.upload_handler import UploadHandler
 
 logger = logging.getLogger(__name__)
+
 
 def create_directories():
     """Create necessary directories if they don't exist."""
     for directory in (DATA_DIR, PERSONAL_DIR, RUNBOOK_DIR, UPLOAD_DIR):
         os.makedirs(directory, exist_ok=True)
-        
-def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
+
+
+def initialize_managers(base_dir: str, rag_manager=None) -> dict[str, Any]:
     """
     Initialize all manager and handler instances.
 
@@ -57,7 +64,8 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     memory_vector = None
     try:
         from src.memory_vector import MemoryVectorStore
-        embedding_model = getattr(rag_manager, '_model', None) if rag_manager else None
+
+        embedding_model = getattr(rag_manager, "_model", None) if rag_manager else None
         memory_vector = MemoryVectorStore(DATA_DIR, embedding_model=embedding_model)
         if memory_vector.healthy:
             # Rebuild index from existing memories if empty
@@ -74,14 +82,37 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         logger.warning(f"MemoryVectorStore DEGRADED: {e}")
         memory_vector = None
 
-    memory_provider_registry = MemoryProviderRegistry([
+    # Build provider list — always native + acontext; Mem0 gated by kill-switch.
+    providers = [
         NativeMemoryProvider(memory_manager, memory_vector),
-    ])
+        AcontextMemoryProvider(),
+    ]
+    mem0_provider = Mem0Provider(
+        native_provider=NativeMemoryProvider(memory_manager, memory_vector),
+    )
+    if mem0_provider.enabled:
+        providers.append(mem0_provider)
+        logger.info("Mem0Provider enabled (ODYSSEUS_MEM0)")
+    else:
+        logger.debug("Mem0Provider disabled (ODYSSEUS_MEM0=off)")
+
+    letta_provider = LettaMemoryProvider()
+    if letta_provider.enabled:
+        providers.append(letta_provider)
+        logger.info("LettaMemoryProvider enabled (ODYSSEUS_LETTA)")
+    else:
+        logger.debug("LettaMemoryProvider disabled (ODYSSEUS_LETTA=off)")
+
+    memory_provider_registry = MemoryProviderRegistry(providers)
+    # Publish for free functions (e.g. stream_agent_loop) to fan session-end out.
+    set_active_registry(memory_provider_registry)
 
     # Initialize processors
-    chat_processor = ChatProcessor(memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager)
+    chat_processor = ChatProcessor(
+        memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager
+    )
     research_handler = ResearchHandler()
-    
+
     # Initialize chat handler with all dependencies
     chat_handler = ChatHandler(
         session_manager=session_manager,
@@ -91,16 +122,16 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         preset_manager=preset_manager,
         upload_handler=upload_handler,
     )
-    
+
     # Initialize model discovery
     model_discovery = ModelDiscovery(DEFAULT_HOST, OPENAI_API_KEY)
-    
+
     # Load and apply saved API keys
     saved_keys = api_key_manager.load()
     if "brave" in saved_keys:
         update_search_config(api_key=saved_keys["brave"])
         logger.info("Loaded Brave API key from saved configuration")
-    
+
     return {
         "memory_manager": memory_manager,
         "memory_vector": memory_vector,
@@ -116,5 +147,5 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         "chat_handler": chat_handler,
         "model_discovery": model_discovery,
         "current_presets": preset_manager.presets,
-        "PERSONAL_INDEX": personal_docs_manager.index
+        "PERSONAL_INDEX": personal_docs_manager.index,
     }

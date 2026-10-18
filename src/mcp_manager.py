@@ -9,13 +9,52 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
-def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
+# ============================================================
+# EXTERNAL MCP SERVERS — Phase 4
+# Services HTTP externes (non-stdio). Démarrés via docker-compose.
+# ============================================================
+# Each entry is a docker-compose-bundled service. Entries with a `transport`
+# are real MCP servers connected by connect_external_enabled() at startup —
+# their tools surface as mcp__{id}__* with schemas discovered from the server
+# (no hand-written schema to drift). Entries WITHOUT a transport are not MCP
+# servers (e.g. Kroki, served over REST by the native render_diagram tool) and
+# are never MCP-connected.
+EXTERNAL_MCP_SERVERS = {
+    "scrapling": {
+        "name": "Scrapling (web scraping)",
+        # Scrapling's own MCP server over Streamable HTTP (`scrapling mcp --http
+        # --port 8800`). Real tools: get/bulk_get/fetch/bulk_fetch/
+        # stealthy_fetch/... discovered at connect time. The streamable-HTTP
+        # endpoint is mounted at /mcp.
+        "url": os.getenv("SCRAPLING_MCP_URL", "http://localhost:8800/mcp"),
+        "transport": "http",
+        "enabled_env": "SCRAPLING_ENABLED",
+        "profile": "scrapling",  # profil docker-compose
+    },
+    "kroki": {
+        "name": "Kroki (diagrams)",
+        "url": "http://localhost:8700",
+        "enabled_env": "KROKI_ENABLED",
+        "rest_only": True,  # served by the native render_diagram tool, not MCP
+    },
+}
+
+
+def _env_truthy(env_key: str | None) -> bool:
+    if not env_key:
+        return True
+    return os.getenv(env_key, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _format_mcp_connection_error(
+    name: str, command: str = "", args: list[str] | None = None, error: Exception = None
+) -> str:
     """Return a user-actionable MCP connection error message."""
     args = args or []
     raw_error = str(error) if error else "Unknown error"
@@ -36,9 +75,9 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
 # Caps for rendering untrusted MCP tool schemas into the agent prompt (issue #2660).
 # MCP servers are third-party/user-added, so field names and parameter counts are
 # untrusted input — bound them so an odd or hostile schema cannot distort the prompt.
-_MCP_PARAM_MAX = 12   # max params rendered per tool
-_MCP_TOKEN_MAX = 40   # max chars per rendered name / type token
-_MCP_HINT_MAX = 300   # total-length backstop for the whole hint
+_MCP_PARAM_MAX = 12  # max params rendered per tool
+_MCP_TOKEN_MAX = 40  # max chars per rendered name / type token
+_MCP_HINT_MAX = 300  # total-length backstop for the whole hint
 
 
 def _sanitize_schema_token(value: Any, limit: int = _MCP_TOKEN_MAX) -> str:
@@ -88,7 +127,7 @@ def _format_mcp_params(input_schema: Any) -> str:
         parts.append(f"…+{extra} more")
     hint = " Args (JSON): {" + ", ".join(parts) + "}"
     if len(hint) > _MCP_HINT_MAX:
-        hint = hint[:_MCP_HINT_MAX - 1].rstrip() + "…"
+        hint = hint[: _MCP_HINT_MAX - 1].rstrip() + "…"
     return hint
 
 
@@ -97,12 +136,26 @@ def _format_mcp_params(input_schema: Any) -> str:
 # These are PREFIXES, not whole words (matched via str.startswith below), so a
 # stem like "summar" intentionally covers "summarise"/"summarize"/"summary".
 _MCP_READONLY_VERBS = (
-    "list", "get", "read", "search", "fetch", "query", "find", "describe",
-    "show", "view", "lookup", "count", "status", "info", "inspect", "summar",
+    "list",
+    "get",
+    "read",
+    "search",
+    "fetch",
+    "query",
+    "find",
+    "describe",
+    "show",
+    "view",
+    "lookup",
+    "count",
+    "status",
+    "info",
+    "inspect",
+    "summar",
 )
 
 
-def mcp_tool_is_readonly(tool: Dict) -> bool:
+def mcp_tool_is_readonly(tool: dict) -> bool:
     """Classify an MCP tool as safe (non-mutating) for plan mode.
 
     Prefer the server's own annotations (readOnlyHint / destructiveHint). When
@@ -135,15 +188,15 @@ class McpManager:
 
     def __init__(self):
         # server_id -> connection state
-        self._connections: Dict[str, Dict[str, Any]] = {}
+        self._connections: dict[str, dict[str, Any]] = {}
         # server_id -> list of tool schemas
-        self._tools: Dict[str, List[Dict]] = {}
+        self._tools: dict[str, list[dict]] = {}
         # server_id -> MCP ClientSession
-        self._sessions: Dict[str, Any] = {}
+        self._sessions: dict[str, Any] = {}
         # server_id -> exit stack (for cleanup)
-        self._stacks: Dict[str, Any] = {}
+        self._stacks: dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
-        self._connect_tasks: Dict[str, Any] = {}
+        self._connect_tasks: dict[str, Any] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -152,10 +205,10 @@ class McpManager:
         server_id: str,
         name: str,
         transport: str,
-        command: Optional[str] = None,
-        args: Optional[List[str]] = None,
-        env: Optional[Dict[str, str]] = None,
-        url: Optional[str] = None,
+        command: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        url: str | None = None,
     ) -> bool:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
         try:
@@ -178,12 +231,15 @@ class McpManager:
             self._generation += 1
             return False
 
-    async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
+    async def _connect_stdio(
+        self, server_id: str, name: str, command: str, args: list[str], env: dict[str, str]
+    ) -> bool:
         """Connect to an MCP server via stdio transport."""
         try:
+            from contextlib import AsyncExitStack
+
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
-            from contextlib import AsyncExitStack
 
             server_params = StdioServerParameters(
                 command=command,
@@ -206,15 +262,17 @@ class McpManager:
                 raise
             tools = []
             for tool in tools_result.tools:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, 'inputSchema') else {},
-                    # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                    # plan-mode read-only gating. Absent on many servers, so we
-                    # fall back to a name heuristic in mcp_tool_is_readonly().
-                    "annotations": getattr(tool, 'annotations', None),
-                })
+                tools.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                        # MCP tool annotations (readOnlyHint / destructiveHint) drive
+                        # plan-mode read-only gating. Absent on many servers, so we
+                        # fall back to a name heuristic in mcp_tool_is_readonly().
+                        "annotations": getattr(tool, "annotations", None),
+                    }
+                )
 
             self._sessions[server_id] = session
             self._stacks[server_id] = stack
@@ -225,7 +283,7 @@ class McpManager:
             identity_hints = []
             for k, v in (env or {}).items():
                 k_lower = k.lower()
-                if any(x in k_lower for x in ['email_address', 'account', 'user', 'username']):
+                if any(x in k_lower for x in ["email_address", "account", "user", "username"]):
                     identity_hints.append(v)
             identity = ", ".join(identity_hints) if identity_hints else ""
 
@@ -248,9 +306,10 @@ class McpManager:
     async def _connect_sse(self, server_id: str, name: str, url: str) -> bool:
         """Connect to an MCP server via SSE transport."""
         try:
+            from contextlib import AsyncExitStack
+
             from mcp import ClientSession
             from mcp.client.sse import sse_client
-            from contextlib import AsyncExitStack
 
             stack = AsyncExitStack()
             try:
@@ -267,15 +326,17 @@ class McpManager:
                 raise
             tools = []
             for tool in tools_result.tools:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, 'inputSchema') else {},
-                    # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                    # plan-mode read-only gating. Absent on many servers, so we
-                    # fall back to a name heuristic in mcp_tool_is_readonly().
-                    "annotations": getattr(tool, 'annotations', None),
-                })
+                tools.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                        # MCP tool annotations (readOnlyHint / destructiveHint) drive
+                        # plan-mode read-only gating. Absent on many servers, so we
+                        # fall back to a name heuristic in mcp_tool_is_readonly().
+                        "annotations": getattr(tool, "annotations", None),
+                    }
+                )
 
             self._sessions[server_id] = session
             self._stacks[server_id] = stack
@@ -300,6 +361,7 @@ class McpManager:
         `wait` seconds: True if it connected (cached-token path), otherwise the
         flow is awaiting browser authorization and status becomes 'needs_auth'."""
         import asyncio
+
         self._connections[server_id] = {"status": "connecting", "name": name, "transport": "http"}
         task = asyncio.create_task(self._connect_http(server_id, name, url))
         self._connect_tasks[server_id] = task
@@ -314,10 +376,13 @@ class McpManager:
         # still in flight. If _on_redirect already published needs_auth+auth_url,
         # leave it; otherwise mark needs_auth (auth_url filled in once it fires).
         from src.mcp_oauth import pop_auth_url
+
         cur = self._connections.get(server_id, {})
         if cur.get("status") != "needs_auth":
             self._connections[server_id] = {
-                "status": "needs_auth", "name": name, "transport": "http",
+                "status": "needs_auth",
+                "name": name,
+                "transport": "http",
                 "auth_url": pop_auth_url(server_id),
             }
         return False
@@ -325,16 +390,20 @@ class McpManager:
     async def _connect_http(self, server_id: str, name: str, url: str) -> bool:
         """Connect to a Streamable HTTP MCP server (with automatic OAuth)."""
         try:
+            from contextlib import AsyncExitStack
+
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
-            from contextlib import AsyncExitStack
+
             from src.mcp_oauth import build_provider, clear_auth_url
 
             def _on_redirect(auth_url):
                 # Publish needs_auth the moment the URL is known, independent of
                 # how long discovery/DCR took (may exceed the bounded start wait).
                 self._connections[server_id] = {
-                    "status": "needs_auth", "name": name, "transport": "http",
+                    "status": "needs_auth",
+                    "name": name,
+                    "transport": "http",
                     "auth_url": auth_url,
                 }
 
@@ -348,17 +417,21 @@ class McpManager:
             tools_result = await session.list_tools()
             tools = []
             for tool in tools_result.tools:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-                })
+                tools.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                    }
+                )
 
             self._sessions[server_id] = session
             self._stacks[server_id] = stack
             self._tools[server_id] = tools
             self._connections[server_id] = {
-                "status": "connected", "name": name, "transport": "http",
+                "status": "connected",
+                "name": name,
+                "transport": "http",
                 "tool_count": len(tools),
             }
             clear_auth_url(server_id)
@@ -386,6 +459,7 @@ class McpManager:
             task.cancel()
         try:
             from src.mcp_oauth import clear_auth_url
+
             clear_auth_url(server_id)
         except Exception:
             pass
@@ -431,7 +505,55 @@ class McpManager:
         finally:
             db.close()
 
-    async def call_tool(self, qualified_name: str, arguments: Dict) -> Dict:
+    def _external_servers_to_connect(self):
+        """Pure decision: which EXTERNAL_MCP_SERVERS entries are MCP servers that
+        are enabled right now. Returns a list of (server_id, name, transport, url).
+
+        Only entries with a real MCP `transport` qualify — REST-only bundles
+        (Kroki via render_diagram) are excluded. Each is gated by its enable-flag
+        env (kill-switch), so the base product stays byte-identical when off.
+        """
+        out = []
+        for server_id, cfg in EXTERNAL_MCP_SERVERS.items():
+            transport = cfg.get("transport")
+            if not transport:
+                continue  # not an MCP server (e.g. Kroki REST)
+            if not _env_truthy(cfg.get("enabled_env")):
+                continue  # disabled by kill-switch
+            out.append((server_id, cfg.get("name", server_id), transport, cfg.get("url")))
+        return out
+
+    async def connect_external_enabled(self):
+        """Connect docker-bundled external MCP servers (EXTERNAL_MCP_SERVERS)
+        whose enable-flag env is truthy. Declared in code (not the DB) because
+        they ship with docker-compose. Best-effort and non-blocking: each connect
+        runs as a background task so a slow/unreachable service never delays
+        startup. Returns the created tasks (mainly for tests)."""
+        import asyncio
+
+        tasks = []
+        for server_id, name, transport, url in self._external_servers_to_connect():
+            tasks.append(asyncio.create_task(self._connect_external_one(server_id, name, transport, url)))
+        return tasks
+
+    async def _connect_external_one(self, server_id: str, name: str, transport: str, url: str | None):
+        try:
+            ok = await self.connect_server(
+                server_id=server_id,
+                name=name,
+                transport=transport,
+                url=url,
+            )
+            if ok:
+                logger.info(f"External MCP server connected: {name} ({server_id})")
+            else:
+                logger.warning(
+                    f"External MCP server not ready: {name} ({server_id}) — is the container running? ({url})"
+                )
+        except BaseException as e:
+            logger.warning(f"External MCP server {name} error: {type(e).__name__}: {e}")
+
+    async def call_tool(self, qualified_name: str, arguments: dict) -> dict:
         """Call an MCP tool by its qualified name (mcp__{server_id}__{tool_name}).
 
         Returns a result dict compatible with agent_tools format.
@@ -473,24 +595,24 @@ class McpManager:
 
         return result
 
-    async def _do_call(self, session, tool_name: str, arguments: Dict) -> Dict:
+    async def _do_call(self, session, tool_name: str, arguments: dict) -> dict:
         """Execute a single MCP tool call and return result dict."""
         result = await session.call_tool(tool_name, arguments)
         output_parts = []
         images = []
         for content in result.content:
-            if hasattr(content, 'text'):
+            if hasattr(content, "text"):
                 output_parts.append(content.text)
-            elif getattr(content, 'type', '') == 'image' and hasattr(content, 'data'):
+            elif getattr(content, "type", "") == "image" and hasattr(content, "data"):
                 # Image content (e.g. Playwright screenshots)
-                mime = getattr(content, 'mimeType', 'image/png')
+                mime = getattr(content, "mimeType", "image/png")
                 images.append({"data": content.data, "mimeType": mime})
                 output_parts.append(f"[Screenshot captured ({mime})]")
-            elif hasattr(content, 'data'):
+            elif hasattr(content, "data"):
                 output_parts.append(str(content.data))
 
         output = "\n".join(output_parts)
-        is_error = getattr(result, 'isError', False)
+        is_error = getattr(result, "isError", False)
 
         result_dict = {
             "stdout": output if not is_error else "",
@@ -504,6 +626,7 @@ class McpManager:
     async def _reconnect_builtin(self, server_id: str) -> bool:
         """Tear down and reconnect a crashed builtin MCP server."""
         import sys
+
         from src.builtin_mcp import _BUILTIN_SERVERS
 
         if server_id not in _BUILTIN_SERVERS:
@@ -532,7 +655,7 @@ class McpManager:
             logger.error(f"Failed to reconnect builtin MCP server {name}: {e}")
             return False
 
-    def get_all_openai_schemas(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
+    def get_all_openai_schemas(self, disabled_map: dict[str, set] | None = None) -> list[dict]:
         """Return all MCP tools in OpenAI function-calling format.
 
         Tool names are namespaced as mcp__{server_id}__{tool_name}.
@@ -567,25 +690,27 @@ class McpManager:
 
         return schemas
 
-    def get_all_tools(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
+    def get_all_tools(self, disabled_map: dict[str, set] | None = None) -> list[dict]:
         """Return a flat list of all discovered tools with server info."""
         result = []
         for server_id, tools in self._tools.items():
             conn = self._connections.get(server_id, {})
             disabled = (disabled_map or {}).get(server_id, set())
             for tool in tools:
-                result.append({
-                    "server_id": server_id,
-                    "server_name": conn.get("name", server_id),
-                    "name": tool["name"],
-                    "qualified_name": f"mcp__{server_id}__{tool['name']}",
-                    "description": tool.get("description", ""),
-                    "input_schema": tool.get("input_schema") or {},
-                    "is_disabled": tool["name"] in disabled,
-                })
+                result.append(
+                    {
+                        "server_id": server_id,
+                        "server_name": conn.get("name", server_id),
+                        "name": tool["name"],
+                        "qualified_name": f"mcp__{server_id}__{tool['name']}",
+                        "description": tool.get("description", ""),
+                        "input_schema": tool.get("input_schema") or {},
+                        "is_disabled": tool["name"] in disabled,
+                    }
+                )
         return result
 
-    def plan_mode_blocked_mcp(self) -> Tuple[Dict[str, Set[str]], Set[str]]:
+    def plan_mode_blocked_mcp(self) -> tuple[dict[str, set[str]], set[str]]:
         """Plan mode: block every MCP tool that isn't clearly read-only.
 
         Returns (disabled_map, qualified_names):
@@ -594,8 +719,8 @@ class McpManager:
           - qualified_names: {"mcp__<server>__<tool>", ...} for runtime rejection
             in execute_tool_block (which matches the qualified name).
         """
-        disabled_map: Dict[str, Set[str]] = {}
-        qualified: Set[str] = set()
+        disabled_map: dict[str, set[str]] = {}
+        qualified: set[str] = set()
         for server_id, tools in self._tools.items():
             for tool in tools:
                 if not mcp_tool_is_readonly(tool):
@@ -612,18 +737,18 @@ class McpManager:
             "email",
         }
 
-    def get_server_status(self, server_id: str) -> Dict:
+    def get_server_status(self, server_id: str) -> dict:
         """Get connection status for a server."""
         return self._connections.get(server_id, {"status": "disconnected"})
 
-    def get_all_statuses(self) -> Dict[str, Dict]:
+    def get_all_statuses(self) -> dict[str, dict]:
         """Get connection statuses for all servers."""
         return dict(self._connections)
 
     _cached_prompt_desc = None
     _cached_prompt_desc_key = None
 
-    def get_tool_descriptions_for_prompt(self, disabled_map: Optional[Dict[str, set]] = None) -> str:
+    def get_tool_descriptions_for_prompt(self, disabled_map: dict[str, set] | None = None) -> str:
         """Generate text describing MCP tools for the agent system prompt. Cached."""
         cache_key = (
             frozenset((k, frozenset(v)) for k, v in (disabled_map or {}).items()),
@@ -636,7 +761,9 @@ class McpManager:
         if not tools:
             return ""
 
-        lines = ["\n\nYou also have access to external MCP tool servers. These tools are called via native function calling:"]
+        lines = [
+            "\n\nYou also have access to external MCP tool servers. These tools are called via native function calling:"
+        ]
         by_server = {}
         for t in tools:
             # Skip builtin Python servers — they're already in the agent prompt
@@ -661,7 +788,7 @@ class McpManager:
             lines.append(f"\n**{label}:**")
             for t in server_tools:
                 # Truncate long descriptions
-                desc = t['description'][:120] + '...' if len(t['description']) > 120 else t['description']
+                desc = t["description"][:120] + "..." if len(t["description"]) > 120 else t["description"]
                 # Include the tool's declared inputs so the model calls it with
                 # real argument names instead of guessing from the description
                 # alone (issue #2509).

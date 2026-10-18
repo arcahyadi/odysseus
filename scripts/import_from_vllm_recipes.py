@@ -20,6 +20,7 @@ Usage:
 
 Auth: set HF_TOKEN to access gated repos when --add-missing.
 """
+
 import argparse
 import json
 import os
@@ -45,12 +46,8 @@ except ImportError:
 
 
 CATALOG_PATH = Path(__file__).resolve().parent.parent / "services" / "hwfit" / "data" / "hf_models.json"
-RECIPES_TREE_URL = (
-    "https://api.github.com/repos/vllm-project/recipes/git/trees/main?recursive=1"
-)
-RECIPE_RAW_URL = (
-    "https://raw.githubusercontent.com/vllm-project/recipes/main/models/{repo}.yaml"
-)
+RECIPES_TREE_URL = "https://api.github.com/repos/vllm-project/recipes/git/trees/main?recursive=1"
+RECIPE_RAW_URL = "https://raw.githubusercontent.com/vllm-project/recipes/main/models/{repo}.yaml"
 
 
 # Map recipe `precision` to the closest catalog `quantization` label that
@@ -116,7 +113,7 @@ def _fetch_manifest(client: httpx.Client) -> set[str]:
     for e in tree:
         path = (e or {}).get("path") or ""
         if path.startswith("models/") and path.endswith(".yaml"):
-            body = path[len("models/"):-len(".yaml")]
+            body = path[len("models/") : -len(".yaml")]
             if "/" in body:
                 out.add(body)
     return out
@@ -244,7 +241,9 @@ def _build_new_entry(repo: str, recipe: dict, hf_info=None) -> dict | None:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--update-existing", action="store_true", help="Stamp min_vllm_version + vllm_recipe on existing rows.")
+    p.add_argument(
+        "--update-existing", action="store_true", help="Stamp min_vllm_version + vllm_recipe on existing rows."
+    )
     p.add_argument("--add-missing", action="store_true", help="Add new rows for recipe models not in the catalog.")
     p.add_argument("--limit", type=int, default=0, help="Stop after N recipe fetches.")
     p.add_argument("--dry-run", action="store_true", help="Don't write back; just report.")
@@ -313,7 +312,9 @@ def main():
                 catalog.append(new_entry)
                 by_name[repo] = new_entry
                 added += 1
-                print(f"[{n}/{len(targets)}] {repo:55} added ({new_entry.get('parameter_count','?')}, {new_entry.get('quantization','?')})")
+                print(
+                    f"[{n}/{len(targets)}] {repo:55} added ({new_entry.get('parameter_count', '?')}, {new_entry.get('quantization', '?')})"
+                )
             else:
                 skipped += 1
                 print(f"[{n}/{len(targets)}] {repo:55} skip (couldn't build entry)")

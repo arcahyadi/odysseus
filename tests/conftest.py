@@ -1,8 +1,10 @@
 """Shared test configuration - ensure project root is on sys.path and stub heavy deps."""
-import sys
-import os
-import types
+
 import importlib.util
+import os
+import pytest
+import sys
+import types
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,9 +27,11 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 try:
     import sqlalchemy  # noqa: F401
     import sqlalchemy.orm  # noqa: F401
+
     import core.database  # noqa: F401
 except ImportError:
     pass  # not installed - the stubs below will handle it
+
 
 def _has_module(mod_name: str) -> bool:
     try:
@@ -39,11 +43,25 @@ def _has_module(mod_name: str) -> bool:
 # Stub optional dependencies only when they are not installed. Do not replace
 # real FastAPI/Starlette/Pydantic modules: route tests import their subpackages.
 for mod_name in [
-    "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.types", "sqlalchemy.ext", "sqlalchemy.ext.declarative",
-    "sqlalchemy.ext.hybrid", "sqlalchemy.sql", "sqlalchemy.sql.expression",
-    "sqlalchemy.sql.sqltypes", "bcrypt", "pyotp",
-    "httpx", "fastapi", "fastapi.responses", "fastapi.routing",
-    "starlette", "starlette.responses", "starlette.middleware", "starlette.middleware.base",
+    "sqlalchemy",
+    "sqlalchemy.orm",
+    "sqlalchemy.types",
+    "sqlalchemy.ext",
+    "sqlalchemy.ext.declarative",
+    "sqlalchemy.ext.hybrid",
+    "sqlalchemy.sql",
+    "sqlalchemy.sql.expression",
+    "sqlalchemy.sql.sqltypes",
+    "bcrypt",
+    "pyotp",
+    "httpx",
+    "fastapi",
+    "fastapi.responses",
+    "fastapi.routing",
+    "starlette",
+    "starlette.responses",
+    "starlette.middleware",
+    "starlette.middleware.base",
     "pydantic",
 ]:
     if mod_name not in sys.modules and not _has_module(mod_name):
@@ -53,12 +71,13 @@ if "src.database" not in sys.modules:
     _db = types.ModuleType("src.database")
     _db.SessionLocal = MagicMock()
     _db.ModelEndpoint = MagicMock()
+    _db.Webhook = MagicMock()
     sys.modules["src.database"] = _db
 
 # Pre-import core.models before test_agent_loop.py's module-level stubs
 # run (it replaces sys.modules['core.models'] with a MagicMock during
 # collection, which breaks session import in subsequent tests).
-import core.models  # noqa: E402
+
 
 def pytest_configure(config):
     """Register the dynamic taxonomy ``sub_*`` markers before collection.
@@ -69,6 +88,7 @@ def pytest_configure(config):
     only registers marker names; it imports no production module.
     """
     import pathlib
+
     from tests._taxonomy import discover_markers
 
     tests_dir = pathlib.Path(__file__).parent
@@ -85,10 +105,27 @@ def pytest_collection_modifyitems(config, items):
     reorder, or deselect tests, mutate fixtures or the environment, or import any
     production module. See ``tests/_taxonomy.py`` for the classification rules.
     """
-    import pytest
+    
+
     from tests._taxonomy import markers_for_path
 
     for item in items:
         path = getattr(item, "path", None) or item.fspath
         for marker_name in markers_for_path(path):
             item.add_marker(getattr(pytest.mark, marker_name))
+
+
+# Reset AppContext singleton before each test to ensure isolation.
+# AppContext is a singleton that holds global state (caches, guards, etc.).
+# Without reset, state leaks between tests causing flaky failures.
+@pytest.fixture(autouse=True)
+def _reset_appcontext():
+    from src.app_context import AppContext
+    AppContext._reset_for_tests()
+    # Reset database impl singleton
+    import src.database_impl
+    src.database_impl._database_impl = None
+    yield
+    AppContext._reset_for_tests()
+    import src.database_impl
+    src.database_impl._database_impl = None

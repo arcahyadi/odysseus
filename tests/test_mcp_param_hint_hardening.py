@@ -6,10 +6,10 @@ bounded. These tests pin that hardening AND that normal schemas are unchanged.
 """
 
 from src.mcp_manager import (
+    _MCP_HINT_MAX,
+    _MCP_PARAM_MAX,
     _format_mcp_params,
     _sanitize_schema_token,
-    _MCP_PARAM_MAX,
-    _MCP_HINT_MAX,
 )
 
 

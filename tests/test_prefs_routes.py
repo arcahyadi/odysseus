@@ -1,6 +1,6 @@
 import json
 
-import routes.prefs_routes as prefs_routes
+from routes import prefs_routes
 
 
 def test_load_ignores_non_object_prefs_file(tmp_path, monkeypatch):

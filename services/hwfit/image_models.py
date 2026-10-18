@@ -290,7 +290,11 @@ def rank_image_models(system, search=None, sort="fit"):
         # Filter by search
         if isinstance(search, str) and search:
             s = search.lower()
-            if s not in model["name"].lower() and s not in model["id"].lower() and s not in model.get("description", "").lower():
+            if (
+                s not in model["name"].lower()
+                and s not in model["id"].lower()
+                and s not in model.get("description", "").lower()
+            ):
                 continue
 
         # Determine best quant that fits
@@ -344,24 +348,26 @@ def rank_image_models(system, search=None, sort="fit"):
         elif fit == "no_fit":
             score -= 30
 
-        results.append({
-            "id": model["id"],
-            "name": model["name"],
-            "provider": model["provider"],
-            "params_b": model["params_b"],
-            "vram_needed": vram_needed,
-            "quant": quant,
-            "quant_repo": quant_repo,
-            "fits": fits,
-            "fit": fit,
-            "fit_label": fit_label,
-            "quality": model["quality"],
-            "speed": model["speed"],
-            "score": round(score, 1),
-            "capabilities": model["capabilities"],
-            "description": model["description"],
-            "released": model.get("released", ""),
-        })
+        results.append(
+            {
+                "id": model["id"],
+                "name": model["name"],
+                "provider": model["provider"],
+                "params_b": model["params_b"],
+                "vram_needed": vram_needed,
+                "quant": quant,
+                "quant_repo": quant_repo,
+                "fits": fits,
+                "fit": fit,
+                "fit_label": fit_label,
+                "quality": model["quality"],
+                "speed": model["speed"],
+                "score": round(score, 1),
+                "capabilities": model["capabilities"],
+                "description": model["description"],
+                "released": model.get("released", ""),
+            }
+        )
 
     # Sort
     if sort == "quality":

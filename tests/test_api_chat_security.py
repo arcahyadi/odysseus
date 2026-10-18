@@ -1,5 +1,5 @@
-import ipaddress
 import importlib.util
+import ipaddress
 import sys
 import types
 from pathlib import Path
@@ -7,20 +7,23 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("url", [
-    "http://127.0.0.1:8000/v1",
-    "http://localhost:8000/v1",
-    "http://10.0.0.5/v1",
-    "http://172.16.0.1/v1",
-    "http://192.168.1.2/v1",
-    "http://169.254.169.254/latest/meta-data/",
-    "http://metadata.google.internal/",
-    "http://[::1]:8000/v1",
-    "http://[fc00::1]/v1",
-    "http://224.0.0.1/v1",
-    "http://0.0.0.0/v1",
-    "file:///etc/passwd",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8000/v1",
+        "http://localhost:8000/v1",
+        "http://10.0.0.5/v1",
+        "http://172.16.0.1/v1",
+        "http://192.168.1.2/v1",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://metadata.google.internal/",
+        "http://[::1]:8000/v1",
+        "http://[fc00::1]/v1",
+        "http://224.0.0.1/v1",
+        "http://0.0.0.0/v1",
+        "file:///etc/passwd",
+    ],
+)
 def test_public_url_validator_blocks_internal_targets(url):
     from src.url_security import is_public_http_url
 
@@ -192,14 +195,16 @@ class _SessionManager:
 
     def create_session(self, *, session_id, name, endpoint_url, model, owner):
         session = _ChatSession(endpoint_url, model)
-        self.created.append({
-            "session_id": session_id,
-            "name": name,
-            "endpoint_url": endpoint_url,
-            "model": model,
-            "owner": owner,
-            "session": session,
-        })
+        self.created.append(
+            {
+                "session_id": session_id,
+                "name": name,
+                "endpoint_url": endpoint_url,
+                "model": model,
+                "owner": owner,
+                "session": session,
+            }
+        )
         return session
 
     def save_sessions(self):
@@ -266,12 +271,15 @@ def _sync_chat_endpoint(webhook_routes, session_manager):
     raise AssertionError("sync chat route not found")
 
 
-@pytest.mark.parametrize("base_url", [
-    "http://127.0.0.1:11434/v1",
-    "http://localhost:11434/v1",
-    "http://10.0.0.5/v1",
-    "http://169.254.169.254/latest/meta-data/",
-])
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://127.0.0.1:11434/v1",
+        "http://localhost:11434/v1",
+        "http://10.0.0.5/v1",
+        "http://169.254.169.254/latest/meta-data/",
+    ],
+)
 @pytest.mark.asyncio
 async def test_api_chat_direct_base_url_rejects_local_private_targets(monkeypatch, base_url):
     webhook_routes = _load_webhook_routes_for_test(monkeypatch)

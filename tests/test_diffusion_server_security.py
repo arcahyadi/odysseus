@@ -25,7 +25,6 @@ from pathlib import Path
 
 import pytest
 
-
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "diffusion_server.py"
 
 
@@ -182,9 +181,7 @@ def _configured_app(ns, allowed_origins, route_called=None):
     from fastapi import FastAPI
 
     app = FastAPI()
-    ns["_configure_security_middleware"](
-        app, ns["_compute_allowed_hosts"]("127.0.0.1"), allowed_origins
-    )
+    ns["_configure_security_middleware"](app, ns["_compute_allowed_hosts"]("127.0.0.1"), allowed_origins)
 
     @app.get("/")
     def root():
@@ -228,14 +225,11 @@ def test_cors_default_deny_does_not_emit_wildcard_acao():
     # Host is allowed, so the request itself succeeds — but the response must
     # carry no ACAO, so a real browser would block the attacker page from
     # reading the body.
-    resp = _asgi_get(
-        app, "http://127.0.0.1/", headers={"Origin": "https://evil.example.com"}
-    )
+    resp = _asgi_get(app, "http://127.0.0.1/", headers={"Origin": "https://evil.example.com"})
     assert resp.status_code == 200
     acao = resp.headers.get("access-control-allow-origin")
     assert acao is None or acao == "", (
-        f"unexpected ACAO header: {acao!r} — the regression was wildcard CORS, "
-        f"so any non-empty default fails this gate"
+        f"unexpected ACAO header: {acao!r} — the regression was wildcard CORS, so any non-empty default fails this gate"
     )
 
 
@@ -249,15 +243,11 @@ def test_explicit_cors_origin_does_not_widen_to_wildcard():
     app = _configured_app(ns, cors_origins)
 
     # Allowed origin: ACAO echoes that origin (NOT '*').
-    ok = _asgi_get(
-        app, "http://127.0.0.1/", headers={"Origin": "http://localhost:7000"}
-    )
+    ok = _asgi_get(app, "http://127.0.0.1/", headers={"Origin": "http://localhost:7000"})
     assert ok.status_code == 200
     assert ok.headers.get("access-control-allow-origin") == "http://localhost:7000"
     # Foreign origin: ACAO must NOT echo it, must NOT be '*'.
-    bad = _asgi_get(
-        app, "http://127.0.0.1/", headers={"Origin": "https://evil.example.com"}
-    )
+    bad = _asgi_get(app, "http://127.0.0.1/", headers={"Origin": "https://evil.example.com"})
     bad_acao = bad.headers.get("access-control-allow-origin")
     assert bad_acao != "*"
     assert bad_acao != "https://evil.example.com"
@@ -293,9 +283,7 @@ def test_configure_security_middleware_is_idempotent_before_serving():
 
     app = FastAPI()
     ns["_configure_security_middleware"](app, allowed, [])
-    ns["_configure_security_middleware"](
-        app, allowed, ns["_compute_cors_origins"](extras=["http://localhost:7000"])
-    )
+    ns["_configure_security_middleware"](app, allowed, ns["_compute_cors_origins"](extras=["http://localhost:7000"]))
 
     classes = [m.cls for m in app.user_middleware]
     assert classes == [CORSMiddleware, TrustedHostMiddleware]

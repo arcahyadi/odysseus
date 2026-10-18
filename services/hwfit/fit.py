@@ -1,24 +1,94 @@
 import re
 
 from services.hwfit.models import (
-    params_b, estimate_memory_gb, infer_use_case,
-    get_models, is_prequantized, _active_params_b, QUANT_BYTES_PER_PARAM,
-    QUANT_SPEED_MULT, QUANT_QUALITY_PENALTY,
+    QUANT_BYTES_PER_PARAM,
+    QUANT_QUALITY_PENALTY,
+    QUANT_SPEED_MULT,
+    _active_params_b,
+    estimate_memory_gb,
+    get_models,
+    infer_use_case,
+    is_prequantized,
+    params_b,
 )
 
 GPU_BANDWIDTH = {
-    "5090": 1792, "5080": 960, "5070 ti": 896, "5070": 672, "5060 ti": 448, "5060": 256,
-    "4090": 1008, "4080 super": 736, "4080": 717, "4070 ti super": 672, "4070 ti": 504, "4070 super": 504, "4070": 504, "4060 ti": 288, "4060": 272,
-    "3090 ti": 1008, "3090": 936, "3080 ti": 912, "3080": 760, "3070 ti": 608, "3070": 448, "3060 ti": 448, "3060": 360,
-    "2080 ti": 616, "2080 super": 496, "2080": 448, "2070 super": 448, "2070": 448, "2060 super": 448, "2060": 336,
-    "1660 ti": 288, "1660 super": 336, "1660": 192, "1650 super": 192, "1650": 128,
-    "h100 sxm": 3350, "h100": 2039, "h200": 4800, "a100 sxm": 2039, "a100": 1555,
-    "l40s": 864, "l40": 864, "l4": 300, "a10g": 600, "a10": 600, "t4": 320,
-    "v100 sxm": 900, "v100": 897, "a6000": 768, "a5000": 768, "a4000": 448,
-    "7900 xtx": 960, "7900 xt": 800, "7900 gre": 576, "7800 xt": 624, "7700 xt": 432, "7600": 288,
-    "6950 xt": 576, "6900 xt": 512, "6800 xt": 512, "6800": 512, "6700 xt": 384, "6600 xt": 256, "6600": 224,
-    "mi300x": 5300, "mi300": 5300, "mi250x": 3277, "mi250": 3277, "mi210": 1638, "mi100": 1229,
-    "9070 xt": 624, "9070": 488, "9060 xt": 322, "9060": 322,
+    "5090": 1792,
+    "5080": 960,
+    "5070 ti": 896,
+    "5070": 672,
+    "5060 ti": 448,
+    "5060": 256,
+    "4090": 1008,
+    "4080 super": 736,
+    "4080": 717,
+    "4070 ti super": 672,
+    "4070 ti": 504,
+    "4070 super": 504,
+    "4070": 504,
+    "4060 ti": 288,
+    "4060": 272,
+    "3090 ti": 1008,
+    "3090": 936,
+    "3080 ti": 912,
+    "3080": 760,
+    "3070 ti": 608,
+    "3070": 448,
+    "3060 ti": 448,
+    "3060": 360,
+    "3050 ti": 192,
+    "3050": 224,
+    "2080 ti": 616,
+    "2080 super": 496,
+    "2080": 448,
+    "2070 super": 448,
+    "2070": 448,
+    "2060 super": 448,
+    "2060": 336,
+    "1660 ti": 288,
+    "1660 super": 336,
+    "1660": 192,
+    "1650 super": 192,
+    "1650": 128,
+    "h100 sxm": 3350,
+    "h100": 2039,
+    "h200": 4800,
+    "a100 sxm": 2039,
+    "a100": 1555,
+    "l40s": 864,
+    "l40": 864,
+    "l4": 300,
+    "a10g": 600,
+    "a10": 600,
+    "t4": 320,
+    "v100 sxm": 900,
+    "v100": 897,
+    "a6000": 768,
+    "a5000": 768,
+    "a4000": 448,
+    "7900 xtx": 960,
+    "7900 xt": 800,
+    "7900 gre": 576,
+    "7800 xt": 624,
+    "7700 xt": 432,
+    "7600": 288,
+    "6950 xt": 576,
+    "6900 xt": 512,
+    "6800 xt": 512,
+    "6800": 512,
+    "6700 xt": 384,
+    "6600 xt": 256,
+    "6600": 224,
+    "mi300x": 5300,
+    "mi300": 5300,
+    "mi250x": 3277,
+    "mi250": 3277,
+    "mi210": 1638,
+    "mi100": 1229,
+    "9070 xt": 624,
+    "9070": 488,
+    "9060 xt": 322,
+    "9060": 322,
     # NVIDIA GB10 Grace-Blackwell superchip (DGX Spark). Unified LPDDR5X memory,
     # not Apple Silicon, so it lives in the generic GPU table — the Apple-only
     # lookup never matches it (its name carries no "apple").
@@ -33,11 +103,21 @@ _BW_KEYS_SORTED = sorted(GPU_BANDWIDTH.keys(), key=len, reverse=True)
 # GPU core count when hardware detection provides it; otherwise fall back to the
 # conservative tier so speed estimates do not over-promise.
 APPLE_BANDWIDTH_FIXED = {
-    "m1 ultra": 800, "m1 max": 400, "m1 pro": 200, "m1": 68,
-    "m2 ultra": 800, "m2 max": 400, "m2 pro": 200, "m2": 100,
-    "m3 ultra": 800, "m3 pro": 150, "m3": 100,
-    "m4 pro": 273, "m4": 120,
-    "m5 pro": 307, "m5": 153,
+    "m1 ultra": 800,
+    "m1 max": 400,
+    "m1 pro": 200,
+    "m1": 68,
+    "m2 ultra": 800,
+    "m2 max": 400,
+    "m2 pro": 200,
+    "m2": 100,
+    "m3 ultra": 800,
+    "m3 pro": 150,
+    "m3": 100,
+    "m4 pro": 273,
+    "m4": 120,
+    "m5 pro": 307,
+    "m5": 153,
 }
 APPLE_BANDWIDTH_BY_CORES = {
     "m3 max": {30: 300, 40: 400},
@@ -52,25 +132,36 @@ _APPLE_VARIANT_KEYS_SORTED = sorted(APPLE_BANDWIDTH_BY_CORES.keys(), key=len, re
 FALLBACK_K = {"cuda": 220, "rocm": 180, "metal": 150, "cpu_x86": 70, "cpu_arm": 90}
 
 USE_CASE_WEIGHTS = {
-    "general":    (0.45, 0.30, 0.15, 0.10),
-    "coding":     (0.50, 0.20, 0.15, 0.15),
-    "reasoning":  (0.55, 0.15, 0.15, 0.15),
-    "chat":       (0.40, 0.35, 0.15, 0.10),
+    "general": (0.45, 0.30, 0.15, 0.10),
+    "coding": (0.50, 0.20, 0.15, 0.15),
+    "reasoning": (0.55, 0.15, 0.15, 0.15),
+    "chat": (0.40, 0.35, 0.15, 0.10),
     "multimodal": (0.50, 0.20, 0.15, 0.15),
-    "embedding":  (0.30, 0.40, 0.20, 0.10),
-    "tts":        (0.40, 0.35, 0.15, 0.10),
-    "stt":        (0.40, 0.35, 0.15, 0.10),
+    "embedding": (0.30, 0.40, 0.20, 0.10),
+    "tts": (0.40, 0.35, 0.15, 0.10),
+    "stt": (0.40, 0.35, 0.15, 0.10),
 }
 
 SPEED_TARGET = {
-    "general": 40, "coding": 40, "multimodal": 40, "chat": 40,
-    "reasoning": 25, "embedding": 200, "tts": 40, "stt": 40,
+    "general": 40,
+    "coding": 40,
+    "multimodal": 40,
+    "chat": 40,
+    "reasoning": 25,
+    "embedding": 200,
+    "tts": 40,
+    "stt": 40,
 }
 
 CONTEXT_TARGET = {
-    "general": 4096, "chat": 4096, "coding": 8192,
-    "reasoning": 8192, "multimodal": 4096, "embedding": 512,
-    "tts": 2048, "stt": 2048,
+    "general": 4096,
+    "chat": 4096,
+    "coding": 8192,
+    "reasoning": 8192,
+    "multimodal": 4096,
+    "embedding": 512,
+    "tts": 2048,
+    "stt": 2048,
 }
 
 
@@ -446,8 +537,18 @@ def analyze_model(model, system, target_quant=None, scoring_use_case=None, targe
 
     # Determine which quant to evaluate at
     native_quant_prefixes = (
-        "AWQ-", "GPTQ-", "FP8", "FP4", "NVFP4", "MXFP4", "NF4",
-        "INT4", "INT8", "W4A16", "W8A8", "W8A16",
+        "AWQ-",
+        "GPTQ-",
+        "FP8",
+        "FP4",
+        "NVFP4",
+        "MXFP4",
+        "NF4",
+        "INT4",
+        "INT8",
+        "W4A16",
+        "W8A8",
+        "W8A16",
     )
 
     if preq:
@@ -480,7 +581,12 @@ def analyze_model(model, system, target_quant=None, scoring_use_case=None, targe
     # Multi-GPU filter: skip the row if the resolved quant is a GGUF tier
     # (Q*/IQ-prefixed) — vLLM/SGLang can't serve those, so showing them on
     # a 2+ GPU rig just clutters the list with unservable candidates.
-    if gpu_count >= 2 and quant_to_try and not target_quant and quant_to_try.upper().startswith(("Q2", "Q3", "Q4", "Q5", "Q6", "Q8", "IQ")):
+    if (
+        gpu_count >= 2
+        and quant_to_try
+        and not target_quant
+        and quant_to_try.upper().startswith(("Q2", "Q3", "Q4", "Q5", "Q6", "Q8", "IQ"))
+    ):
         return None
 
     result = _try_quant_at(model, quant_to_try, ctx, effective_vram, 0 if native_gpu_only else eff_ram)
@@ -581,6 +687,7 @@ def _version_key(name):
     grabs the FIRST 'word-with-digits' pattern after a hyphen/underscore,
     so e.g. 'MiniMax-M2.7' -> 2.7, 'Qwen3.6-35B' -> 3.6, 'M2' -> 2.0."""
     import re as _re
+
     if not name:
         return 0.0
     # Match the version-marker word: a letter followed by a number with
@@ -621,7 +728,9 @@ SORT_KEYS = {
 }
 
 
-def rank_models(system, use_case=None, limit=50, search=None, sort="score", quant=None, target_context=None, fit_only=False):
+def rank_models(
+    system, use_case=None, limit=50, search=None, sort="score", quant=None, target_context=None, fit_only=False
+):
     """Rank all models against detected hardware. Returns sorted list of fit results.
 
     fit_only: when True, drop rows whose fit_level is "too_tight" (model doesn't
@@ -643,38 +752,59 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
         else:
             img_results = []
         for im in img_results:
-            fit_map = {"perfect": "perfect", "good": "good", "tight": "marginal", "no_fit": "too_tight", "no_gpu": "too_tight"}
-            results.append({
-                "name": im["id"],
-                "provider": im["provider"],
-                "parameter_count": f"{im['params_b']}B",
-                "params_b": im["params_b"],
-                "is_moe": False,
-                "use_case": "image_gen",
-                "fit_level": fit_map.get(im["fit"], "too_tight"),
-                "run_mode": "gpu" if im["fits"] else "no_fit",
-                "quant": im.get("quant", "BF16"),
-                "context": 0,
-                "context_length": 0,
-                "required_gb": round(im.get("vram_needed") or 0, 1),
-                "speed_tps": 0,
-                "score": float(im["score"]),
-                "scores": {"quality": float(im["quality"]), "speed": float(im["speed"]), "fit": 0, "context": 0},
-                "gguf_sources": [],
-                "is_image_gen": True,
-                "capabilities": im.get("capabilities", []),
-                "description": im.get("description", ""),
-            })
+            fit_map = {
+                "perfect": "perfect",
+                "good": "good",
+                "tight": "marginal",
+                "no_fit": "too_tight",
+                "no_gpu": "too_tight",
+            }
+            results.append(
+                {
+                    "name": im["id"],
+                    "provider": im["provider"],
+                    "parameter_count": f"{im['params_b']}B",
+                    "params_b": im["params_b"],
+                    "is_moe": False,
+                    "use_case": "image_gen",
+                    "fit_level": fit_map.get(im["fit"], "too_tight"),
+                    "run_mode": "gpu" if im["fits"] else "no_fit",
+                    "quant": im.get("quant", "BF16"),
+                    "context": 0,
+                    "context_length": 0,
+                    "required_gb": round(im.get("vram_needed") or 0, 1),
+                    "speed_tps": 0,
+                    "score": float(im["score"]),
+                    "scores": {"quality": float(im["quality"]), "speed": float(im["speed"]), "fit": 0, "context": 0},
+                    "gguf_sources": [],
+                    "is_image_gen": True,
+                    "capabilities": im.get("capabilities", []),
+                    "description": im.get("description", ""),
+                }
+            )
         if use_case == "image_gen":
             sort_fn = SORT_KEYS.get(sort, SORT_KEYS["score"])
             results.sort(key=sort_fn, reverse=True)  # see main path below
             return results[:limit]
 
     # If user picked a native prequantized format, filter to only those models.
-    filter_native = quant and any(quant.startswith(p) for p in (
-        "AWQ-", "GPTQ-", "FP8", "FP4", "NVFP4", "MXFP4", "NF4",
-        "INT4", "INT8", "W4A16", "W8A8", "W8A16",
-    ))
+    filter_native = quant and any(
+        quant.startswith(p)
+        for p in (
+            "AWQ-",
+            "GPTQ-",
+            "FP8",
+            "FP4",
+            "NVFP4",
+            "MXFP4",
+            "NF4",
+            "INT4",
+            "INT8",
+            "W4A16",
+            "W8A8",
+            "W8A16",
+        )
+    )
 
     system_backend = (system.get("backend") or "").lower()
     apple_silicon = system_backend in ("mps", "metal", "apple")
@@ -747,7 +877,9 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
             if search.lower() not in name and search.lower() not in provider:
                 continue
 
-        result = analyze_model(m, system, target_quant=quant, scoring_use_case=(use_case or "general"), target_context=target_context)
+        result = analyze_model(
+            m, system, target_quant=quant, scoring_use_case=(use_case or "general"), target_context=target_context
+        )
         if result is None:
             continue
 

@@ -8,6 +8,7 @@ diagnosing failures that emit long stack traces or build output.
 `error_aware_output_tail` now returns the last 50 lines on error and keeps
 the cheaper 12-line tail for running/other tasks.
 """
+
 from routes.cookbook_output import error_aware_output_tail
 
 
@@ -37,7 +38,11 @@ def test_short_snapshot_returns_all_lines():
     # Fewer lines than the cap — return everything, no padding.
     snap = _snapshot(5)
     assert error_aware_output_tail(snap, "error").splitlines() == [
-        "line 0", "line 1", "line 2", "line 3", "line 4",
+        "line 0",
+        "line 1",
+        "line 2",
+        "line 3",
+        "line 4",
     ]
     assert len(error_aware_output_tail(snap, "running").splitlines()) == 5
 
@@ -53,4 +58,4 @@ def test_error_tail_is_wider_than_non_error():
     run = error_aware_output_tail(snap, "running").splitlines()
     assert len(err) > len(run)
     # The non-error tail is a strict suffix of the error tail.
-    assert err[-len(run):] == run
+    assert err[-len(run) :] == run

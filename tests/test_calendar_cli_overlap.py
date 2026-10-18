@@ -18,7 +18,6 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 

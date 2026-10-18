@@ -40,10 +40,7 @@ def test_traceback_fallback_fires_without_startup_success():
 
 
 def test_traceback_suppressed_when_server_started():
-    out = (
-        "Traceback (most recent call last):\n  File 'x.py'\nValueError: ...\n"
-        "Application startup complete."
-    )
+    out = "Traceback (most recent call last):\n  File 'x.py'\nValueError: ...\nApplication startup complete."
     result = _diagnose_serve_output(out)
     assert result is None
 

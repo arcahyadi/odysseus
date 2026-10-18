@@ -31,9 +31,7 @@ class _FakeErrorResponse:
         self.status_code = status_code
 
     def raise_for_status(self):
-        raise httpx.HTTPStatusError(
-            f"{self.status_code} error", request=None, response=self
-        )
+        raise httpx.HTTPStatusError(f"{self.status_code} error", request=None, response=self)
 
 
 @pytest.mark.parametrize("module", [service_content])

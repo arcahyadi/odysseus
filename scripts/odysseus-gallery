@@ -13,17 +13,22 @@ album, and surfaces EXIF metadata.
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, sys
-from pathlib import Path
+import argparse
+import os
+import sys
 
 try:
-    from core.database import SessionLocal, GalleryImage, GalleryAlbum
+    from core.database import GalleryAlbum, GalleryImage, SessionLocal
+
     quiet_logs()
 except ModuleNotFoundError as e:
     sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
@@ -38,7 +43,7 @@ def _preview_text(value, limit: int = 200) -> str:
     return text[:limit]
 
 
-def _serialize_image(i: "GalleryImage") -> dict:
+def _serialize_image(i: GalleryImage) -> dict:
     return {
         "id": i.id,
         "filename": i.filename,
@@ -107,10 +112,7 @@ def cmd_albums(args):
     db = SessionLocal()
     try:
         rows = db.query(GalleryAlbum).order_by(GalleryAlbum.name.asc()).all()
-        emit([
-            {"id": a.id, "name": a.name, "image_count": _album_image_count(a)}
-            for a in rows
-        ], args)
+        emit([{"id": a.id, "name": a.name, "image_count": _album_image_count(a)} for a in rows], args)
     finally:
         db.close()
 
@@ -119,13 +121,18 @@ def cmd_search(args):
     db = SessionLocal()
     try:
         like = f"%{args.query}%"
-        rows = db.query(GalleryImage).filter(
-            GalleryImage.is_active == True,  # noqa: E712
-        ).filter(
-            (GalleryImage.prompt.ilike(like)) |
-            (GalleryImage.tags.ilike(like)) |
-            (GalleryImage.ai_tags.ilike(like))
-        ).order_by(GalleryImage.created_at.desc()).limit(args.limit).all()
+        rows = (
+            db.query(GalleryImage)
+            .filter(
+                GalleryImage.is_active == True,  # noqa: E712
+            )
+            .filter(
+                (GalleryImage.prompt.ilike(like)) | (GalleryImage.tags.ilike(like)) | (GalleryImage.ai_tags.ilike(like))
+            )
+            .order_by(GalleryImage.created_at.desc())
+            .limit(args.limit)
+            .all()
+        )
         emit([_serialize_image(i) for i in rows], args)
     finally:
         db.close()

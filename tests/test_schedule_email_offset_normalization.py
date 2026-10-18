@@ -9,7 +9,7 @@ early).
 """
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -24,8 +24,7 @@ def _route_endpoint(router, path: str, method: str):
 
 @pytest.fixture
 def schedule(tmp_path, monkeypatch):
-    import routes.email_helpers as email_helpers
-    import routes.email_routes as email_routes
+    from routes import email_helpers, email_routes
 
     db_path = tmp_path / "scheduled_emails.db"
     monkeypatch.setattr(email_helpers, "SCHEDULED_DB", db_path)
@@ -35,9 +34,7 @@ def schedule(tmp_path, monkeypatch):
     endpoint = _route_endpoint(router, "/api/email/schedule", "POST")
 
     def _stored(sid):
-        row = sqlite3.connect(db_path).execute(
-            "SELECT send_at FROM scheduled_emails WHERE id = ?", (sid,)
-        ).fetchone()
+        row = sqlite3.connect(db_path).execute("SELECT send_at FROM scheduled_emails WHERE id = ?", (sid,)).fetchone()
         return row[0]
 
     return endpoint, _stored
@@ -52,11 +49,11 @@ async def test_positive_offset_stored_as_naive_utc(schedule):
         owner="alice",
     )
     assert res["success"] is True
-    expected = local.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+    expected = local.astimezone(UTC).replace(tzinfo=None).isoformat()
     value = stored(res["id"])
     assert value == expected
     # the poller's lexicographic dueness check now flips at the right time
-    utc_due = local.astimezone(timezone.utc).replace(tzinfo=None)
+    utc_due = local.astimezone(UTC).replace(tzinfo=None)
     assert value <= (utc_due + timedelta(minutes=1)).isoformat()
     assert not value <= (utc_due - timedelta(minutes=1)).isoformat()
 
@@ -79,7 +76,7 @@ async def test_negative_offset_does_not_fire_early(schedule):
 @pytest.mark.asyncio
 async def test_z_suffix_stored_without_suffix(schedule):
     endpoint, stored = schedule
-    utc = datetime.now(timezone.utc) + timedelta(hours=1)
+    utc = datetime.now(UTC) + timedelta(hours=1)
     send_at = utc.replace(tzinfo=None).isoformat() + "Z"
     res = await endpoint(
         {"to": "a@example.com", "body": "b", "send_at": send_at},
@@ -93,8 +90,6 @@ async def test_z_suffix_stored_without_suffix(schedule):
 async def test_naive_utc_send_at_unchanged(schedule):
     endpoint, stored = schedule
     naive = (datetime.utcnow() + timedelta(days=1)).isoformat()
-    res = await endpoint(
-        {"to": "a@example.com", "body": "b", "send_at": naive}, owner="alice"
-    )
+    res = await endpoint({"to": "a@example.com", "body": "b", "send_at": naive}, owner="alice")
     assert res["success"] is True
     assert stored(res["id"]) == naive

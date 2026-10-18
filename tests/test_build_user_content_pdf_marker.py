@@ -7,12 +7,9 @@ set of characters and keeps eating leading body characters (so a page that
 begins "Page 1 text]: to the board" lost its "P"/"to"). The other call sites
 were switched to `strip_pdf_content_marker` (str.removeprefix); this one wasn't.
 """
-import os
-import tempfile
 
 import src.document_processor as dp
-import src.pdf_forms as pdf_forms
-import src.pdf_form_doc as pdf_form_doc
+from src import pdf_form_doc, pdf_forms
 
 
 class _FakeUploadHandler:
@@ -91,4 +88,3 @@ def test_pdf_auto_document_uses_original_upload_name(monkeypatch, tmp_path):
 
     assert captured["title"] == "Quarterly Board Packet"
     assert captured["upload_id"] == pdf_path.name
-

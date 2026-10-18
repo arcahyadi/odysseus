@@ -24,7 +24,7 @@ loop — no portal thread, no BaseHTTPMiddleware — so the suite is portable.
 Identity is injected by a pure-ASGI shim that writes the same
 ``request.state`` fields the real auth middleware sets.
 """
-import uuid
+
 from types import SimpleNamespace
 
 import httpx
@@ -35,9 +35,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 import core.database as cdb
-from core.database import Note
 import routes.note_routes as nr
-
+from core.database import Note
 
 # A deliberately NON-loopback peer. require_user has loopback fall-throughs
 # (unconfigured first-run, LOCALHOST_BYPASS); pinning a public-looking client
@@ -110,8 +109,7 @@ def env(monkeypatch, tmp_path):
     app = _build_app(factory)
 
     db = factory()
-    db.add(Note(id="note-alice", owner="alice", title="a", content="x",
-                items='[{"text": "t", "done": false}]'))
+    db.add(Note(id="note-alice", owner="alice", title="a", content="x", items='[{"text": "t", "done": false}]'))
     db.add(Note(id="note-bob", owner="bob", title="b", content="y"))
     db.commit()
     db.close()

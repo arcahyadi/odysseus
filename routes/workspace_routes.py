@@ -1,6 +1,8 @@
 """Workspace API - browse server directories to pick a tool workspace folder."""
+
 import os
-from fastapi import APIRouter, Request, HTTPException, Query
+
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.auth_helpers import get_current_user
 from src.tool_security import owner_is_admin_or_single_user
@@ -55,6 +57,7 @@ def setup_workspace_routes():
         truncated = len(dirs_sorted) > _MAX_BROWSE_DIRS
         parent = os.path.dirname(target)
         from src.tool_execution import vet_workspace
+
         return {
             "path": target,
             "parent": parent if parent and parent != target else None,
@@ -79,7 +82,13 @@ def setup_workspace_routes():
         if not owner_is_admin_or_single_user(owner):
             raise HTTPException(status_code=403, detail="Workspace selection is admin-only")
         from src.tool_execution import vet_workspace
+
         resolved = vet_workspace(path)
         return {"ok": resolved is not None, "path": resolved}
+
+    @router.get("/read")
+    async def workspace_read():
+        """Read a workspace file (stub)."""
+        return {"ok": True, "path": "", "content": ""}
 
     return router

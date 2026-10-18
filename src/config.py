@@ -1,8 +1,8 @@
 import os
 from pathlib import Path
-from typing import List, Optional
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.constants import DATA_DIR as _DATA_DIR_CONST
 from src.runtime_paths import get_app_root
@@ -17,121 +17,197 @@ from src.runtime_paths import get_app_root
 # files) so they stay easy to integrate with upstream changes.
 IS_WINDOWS = os.name == "nt"
 
+
 class DataConfig(BaseSettings):
     """Configuration for data storage and file handling."""
+
     # Base directory
     base_dir: Path = Field(default=Path(get_app_root()), description="Base directory for the application")
-    
+
     # Data paths
     data_dir: Path = Field(default=Path(_DATA_DIR_CONST), description="Main data directory")
     uploads_dir: Path = Field(default=Path(_DATA_DIR_CONST) / "uploads", description="Directory for uploaded files")
     sessions_file: Path = Field(default=Path(_DATA_DIR_CONST) / "sessions.json", description="Sessions storage file")
     memory_file: Path = Field(default=Path(_DATA_DIR_CONST) / "memory.json", description="Memory storage file")
     memory_doc: Path = Field(default=Path(_DATA_DIR_CONST) / "memory_doc.md", description="Memory document file")
-    personal_dir: Path = Field(default=Path(_DATA_DIR_CONST) / "personal_docs", description="Personal documents directory")
-    runbook_dir: Path = Field(default=Path(_DATA_DIR_CONST) / "personal_docs" / "runbook", description="Runbook directory")
-    
+    personal_dir: Path = Field(
+        default=Path(_DATA_DIR_CONST) / "personal_docs", description="Personal documents directory"
+    )
+    runbook_dir: Path = Field(
+        default=Path(_DATA_DIR_CONST) / "personal_docs" / "runbook", description="Runbook directory"
+    )
+
     # Upload settings
     max_upload_size: int = Field(default=10 * 1024 * 1024, description="Maximum upload size in bytes (10MB)")
-    allowed_extensions: List[str] = Field(
+    allowed_extensions: list[str] = Field(
         default=[
-            '.txt', '.py', '.html', '.md', '.json', '.csv',
-            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.pdf'
+            ".txt",
+            ".py",
+            ".html",
+            ".md",
+            ".json",
+            ".csv",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".bmp",
+            ".webp",
+            ".tiff",
+            ".pdf",
         ],
-        description="Allowed file extensions for uploads"
+        description="Allowed file extensions for uploads",
     )
     chunk_size: int = Field(default=1000, description="Chunk size for document processing")
     chunk_overlap: int = Field(default=200, description="Overlap between chunks for document processing")
     cleanup_days: int = Field(default=30, description="Number of days after which to clean up old uploads")
-    
+
     model_config = SettingsConfigDict(env_prefix="DATA_")
+
 
 class LLMConfig(BaseSettings):
     """Configuration for LLM integration."""
-    
+
     # LLM endpoints
     default_host: str = Field(default="localhost", description="Default host for LLM services")
-    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key if using OpenAI")
+    openai_api_key: str | None = Field(default=None, description="OpenAI API key if using OpenAI")
     openai_compat_path: str = Field(default="/v1/chat/completions", description="OpenAI compatible API path")
-    
+
     # LLM behavior
     max_context_messages: int = Field(default=90, description="Maximum number of context messages to keep")
     request_timeout: int = Field(default=20, description="Request timeout in seconds")
     llm_stream_timeout: int = Field(default=30, description="LLM streaming timeout in seconds")
     llm_max_tokens: int = Field(default=4096, description="Maximum tokens for LLM responses")
     llm_temperature: float = Field(default=0.3, description="Temperature for LLM responses")
-    
+
     model_config = SettingsConfigDict(env_prefix="LLM_")
+
 
 class SearchConfig(BaseSettings):
     """Configuration for search functionality."""
-    
+
     # Web search
-    searxng_instance: str = Field(
-        default="http://localhost:8080",
-        description="SearXNG instance URL (self-hosted)"
-    )
+    searxng_instance: str = Field(default="http://localhost:8080", description="SearXNG instance URL (self-hosted)")
     web_search_count: int = Field(default=10, description="Number of search results to retrieve")
     web_search_max_pages: int = Field(default=6, description="Maximum number of pages to search")
     web_search_max_workers: int = Field(default=4, description="Maximum number of worker threads for web search")
-    
+
     # Research service
-    research_service_url: str = Field(
-        default="http://localhost:8003/research", 
-        description="URL for research service"
-    )
+    research_service_url: str = Field(default="http://localhost:8003/research", description="URL for research service")
     research_timeout: int = Field(default=300, description="Research service timeout in seconds")
-    
+
     # API keys (optional)
-    serpapi_key: Optional[str] = Field(default=None, description="SerpAPI key if used")
-    google_api_key: Optional[str] = Field(default=None, description="Google API key if used")
-    google_cx: Optional[str] = Field(default=None, description="Google Custom Search Engine ID if used")
-    
+    serpapi_key: str | None = Field(default=None, description="SerpAPI key if used")
+    google_api_key: str | None = Field(default=None, description="Google API key if used")
+    google_cx: str | None = Field(default=None, description="Google Custom Search Engine ID if used")
+
     model_config = SettingsConfigDict(env_prefix="SEARCH_")
+
+
+class NotificationConfig(BaseSettings):
+    """Configuration for Apprise unified notifications."""
+
+    apprise_channels: list[str] = Field(
+        default=[],
+        description=(
+            "Apprise channel URLs (e.g. 'discord://token/webhook_id', "
+            "'tgram://token/chat_id', 'ntfy://topic'). "
+            "Empty list = no Apprise channels configured."
+        ),
+    )
+
+    # Kill-switch: ODYSSEUS_APPRISE env var.  When "off" (the default) the
+    # gateway falls back to the legacy individual adapters (Discord/Telegram).
+    # Any truthy value ("on", "1", "true", "yes") routes outbound through
+    # Apprise instead.
+    enabled: bool = Field(
+        default=False,
+        description="Enable Apprise unified notifications (default: OFF).",
+    )
+
+    model_config = SettingsConfigDict(env_prefix="APPRISE_")
+
 
 class SecurityConfig(BaseSettings):
     """Configuration for security and rate limiting."""
-    
+
     # Rate limiting
     max_concurrent_uploads: int = Field(default=3, description="Maximum concurrent uploads per IP")
     upload_rate_limit: int = Field(default=5, description="Maximum uploads per minute per IP")
     upload_rate_window: int = Field(default=60, description="Rate limit window in seconds")
     upload_rate_max_entries: int = Field(default=1000, description="Maximum number of rate limit entries to keep")
-    
+
     # Security settings
-    allowed_origins: List[str] = Field(default=["*"], description="Allowed origins for CORS")
+    allowed_origins: list[str] = Field(default=["*"], description="Allowed origins for CORS")
     max_file_size: int = Field(default=10 * 1024 * 1024, description="Maximum file size in bytes")
-    dangerous_file_types: List[str] = Field(
+    dangerous_file_types: list[str] = Field(
         default=[
-            'application/x-executable', 'application/x-sharedlib',
-            'application/x-dll', 'application/x-msdownload',
-            'application/x-sh', 'application/x-bat', 'application/x-vbs',
-            'application/javascript', 'application/x-javascript'
+            "application/x-executable",
+            "application/x-sharedlib",
+            "application/x-dll",
+            "application/x-msdownload",
+            "application/x-sh",
+            "application/x-bat",
+            "application/x-vbs",
+            "application/javascript",
+            "application/x-javascript",
         ],
-        description="Potentially dangerous MIME types to block"
+        description="Potentially dangerous MIME types to block",
     )
-    dangerous_extensions: List[str] = Field(
+    dangerous_extensions: list[str] = Field(
         default=[
-            '.exe', '.dll', '.bat', '.cmd', '.sh', '.bash', 
-            '.js', '.vbs', '.ps1', '.py', '.php', '.jsp', '.asp', '.aspx'
+            ".exe",
+            ".dll",
+            ".bat",
+            ".cmd",
+            ".sh",
+            ".bash",
+            ".js",
+            ".vbs",
+            ".ps1",
+            ".py",
+            ".php",
+            ".jsp",
+            ".asp",
+            ".aspx",
         ],
-        description="Potentially dangerous file extensions to block"
+        description="Potentially dangerous file extensions to block",
     )
-    
+
     model_config = SettingsConfigDict(env_prefix="SECURITY_")
+
+
+class VectorConfig(BaseSettings):
+    """Configuration for vector database backend selection."""
+
+    # Backend: "chromadb" (default, always available) or "qdrant" (opt-in).
+    # Controlled by env var VECTOR_BACKEND or kill-switch ODYSSEUS_QDRANT.
+    backend: str = Field(
+        default="chromadb",
+        description="Vector backend: 'chromadb' (default) or 'qdrant' (opt-in).",
+    )
+    qdrant_url: str = Field(
+        default="http://localhost:6333",
+        description="Qdrant server URL.",
+    )
+
+    model_config = SettingsConfigDict(env_prefix="VECTOR_")
+
 
 class AppConfig(BaseSettings):
     """Main application configuration combining all components."""
-    
+
     data: DataConfig = DataConfig()
     llm: LLMConfig = LLMConfig()
     search: SearchConfig = SearchConfig()
+    notification: NotificationConfig = NotificationConfig()
     security: SecurityConfig = SecurityConfig()
-    
+    vector: VectorConfig = VectorConfig()
+
     # Application settings
     debug: bool = Field(default=False, description="Enable debug mode")
     log_level: str = Field(default="INFO", description="Logging level")
-    
+
     @field_validator("data", mode="before")
     def set_data_paths(cls, v, info):
         """Set data paths relative to base_dir."""
@@ -140,19 +216,50 @@ class AppConfig(BaseSettings):
             base_dir = v["base_dir"]
         else:
             base_dir = Path(get_app_root())
-        
+
         # Convert string paths to Path objects relative to base_dir
         data_dir = Path(_DATA_DIR_CONST)
-        
+
         # Get values from the input dict or use defaults
         max_upload_size = v.get("max_upload_size", 10 * 1024 * 1024) if isinstance(v, dict) else 10 * 1024 * 1024
-        allowed_extensions = v.get("allowed_extensions", [
-            '.txt', '.py', '.html', '.md', '.json', '.csv',
-            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.pdf'
-        ]) if isinstance(v, dict) else [
-            '.txt', '.py', '.html', '.md', '.json', '.csv',
-            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.pdf'
-        ]
+        allowed_extensions = (
+            v.get(
+                "allowed_extensions",
+                [
+                    ".txt",
+                    ".py",
+                    ".html",
+                    ".md",
+                    ".json",
+                    ".csv",
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".gif",
+                    ".bmp",
+                    ".webp",
+                    ".tiff",
+                    ".pdf",
+                ],
+            )
+            if isinstance(v, dict)
+            else [
+                ".txt",
+                ".py",
+                ".html",
+                ".md",
+                ".json",
+                ".csv",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".gif",
+                ".bmp",
+                ".webp",
+                ".tiff",
+                ".pdf",
+            ]
+        )
         chunk_size = v.get("chunk_size", 1000) if isinstance(v, dict) else 1000
         chunk_overlap = v.get("chunk_overlap", 200) if isinstance(v, dict) else 200
         cleanup_days = v.get("cleanup_days", 30) if isinstance(v, dict) else 30
@@ -169,26 +276,24 @@ class AppConfig(BaseSettings):
             "allowed_extensions": allowed_extensions,
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
-            "cleanup_days": cleanup_days
+            "cleanup_days": cleanup_days,
         }
-    
+
     model_config = SettingsConfigDict()
+
 
 # Create global config instance
 config = AppConfig()
 
+
 # Create directories if they don't exist
 def create_directories():
     """Create required directories if they don't exist."""
-    directories = [
-        config.data.data_dir,
-        config.data.uploads_dir,
-        config.data.personal_dir,
-        config.data.runbook_dir
-    ]
-    
+    directories = [config.data.data_dir, config.data.uploads_dir, config.data.personal_dir, config.data.runbook_dir]
+
     for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
+
 
 # Validate configuration on startup
 def validate_config():
@@ -197,14 +302,15 @@ def validate_config():
     if config.llm.default_host and config.llm.default_host.startswith("192.168."):
         # This is a local IP, assume it's valid
         pass
-    
+
     # Check if API keys are set when needed
     if not config.llm.openai_api_key:
         # OpenAI API key not set, that's OK if not using OpenAI
         pass
-    
+
     # Create directories
     create_directories()
+
 
 # Initialize configuration
 validate_config()

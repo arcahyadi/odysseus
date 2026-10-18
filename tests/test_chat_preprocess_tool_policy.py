@@ -1,5 +1,6 @@
-import pytest
 from types import SimpleNamespace
+
+import pytest
 
 from src.chat_handler import ChatHandler
 
@@ -24,9 +25,7 @@ async def test_preprocess_can_skip_external_context_and_attachment_work(monkeypa
     monkeypatch.setattr("src.chat_handler.fetch_youtube_comments", _fail_comments)
     monkeypatch.setattr(
         "src.chat_handler.model_supports_vision",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("vision support must not be probed")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("vision support must not be probed")),
     )
 
     handler = ChatHandler(

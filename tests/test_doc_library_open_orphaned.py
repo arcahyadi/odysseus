@@ -14,7 +14,6 @@ documentLibrary.js pulls in browser-only modules so it can't run under node; thi
 guards the wiring at the source level (red→green via git-stash).
 """
 
-import re
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "static/js/documentLibrary.js"
@@ -38,10 +37,12 @@ def test_orphaned_doc_open_routes_to_editor_load():
     function that opens an orphaned doc directly in the editor by id."""
     text = _src()
     # definition + two wirings (dropdown item + card button)
-    assert text.count("libraryOpenDocument(doc)") >= 3, \
+    assert text.count("libraryOpenDocument(doc)") >= 3, (
         "both Open controls must route the no-session case to libraryOpenDocument"
+    )
     # libraryOpenDocument genuinely handles the orphaned case.
-    body = text[text.index("async function libraryOpenDocument(doc)"):]
+    body = text[text.index("async function libraryOpenDocument(doc)") :]
     body = body[: body.index("async function libraryOpenInSession")]
-    assert "if (!doc.session_id)" in body and "_loadDocument(doc.id)" in body, \
+    assert "if (!doc.session_id)" in body and "_loadDocument(doc.id)" in body, (
         "libraryOpenDocument must open a session-less doc by id"
+    )

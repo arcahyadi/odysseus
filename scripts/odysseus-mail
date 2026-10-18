@@ -27,12 +27,14 @@ Subcommands:
 Run with a subcommand + --help for argument details.
 """
 
-
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
 
@@ -44,7 +46,7 @@ import os
 import re
 import sys
 from datetime import datetime
-from pathlib import Path
+
 
 # Anchor the path so the script works when invoked from anywhere.
 # The web-app logger is verbose at import time (cot_prompts, embeddings,
@@ -67,15 +69,20 @@ quiet_logs()
 # Defer the heavy imports until after path setup so a friendlier error
 # message can be printed if the venv isn't activated.
 try:
+    from core.database import EmailAccount, SessionLocal
     from routes.email_helpers import (
-        _imap, _get_email_config, _decode_header,
-        _extract_text, _extract_html,
+        _decode_header,
+        _extract_html,
+        _extract_text,
+        _get_email_config,
+        _imap,
         _list_attachments_from_msg,
     )
     from routes.email_pollers import (
-        _scheduled_poll_once, _run_auto_summarize_once,
+        _run_auto_summarize_once,
+        _scheduled_poll_once,
     )
-    from core.database import SessionLocal, EmailAccount
+
     # Re-apply: some submodules call basicConfig during their own
     # import, which raises root level back to INFO. Quench again.
     quiet_logs()
@@ -97,7 +104,7 @@ def emit(obj, args) -> None:
     sys.stdout.write("\n")
 
 
-def fail(msg: str, code: int = 1) -> "None":
+def fail(msg: str, code: int = 1) -> None:
     sys.stderr.write(f"error: {msg}\n")
     sys.exit(code)
 
@@ -121,6 +128,7 @@ def _recipient_list(to: str, cc: str = "", bcc: str = "") -> list[str]:
 
 
 # ─── list ────────────────────────────────────────────────────────────
+
 
 def cmd_list(args) -> None:
     """List recent messages in a folder. Output: array of {uid, date,
@@ -147,9 +155,7 @@ def cmd_list(args) -> None:
                 for part in msg_data:
                     if isinstance(part, tuple):
                         meta = part[0].decode() if isinstance(part[0], bytes) else str(part[0])
-                        if isinstance(part[0], bytes) and b"RFC822.HEADER" in part[0]:
-                            raw_header = part[1]
-                        elif "RFC822.HEADER" in meta:
+                        if isinstance(part[0], bytes) and b"RFC822.HEADER" in part[0] or "RFC822.HEADER" in meta:
                             raw_header = part[1]
                         m = re.search(r"FLAGS \(([^)]*)\)", meta)
                         if m:
@@ -160,27 +166,31 @@ def cmd_list(args) -> None:
                 subject = _decode_header(msg.get("Subject", "(no subject)"))
                 sender = _decode_header(msg.get("From", "unknown"))
                 from email.utils import parseaddr, parsedate_to_datetime
+
                 sender_name, sender_addr = parseaddr(sender)
                 date_raw = msg.get("Date", "")
                 try:
                     iso = parsedate_to_datetime(date_raw).isoformat() if date_raw else ""
                 except Exception:
                     iso = ""
-                out.append({
-                    "uid": uid.decode(),
-                    "date": iso,
-                    "from_addr": sender_addr,
-                    "from_name": sender_name or sender_addr,
-                    "subject": subject,
-                    "is_read": "\\Seen" in flags,
-                    "is_answered": "\\Answered" in flags,
-                })
+                out.append(
+                    {
+                        "uid": uid.decode(),
+                        "date": iso,
+                        "from_addr": sender_addr,
+                        "from_name": sender_name or sender_addr,
+                        "subject": subject,
+                        "is_read": "\\Seen" in flags,
+                        "is_answered": "\\Answered" in flags,
+                    }
+                )
             except Exception as e:
                 sys.stderr.write(f"warn: skipping uid {uid!r}: {e}\n")
         emit(out, args)
 
 
 # ─── read ────────────────────────────────────────────────────────────
+
 
 def cmd_read(args) -> None:
     """Fetch one message. Output: {uid, headers, body_text, body_html?,
@@ -215,6 +225,7 @@ def cmd_read(args) -> None:
 
 # ─── folders ─────────────────────────────────────────────────────────
 
+
 def cmd_folders(args) -> None:
     """List IMAP folders on the account. Output: array of folder names."""
     with _imap(args.account) as conn:
@@ -232,33 +243,42 @@ def cmd_folders(args) -> None:
 
 # ─── accounts ────────────────────────────────────────────────────────
 
+
 def cmd_accounts(args) -> None:
     """List configured email accounts (passwords masked). Output: array
     of {id, name, is_default, enabled, imap_host, smtp_host, from_address}."""
     db = SessionLocal()
     try:
-        rows = db.query(EmailAccount).order_by(
-            EmailAccount.is_default.desc(),
-            EmailAccount.created_at.asc(),
-        ).all()
-        out = [{
-            "id": r.id,
-            "name": r.name,
-            "is_default": bool(r.is_default),
-            "enabled": bool(r.enabled),
-            "imap_host": r.imap_host or "",
-            "imap_user": r.imap_user or "",
-            "smtp_host": r.smtp_host or "",
-            "smtp_user": r.smtp_user or "",
-            "from_address": r.from_address or "",
-            "has_password": bool(r.imap_password) or bool(r.smtp_password),
-        } for r in rows]
+        rows = (
+            db.query(EmailAccount)
+            .order_by(
+                EmailAccount.is_default.desc(),
+                EmailAccount.created_at.asc(),
+            )
+            .all()
+        )
+        out = [
+            {
+                "id": r.id,
+                "name": r.name,
+                "is_default": bool(r.is_default),
+                "enabled": bool(r.enabled),
+                "imap_host": r.imap_host or "",
+                "imap_user": r.imap_user or "",
+                "smtp_host": r.smtp_host or "",
+                "smtp_user": r.smtp_user or "",
+                "from_address": r.from_address or "",
+                "has_password": bool(r.imap_password) or bool(r.smtp_password),
+            }
+            for r in rows
+        ]
         emit(out, args)
     finally:
         db.close()
 
 
 # ─── poll-scheduled ──────────────────────────────────────────────────
+
 
 def cmd_poll_scheduled(args) -> None:
     """One pass of the scheduled-email queue. Cron-friendly: idempotent,
@@ -272,28 +292,33 @@ def cmd_poll_scheduled(args) -> None:
 
 # ─── poll-summary ────────────────────────────────────────────────────
 
+
 def cmd_poll_summary(args) -> None:
     """One pass of the auto-summarize / auto-reply pipeline over recent
     mail. Cron-friendly: a single shot you can wire to a systemd timer
     instead of running the FastAPI process all the time."""
     import asyncio
-    msg = asyncio.run(_run_auto_summarize_once(
-        do_summary=args.summary,
-        do_reply=args.reply,
-        do_tag=args.tag,
-        do_spam=args.spam,
-        days_back=args.days,
-    ))
+
+    msg = asyncio.run(
+        _run_auto_summarize_once(
+            do_summary=args.summary,
+            do_reply=args.reply,
+            do_tag=args.tag,
+            do_spam=args.spam,
+            days_back=args.days,
+        )
+    )
     emit({"message": msg or "(no output)"}, args)
 
 
 # ─── send ────────────────────────────────────────────────────────────
 
+
 def cmd_send(args) -> None:
     """Send a message via SMTP. Body is read from stdin."""
     import smtplib
-    from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
 
     body = sys.stdin.read()
     if not body and not args.allow_empty:
@@ -318,13 +343,16 @@ def cmd_send(args) -> None:
     recipients = _recipient_list(args.to, args.cc, args.bcc)
 
     if args.dry_run:
-        emit({
-            "dry_run": True,
-            "from": cfg["from_address"],
-            "recipients": recipients,
-            "subject": args.subject,
-            "bytes": len(outer.as_bytes()),
-        }, args)
+        emit(
+            {
+                "dry_run": True,
+                "from": cfg["from_address"],
+                "recipients": recipients,
+                "subject": args.subject,
+                "bytes": len(outer.as_bytes()),
+            },
+            args,
+        )
         return
 
     with smtplib.SMTP_SSL(cfg["smtp_host"], int(cfg["smtp_port"] or 465)) as smtp:
@@ -334,6 +362,7 @@ def cmd_send(args) -> None:
 
 
 # ─── argparse wiring ─────────────────────────────────────────────────
+
 
 def _build_parser() -> argparse.ArgumentParser:
     # Common flags shared by every subcommand. Using `parents=[common]`

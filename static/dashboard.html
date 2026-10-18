@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Odysseus AgentOS — Service Health</title>
+<style>
+:root {
+  --bg: #0d1117; --panel: #161b22; --border: #30363d;
+  --fg: #e6edf3; --muted: #8b949e;
+  --green: #3fb950; --warn: #d2991d; --red: #f85149; --blue: #58a6ff;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--fg); font-family:'Fira Code',monospace; padding:2rem; }
+h1 { font-size:1.5rem; margin-bottom:0.5rem; }
+.sub { color:var(--muted); font-size:0.85rem; margin-bottom:2rem; }
+
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:1rem; }
+.card {
+  background:var(--panel); border:1px solid var(--border);
+  border-radius:12px; padding:1.25rem;
+  display:flex; flex-direction:column; gap:0.75rem;
+  transition: border-color 0.3s;
+}
+.card:hover { border-color:var(--blue); }
+.card-header { display:flex; justify-content:space-between; align-items:center; }
+.card-name { font-weight:600; font-size:1.05rem; }
+.card-url { color:var(--muted); font-size:0.75rem; word-break:break-all; }
+
+.status {
+  display:inline-flex; align-items:center; gap:6px;
+  padding:3px 10px; border-radius:20px; font-size:0.8rem; font-weight:600;
+}
+.status-ok { background:rgba(63,185,80,0.15); color:var(--green); }
+.status-warn { background:rgba(210,153,29,0.15); color:var(--warn); }
+.status-down { background:rgba(248,81,73,0.15); color:var(--red); }
+.status-unknown { background:rgba(139,148,158,0.15); color:var(--muted); }
+
+.dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+.dot-ok { background:var(--green); box-shadow:0 0 6px var(--green); }
+.dot-warn { background:var(--warn); box-shadow:0 0 6px var(--warn); }
+.dot-down { background:var(--red); box-shadow:0 0 6px var(--red); }
+.dot-unknown { background:var(--muted); }
+
+.card-info { display:flex; flex-direction:column; gap:4px; font-size:0.8rem; color:var(--muted); }
+.card-info span { display:flex; justify-content:space-between; }
+
+.bar { margin-top:2rem; padding-top:1rem; border-top:1px solid var(--border); display:flex; gap:2rem; font-size:0.85rem; color:var(--muted); }
+.bar strong { color:var(--fg); }
+.refresh { animation:spin 1s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<h1>🔍 Odysseus AgentOS — Service Health</h1>
+<p class="sub">15 services · <span id="refresh-status">polling...</span> · <span id="last-update">--</span></p>
+
+<div class="grid" id="grid"></div>
+
+<div class="bar">
+  <span>Overall: <strong id="overall-status">--</strong></span>
+  <span>Version: <strong id="version">--</strong></span>
+  <span>Docker: <strong id="docker">--</strong></span>
+  <span>Services up: <strong id="up-count">--</strong></span>
+</div>
+
+<script>
+const SERVICES = [
+  { name:"Odysseus UI",      host:"localhost", port:7000, path:"/api/health" },
+  { name:"AgentOS Engine",   host:"localhost", port:7001, path:"/health" },
+  { name:"ChromaDB",         host:"localhost", port:8100, path:"/api/v2/heartbeat" },
+  { name:"SearXNG",          host:"localhost", port:8080, path:"/healthz" },
+  { name:"Meilisearch",      host:"localhost", port:7700, path:"/health" },
+  { name:"ntfy",             host:"localhost", port:8091, path:"/v1/health" },
+  { name:"Kroki",            host:"localhost", port:8700, path:"/health" },
+  { name:"Kroki Mermaid",    host:"localhost", port:8002, path:"/health" },
+  { name:"Scrapling MCP",    host:"localhost", port:8800, path:"/health" },
+  { name:"Serena MCP",       host:"localhost", port:8765, path:"/health" },
+  { name:"LangFuse Server",  host:"localhost", port:3000, path:"/api/public/health" },
+  { name:"Graphify",         host:"localhost", port:9750, path:"/health" },
+  { name:"OpenCode Daemon",  host:"localhost", port:9888, path:"/health" },
+  { name:"Qdrant",           host:"localhost", port:6333, path:"/health" },
+  { name:"LocalAI",          host:"localhost", port:8081, path:"/v1/models" },
+];
+
+async function checkService(svc) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 5000);
+    const r = await fetch(`http://${svc.host}:${svc.port}${svc.path}`, { signal:ctrl.signal });
+    clearTimeout(t);
+    return { status: r.ok ? 'ok' : 'warn', code: r.status };
+  } catch(e) {
+    return { status: 'down', error: e.message };
+  }
+}
+
+function statusClass(s) { return `status-${s}`; }
+function dotClass(s) { return `dot-${s}`; }
+function label(s) { return s === 'ok' ? 'UP' : s === 'warn' ? 'WARN' : 'DOWN'; }
+
+async function refreshAll() {
+  document.getElementById('refresh-status').textContent = '⟳ refreshing...';
+  const start = performance.now();
+
+  const results = await Promise.all(SERVICES.map(async (svc,i) => {
+    const r = await checkService(svc);
+    return { ...svc, ...r, idx:i };
+  }));
+
+  const grid = document.getElementById('grid');
+  grid.innerHTML = results.map(svc => `
+    <div class="card">
+      <div class="card-header">
+        <span class="card-name">${svc.name}</span>
+        <span class="status ${statusClass(svc.status)}">
+          <span class="dot ${dotClass(svc.status)}"></span>${label(svc.status)}
+        </span>
+      </div>
+      <div class="card-url">${svc.host}:${svc.port}${svc.path}</div>
+      <div class="card-info">
+        <span><span>Status</span><span>${svc.code || '--'}</span></span>
+      </div>
+    </div>
+  `).join('');
+
+  const upCount = results.filter(s => s.status === 'ok').length;
+  const warnCount = results.filter(s => s.status === 'warn').length;
+  const downCount = results.filter(s => s.status === 'down').length;
+
+  const overall = downCount === 0 ? (warnCount === 0 ? 'ALL UP ✅' : `${warnCount} warnings`) : `${downCount} DOWN`;
+  document.getElementById('overall-status').textContent = overall;
+  document.getElementById('overall-status').style.color = downCount > 0 ? 'var(--red)' : warnCount > 0 ? 'var(--warn)' : 'var(--green)';
+  document.getElementById('up-count').textContent = `${upCount}/${SERVICES.length}`;
+  document.getElementById('refresh-status').textContent = `refreshed in ${Math.round(performance.now()-start)}ms`;
+  document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+
+  // Also fetch version + runtime
+  try {
+    const v = await fetch('/api/version');
+    document.getElementById('version').textContent = (await v.json()).version;
+  } catch(e) {}
+  try {
+    const rt = await fetch('/api/runtime');
+    const rj = await rt.json();
+    document.getElementById('docker').textContent = rj.in_docker ? '🐳 Docker' : '🖥️ Native';
+  } catch(e) {}
+}
+
+refreshAll();
+setInterval(refreshAll, 30000);
+</script>
+</body>
+</html>

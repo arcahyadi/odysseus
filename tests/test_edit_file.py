@@ -1,4 +1,5 @@
 """edit_file: filesystem-write permission policy + behavior."""
+
 import json
 import os
 import tempfile
@@ -6,13 +7,13 @@ import tempfile
 import pytest
 
 from src import tool_security
+from src.agent_tools import ToolBlock
+from src.agent_tools.filesystem_tools import EditFileTool
 from src.tool_security import (
     NON_ADMIN_BLOCKED_TOOLS,
-    is_public_blocked_tool,
     blocked_tools_for_owner,
+    is_public_blocked_tool,
 )
-from src.agent_tools.filesystem_tools import EditFileTool
-from src.agent_tools import ToolBlock
 
 
 # ── Permission policy ─────────────────────────────────────────────────────
@@ -43,6 +44,7 @@ async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch):
     # different module's function than the one monkeypatch targets — silently
     # bypassing the admin gate.
     import src.tool_execution as te
+
     monkeypatch.setattr(te, "_owner_is_admin", lambda owner: False)
     ws = tempfile.mkdtemp()
     p = os.path.join("/tmp", "ef_block.txt")
@@ -83,7 +85,9 @@ async def test_edit_file_non_unique():
     res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "x", "new_string": "y"}), {})
     assert res["exit_code"] == 1 and "not unique" in res["error"]
     # replace_all resolves it
-    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "x", "new_string": "y", "replace_all": True}), {})
+    res = await EditFileTool().execute(
+        json.dumps({"path": p, "old_string": "x", "new_string": "y", "replace_all": True}), {}
+    )
     assert res["exit_code"] == 0 and open(p).read() == "y\ny\n"
     os.unlink(p)
 

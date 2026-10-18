@@ -3,10 +3,7 @@ from src.rag_vector import VectorRAG
 
 class _FakeCollection:
     def __init__(self, docs):
-        self._docs = {
-            doc_id: {"document": document, "metadata": dict(metadata)}
-            for doc_id, document, metadata in docs
-        }
+        self._docs = {doc_id: {"document": document, "metadata": dict(metadata)} for doc_id, document, metadata in docs}
 
     def count(self):
         return len(self._docs)
@@ -25,7 +22,7 @@ class _FakeCollection:
         }
 
     def update(self, ids, metadatas):
-        for doc_id, metadata in zip(ids, metadatas):
+        for doc_id, metadata in zip(ids, metadatas, strict=False):
             self._docs[doc_id]["metadata"] = dict(metadata)
 
 
@@ -42,25 +39,27 @@ def test_rename_owner_updates_metadata_used_by_owner_filtered_search(tmp_path):
     new_dir = tmp_path / "alice2"
     old_file = old_dir / "note.txt"
     new_file = new_dir / "note.txt"
-    collection = _FakeCollection([
-        (
-            "doc-old",
-            "private vector note",
-            {
-                "owner": "alice",
-                "source": str(old_file),
-                "directory": str(old_dir),
-            },
-        ),
-        (
-            "doc-other",
-            "other vector note",
-            {
-                "owner": "bob",
-                "source": str(tmp_path / "bob" / "note.txt"),
-            },
-        ),
-    ])
+    collection = _FakeCollection(
+        [
+            (
+                "doc-old",
+                "private vector note",
+                {
+                    "owner": "alice",
+                    "source": str(old_file),
+                    "directory": str(old_dir),
+                },
+            ),
+            (
+                "doc-other",
+                "other vector note",
+                {
+                    "owner": "bob",
+                    "source": str(tmp_path / "bob" / "note.txt"),
+                },
+            ),
+        ]
+    )
     store = _store(collection)
 
     result = store.rename_owner(

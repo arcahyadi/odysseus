@@ -13,6 +13,7 @@ This test pins three things:
   3. ``routes/history_routes.py`` never orders a ChatMessage query by the
      non-existent ``created_at`` column again.
 """
+
 import os
 from pathlib import Path
 
@@ -22,8 +23,9 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, ChatMessage as DbChatMessage, Session as DbSession
-
+from core.database import Base
+from core.database import ChatMessage as DbChatMessage
+from core.database import Session as DbSession
 
 HISTORY_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "history_routes.py"
 
@@ -59,10 +61,7 @@ def test_order_by_timestamp_query_executes():
 
         # Mirrors merge_last_assistant (ascending, .all()).
         all_rows = (
-            db.query(DbChatMessage)
-            .filter(DbChatMessage.session_id == sid)
-            .order_by(DbChatMessage.timestamp)
-            .all()
+            db.query(DbChatMessage).filter(DbChatMessage.session_id == sid).order_by(DbChatMessage.timestamp).all()
         )
         assert len(all_rows) == 2
     finally:

@@ -6,14 +6,15 @@ download dir. The runner exports HF_HOME=<local_dir>, so the cache lives
 under <local_dir>/hub — the probe only finds it if the task's dir is passed
 in explicitly rather than read from the probe process's environment.
 """
+
 import os
 import subprocess
 import sys
 
 from routes.cookbook_output import (
-    classify_dead_download,
     HF_CACHE_COMPLETE_PROBE,
     HF_CACHE_INCOMPLETE_PROBE,
+    classify_dead_download,
 )
 
 REPO = "org/some-model-GGUF"
@@ -71,12 +72,14 @@ def _make_cache(root, repo=REPO, incomplete=False, empty_snapshot=False):
 def _run_probe(probe, repo, cache_root, env=None):
     # Strip the HF cache vars so the probe can't accidentally find a real
     # cache on the machine running the tests.
-    full_env = {k: v for k, v in os.environ.items()
-                if k not in ("HF_HOME", "HUGGINGFACE_HUB_CACHE", "HF_HUB_CACHE")}
+    full_env = {k: v for k, v in os.environ.items() if k not in ("HF_HOME", "HUGGINGFACE_HUB_CACHE", "HF_HUB_CACHE")}
     full_env.update(env or {})
     return subprocess.run(
         [sys.executable, "-c", probe, repo, cache_root],
-        env=full_env, capture_output=True, timeout=30,
+        env=full_env,
+        capture_output=True,
+        timeout=30,
+        check=False,
     ).returncode
 
 

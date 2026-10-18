@@ -1,16 +1,19 @@
 # routes/personal_routes.py
 """Routes for personal documents management."""
-import os
+
 import logging
+import os
 import shutil
 import uuid
-from typing import Any, Dict, List, Tuple
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Depends
-from src.request_models import DirectoryRequest
-from core.constants import BASE_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR
-from src.rag_singleton import get_rag_manager
-from src.auth_helpers import require_privilege, require_user
+from typing import Any
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+
+from core.constants import PERSONAL_DIR, PERSONAL_UPLOADS_DIR
 from core.middleware import require_admin
+from src.auth_helpers import require_privilege, require_user
+from src.rag_singleton import get_rag_manager
+from src.request_models import DirectoryRequest
 from src.upload_handler import secure_filename
 from src.upload_limits import PERSONAL_UPLOAD_MAX_BYTES
 
@@ -31,7 +34,7 @@ def _personal_upload_dir_for_owner(owner: str | None, *, create: bool = True) ->
     return upload_dir
 
 
-def _unique_personal_upload_path(upload_dir: str, original_name: str | None) -> Tuple[str, str, str]:
+def _unique_personal_upload_path(upload_dir: str, original_name: str | None) -> tuple[str, str, str]:
     """Build a collision-resistant upload path while preserving a display name."""
     safe_name = secure_filename(os.path.basename(original_name or "upload"))
     if not safe_name or safe_name.startswith("."):
@@ -81,11 +84,11 @@ def rename_personal_upload_owner(
     *,
     personal_docs_manager: Any = None,
     rag_manager: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Move direct personal uploads and rewrite RAG owner metadata on user rename."""
     old_dir = _personal_upload_dir_for_owner(old_owner, create=False)
     new_dir = _personal_upload_dir_for_owner(new_owner, create=False)
-    path_map: Dict[str, str] = {}
+    path_map: dict[str, str] = {}
     moved_files = 0
 
     if os.path.isdir(old_dir) and old_dir != new_dir:
@@ -163,76 +166,83 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         if not in_base:
             raise HTTPException(403, "Directory must be inside personal documents")
         return resolved
-    
+
     @router.get("")
     def api_personal_list(owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         """Enhanced version that includes directories"""
         files = [{"name": f["name"], "size": f["size"], "path": f.get("path", "")} for f in personal_docs_manager.index]
-        directories = personal_docs_manager.get_indexed_directories() if hasattr(personal_docs_manager, "get_indexed_directories") else []
+        directories = (
+            personal_docs_manager.get_indexed_directories()
+            if hasattr(personal_docs_manager, "get_indexed_directories")
+            else []
+        )
         return {"files": files, "directories": directories}
-    
+
     @router.post("/reload")
     def api_personal_reload(owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         personal_docs_manager.refresh_index()
         return {"ok": True, "count": len(personal_docs_manager.index)}
-    
+
     @router.post("/add_directory")
     async def add_directory_to_rag(
         request: Request,
         directory_request: DirectoryRequest,
-        owner: str = Depends(require_user), _admin: None = Depends(require_admin),
+        owner: str = Depends(require_user),
+        _admin: None = Depends(require_admin),
     ):
         """
         Add a directory and all its subdirectories/files to the RAG index.
-        
+
         Args:
             directory_request: Directory request model containing the directory path
-            
+
         Returns:
             JSON response with indexing results
         """
         directory = directory_request.directory
         try:
             directory = _resolve_allowed_personal_dir(directory)
-            
+
             # Security check - ensure directory exists and is accessible
             if not os.path.exists(directory):
                 raise HTTPException(404, f"Directory not found: {directory}")
-            
+
             if not os.path.isdir(directory):
                 raise HTTPException(400, f"Path is not a directory: {directory}")
-            
+
             logger.info(f"Adding directory to RAG: {directory}")
-            
+
             # Use the RAGManager to index the directory
             rag = _rag()
             if rag:
                 result = rag.index_personal_documents(directory, owner=owner)
-                
+
                 if result["success"]:
                     # Also update the personal_docs_manager to track this directory
                     personal_docs_manager.add_directory(directory, index=False)
-                    
+
                     return {
                         "success": True,
                         "message": f"Successfully indexed {result['indexed_count']} chunks from {directory}",
                         "indexed_count": result["indexed_count"],
                         "failed_count": result.get("failed_count", 0),
-                        "directory": directory
+                        "directory": directory,
                     }
                 else:
                     raise HTTPException(500, result.get("message", "Failed to index directory"))
             else:
                 raise HTTPException(503, "RAG system is not available")
-                
+
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Error adding directory to RAG: {e}")
             raise HTTPException(500, f"Failed to add directory: {str(e)}")
-    
+
     @router.delete("/remove_directory")
-    async def remove_directory_from_rag(directory: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
+    async def remove_directory_from_rag(
+        directory: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)
+    ):
         """
         Remove a directory from the RAG index.
 
@@ -252,7 +262,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             logger.info(f"Removing directory from RAG: {directory}")
 
             # Always remove from personal_docs_manager tracking
-            if hasattr(personal_docs_manager, 'remove_directory'):
+            if hasattr(personal_docs_manager, "remove_directory"):
                 personal_docs_manager.remove_directory(directory)
 
             # Remove from RAG vector store (best-effort)
@@ -266,7 +276,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             return {
                 "success": True,
                 "message": f"Successfully removed {directory} from RAG index",
-                "directory": directory
+                "directory": directory,
             }
 
         except HTTPException:
@@ -274,9 +284,9 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         except Exception as e:
             logger.error(f"Error removing directory from RAG: {e}")
             raise HTTPException(500, f"Failed to remove directory: {str(e)}")
-    
+
     @router.post("/upload")
-    async def upload_files_to_rag(request: Request, files: List[UploadFile] = File(...)):
+    async def upload_files_to_rag(request: Request, files: list[UploadFile] = File(...)):
         """Upload files directly into RAG. Supports text and PDF."""
         user = require_privilege(request, "can_use_documents")
         rag = _rag()
@@ -303,6 +313,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 ext = os.path.splitext(safe_name)[1].lower()
                 if ext == ".pdf":
                     from src.personal_docs import extract_pdf_text
+
                     text = extract_pdf_text(file_path)
                 else:
                     text = content_bytes.decode("utf-8", errors="replace")
@@ -346,7 +357,9 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         }
 
     @router.delete("/file")
-    async def delete_file_from_rag(filepath: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
+    async def delete_file_from_rag(
+        filepath: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)
+    ):
         """Delete a specific file from RAG index and optionally from disk."""
         try:
             # Remove chunks from RAG vector store (best-effort)
@@ -365,10 +378,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             try:
                 abs_target = os.path.realpath(filepath)
                 base_abs = os.path.realpath(_personal_upload_dir_for_owner(owner, create=False))
-                in_uploads = (
-                    abs_target == base_abs
-                    or os.path.commonpath([abs_target, base_abs]) == base_abs
-                )
+                in_uploads = abs_target == base_abs or os.path.commonpath([abs_target, base_abs]) == base_abs
             except ValueError:
                 # commonpath raises on mixed drives / non-comparable paths
                 in_uploads = False

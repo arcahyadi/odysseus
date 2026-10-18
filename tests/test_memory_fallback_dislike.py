@@ -6,6 +6,7 @@ formatted every hit as "User prefers X.", so "I hate cilantro" was stored as
 "User prefers cilantro" -- the opposite of what the user said, then persisted
 to memory and re-injected into context. These pin the sentiment.
 """
+
 from services.memory.memory_extractor import _fallback_memory_candidates
 
 

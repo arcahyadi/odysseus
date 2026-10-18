@@ -18,6 +18,7 @@ from services.search import providers
 
 class _BadJSONResponse:
     """A 200 response whose body is not valid JSON (e.g. an HTML error page)."""
+
     status_code = 200
 
     def raise_for_status(self):

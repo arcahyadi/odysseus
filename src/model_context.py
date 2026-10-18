@@ -8,8 +8,6 @@ Provides token estimation for context usage tracking.
 import ipaddress
 import logging
 import sys
-from typing import Dict, List, Optional, Tuple
-
 from urllib.parse import urlparse
 
 import httpx
@@ -53,7 +51,7 @@ def _normalize_base_for_compare(url: str) -> str:
     return url
 
 
-def _configured_endpoint_kind(url: str) -> Optional[str]:
+def _configured_endpoint_kind(url: str) -> str | None:
     """Return configured endpoint kind for a chat/base URL when available."""
     target = _normalize_base_for_compare(url)
     if not target:
@@ -61,7 +59,8 @@ def _configured_endpoint_kind(url: str) -> Optional[str]:
     if "core.database" not in sys.modules:
         return None
     try:
-        from core.database import SessionLocal, ModelEndpoint
+        from core.database import ModelEndpoint, SessionLocal
+
         db = SessionLocal()
         try:
             rows = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
@@ -100,6 +99,7 @@ def is_local_endpoint(url: str) -> bool:
     except Exception:
         return False
 
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -111,130 +111,119 @@ REQUEST_TIMEOUT = 5
 # Substring matching — use the shortest unique prefix so variants get caught.
 KNOWN_CONTEXT_WINDOWS = {
     # --- Anthropic ---
-    'claude-sonnet-4-5': 200000,
-    'claude-sonnet-4-6': 200000,
-    'claude-sonnet-4': 200000,
-    'claude-opus-4': 200000,
-    'claude-haiku-4': 200000,
-    'claude-haiku-3-5': 200000,
-    'claude-3-5-sonnet': 200000,
-    'claude-3-5-haiku': 200000,
-    'claude-3-opus': 200000,
-    'claude-3-sonnet': 200000,
-    'claude-3-haiku': 200000,
-
+    "claude-sonnet-4-5": 200000,
+    "claude-sonnet-4-6": 200000,
+    "claude-sonnet-4": 200000,
+    "claude-opus-4": 200000,
+    "claude-haiku-4": 200000,
+    "claude-haiku-3-5": 200000,
+    "claude-3-5-sonnet": 200000,
+    "claude-3-5-haiku": 200000,
+    "claude-3-opus": 200000,
+    "claude-3-sonnet": 200000,
+    "claude-3-haiku": 200000,
     # --- OpenAI ---
-    'gpt-5': 400000,
-    'gpt-4.1': 1047576,
-    'gpt-4.1-mini': 1047576,
-    'gpt-4.1-nano': 1047576,
-    'gpt-4o': 128000,
-    'gpt-4o-mini': 128000,
-    'gpt-4-turbo': 128000,
-    'gpt-4': 8192,
-    'gpt-3.5-turbo': 16385,
-    'o1': 200000,
-    'o1-mini': 128000,
-    'o1-pro': 200000,
-    'o3': 200000,
-    'o3-mini': 200000,
-    'o4-mini': 200000,
-
+    "gpt-5": 400000,
+    "gpt-4.1": 1047576,
+    "gpt-4.1-mini": 1047576,
+    "gpt-4.1-nano": 1047576,
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4": 8192,
+    "gpt-3.5-turbo": 16385,
+    "o1": 200000,
+    "o1-mini": 128000,
+    "o1-pro": 200000,
+    "o3": 200000,
+    "o3-mini": 200000,
+    "o4-mini": 200000,
     # --- DeepSeek ---
-    'deepseek-chat': 64000,
-    'deepseek-coder': 64000,
-    'deepseek-reasoner': 64000,
-    'deepseek-r1': 64000,
-    'deepseek-v3': 64000,
-    'deepseek-v2': 64000,
-
+    "deepseek-chat": 64000,
+    "deepseek-coder": 64000,
+    "deepseek-reasoner": 64000,
+    "deepseek-r1": 64000,
+    "deepseek-v3": 64000,
+    "deepseek-v2": 64000,
     # --- Google ---
-    'gemini-2.5-pro': 1048576,
-    'gemini-2.5-flash': 1048576,
-    'gemini-2.0-flash': 1048576,
-    'gemini-1.5-pro': 1048576,
-    'gemini-1.5-flash': 1048576,
-    'gemma-4': 262144,
-    'gemma-3': 128000,
-    'gemma-2': 8192,
-
+    "gemini-2.5-pro": 1048576,
+    "gemini-2.5-flash": 1048576,
+    "gemini-2.0-flash": 1048576,
+    "gemini-1.5-pro": 1048576,
+    "gemini-1.5-flash": 1048576,
+    "gemma-4": 262144,
+    "gemma-3": 128000,
+    "gemma-2": 8192,
     # --- Mistral ---
-    'mistral-large': 128000,
-    'mistral-medium': 32000,
-    'mistral-small': 32000,
-    'mistral-nemo': 128000,
-    'mistral-7b': 32000,
-    'mixtral': 32000,
-    'codestral': 32000,
-    'pixtral': 128000,
-
+    "mistral-large": 128000,
+    "mistral-medium": 32000,
+    "mistral-small": 32000,
+    "mistral-nemo": 128000,
+    "mistral-7b": 32000,
+    "mixtral": 32000,
+    "codestral": 32000,
+    "pixtral": 128000,
     # --- xAI ---
-    'grok-4': 131072,
-    'grok-3': 131072,
-    'grok-2': 131072,
-
+    "grok-4": 131072,
+    "grok-3": 131072,
+    "grok-2": 131072,
     # --- Meta / Llama ---
-    'llama-4': 1048576,
-    'llama-3.3': 131072,
-    'llama-3.2': 131072,
-    'llama-3.1': 131072,
-    'llama-3': 131072,
-
+    "llama-4": 1048576,
+    "llama-3.3": 131072,
+    "llama-3.2": 131072,
+    "llama-3.1": 131072,
+    "llama-3": 131072,
     # --- Qwen ---
-    'qwen3': 131072,
-    'qwen2.5': 131072,
-    'qwen2': 32768,
-    'qwq': 32768,
-
+    "qwen3": 131072,
+    "qwen2.5": 131072,
+    "qwen2": 32768,
+    "qwq": 32768,
     # --- Cohere ---
-    'command-r-plus': 128000,
-    'command-r': 128000,
-    'command-a': 256000,
-
+    "command-r-plus": 128000,
+    "command-r": 128000,
+    "command-a": 256000,
     # --- Perplexity ---
-    'sonar-pro': 200000,
-    'sonar': 128000,
-
+    "sonar-pro": 200000,
+    "sonar": 128000,
     # --- MiniMax ---
-    'minimax': 1000000,
-
+    "minimax": 1000000,
     # --- Moonshot / Kimi ---
-    'moonshot': 128000,
-    'kimi': 128000,
-
+    "moonshot": 128000,
+    "kimi": 128000,
     # --- Microsoft ---
-    'phi-4': 16000,
-    'phi-3': 128000,
-
+    "phi-4": 16000,
+    "phi-3": 128000,
     # --- Nvidia ---
-    'nemotron': 131072,
-
+    "nemotron": 131072,
     # --- Yi ---
-    'yi-large': 32768,
-    'yi-1.5': 16384,
-
+    "yi-large": 32768,
+    "yi-1.5": 16384,
     # --- 01.ai ---
-    'yi-lightning': 16384,
-
+    "yi-lightning": 16384,
     # --- Nous ---
-    'hermes': 131072,
-    'nous-hermes': 131072,
-
+    "hermes": 131072,
+    "nous-hermes": 131072,
     # --- Open community ---
-    'dolphin': 32768,
-    'mythomax': 4096,
-    'wizard': 32768,
-    'openchat': 8192,
-    'solar': 32768,
+    "dolphin": 32768,
+    "mythomax": 4096,
+    "wizard": 32768,
+    "openchat": 8192,
+    "solar": 32768,
 }
 
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
-_context_cache: Dict[Tuple[str, str], Tuple[int, bool]] = {}
+_context_cache: dict[tuple[str, str], tuple[int, bool]] = {}
 
 
-def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool]:
+def _reset_caches() -> None:
+    """Vide les caches de ce module. Pour l'isolation des tests (MOD-3)."""
+    global _context_cache
+    _context_cache.clear()
+
+
+def _get_context_length_cached(endpoint_url: str, model: str) -> tuple[int, bool]:
     """Return (context_length, known). ``known`` is False only when the value is a
     bare DEFAULT_CONTEXT fallback (no endpoint report and not in the known table)."""
     configured_kind = _configured_endpoint_kind(endpoint_url)
@@ -267,7 +256,7 @@ def get_context_length(endpoint_url: str, model: str) -> int:
     return _get_context_length_cached(endpoint_url, model)[0]
 
 
-def get_context_length_known(endpoint_url: str, model: str) -> Tuple[int, bool]:
+def get_context_length_known(endpoint_url: str, model: str) -> tuple[int, bool]:
     """Like ``get_context_length`` but also returns whether the window was actually
     discovered (endpoint-reported or in the known-models table) rather than the bare
     DEFAULT_CONTEXT fallback. Callers that *scale* a budget off the window must not
@@ -293,7 +282,7 @@ def budget_context_for_model(endpoint_url: str, model: str, *, fallback: int = 0
         return fallback
 
 
-def _lookup_known(model: str) -> Optional[int]:
+def _lookup_known(model: str) -> int | None:
     """Check known context windows by substring match.
 
     Picks the LONGEST matching key so a short key never shadows a more specific
@@ -303,8 +292,8 @@ def _lookup_known(model: str) -> Optional[int]:
     name = model.lower()
     basename = name.split("/")[-1] if "/" in name else name
     basename = basename.split(":")[0]  # strip :free, :extended etc.
-    best_key: Optional[str] = None
-    best_ctx: Optional[int] = None
+    best_key: str | None = None
+    best_ctx: int | None = None
     for key, ctx in KNOWN_CONTEXT_WINDOWS.items():
         if key in basename or key in name:
             if best_key is None or len(key) > len(best_key):
@@ -312,7 +301,7 @@ def _lookup_known(model: str) -> Optional[int]:
     return best_ctx
 
 
-def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
+def _query_context_length(endpoint_url: str, model: str) -> tuple[int, bool]:
     """Query the model API for context length. Returns (context_length, known) where
     ``known`` is False only for the bare DEFAULT_CONTEXT fallback."""
     known = _lookup_known(model)
@@ -348,6 +337,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     # picker models are major API models covered by the known-context table, so
     # rely on that instead of a doomed network call.
     from src.copilot import is_copilot_base
+
     if is_copilot_base(endpoint_url):
         if known:
             logger.info(f"Using known context window for {model}: {known}")
@@ -411,7 +401,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     return DEFAULT_CONTEXT, False
 
 
-def estimate_tokens(messages: List[Dict]) -> int:
+def estimate_tokens(messages: list[dict]) -> int:
     """Rough token estimate for a list of messages.
 
     Uses chars * 0.3 which is closer to real BPE tokenizer output

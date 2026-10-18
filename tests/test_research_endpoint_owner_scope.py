@@ -84,6 +84,7 @@ def _resolve(rows, owner, endpoint_id=None):
 
 # --- explicit endpoint_id (POST /api/research/start, body.endpoint_id) --------
 
+
 def test_endpoint_id_rejects_another_owners_private_endpoint():
     # bob's private endpoint exists, but alice asking for it by id resolves None
     # → the route raises 404 ("Endpoint not found or disabled"), never builds
@@ -111,6 +112,7 @@ def test_endpoint_id_skips_disabled_even_when_owned():
 
 # --- bare first-enabled fallback (no endpoint_id, nothing configured) ---------
 
+
 def test_fallback_never_picks_another_owners_endpoint():
     # bob's private endpoint is first in the table, alice must never borrow it.
     rows = [_ep("ep-bob", "bob"), _ep("ep-shared", None)]
@@ -124,6 +126,7 @@ def test_fallback_returns_none_when_only_others_endpoints():
 
 
 # --- legacy single-user / unresolved owner: owner_filter no-op ---------------
+
 
 def test_null_owner_is_legacy_single_user_noop():
     rows = [_ep("ep-x", "bob"), _ep("ep-y", "alice")]

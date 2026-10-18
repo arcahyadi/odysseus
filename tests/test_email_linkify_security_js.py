@@ -19,8 +19,10 @@ def _run(js: str) -> str:
         input=js,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=str(_REPO),
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
@@ -45,7 +47,7 @@ def test_plain_text_linkify_escapes_href_attribute_without_double_escaping():
             }};
           }}
         }};
-        const {{ _escLinkify }} = await import('{_HELPER.as_posix()}');
+        const {{ _escLinkify }} = await import('{_HELPER.as_uri()}');
         const out = _escLinkify('See https://example.test/path?a=1&b=2 and www.example.test/a`b');
         console.log(JSON.stringify(out));
         """

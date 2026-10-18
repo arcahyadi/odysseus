@@ -18,6 +18,7 @@ back to a compiled report built from the gathered findings when synthesis
 produced nothing. These run without a live LLM or DB (same stub pattern as
 tests/test_deep_research_date_context.py).
 """
+
 import asyncio
 
 from src.deep_research import DeepResearcher
@@ -32,10 +33,16 @@ def _researcher():
 
 
 _FINDINGS = [
-    {"url": "https://ex.com/a", "title": "Diarization basics",
-     "summary": "Speaker diarization segments audio by speaker identity."},
-    {"url": "https://ex.com/b", "title": "x-vectors",
-     "evidence": "x-vectors are embeddings used to cluster speech segments."},
+    {
+        "url": "https://ex.com/a",
+        "title": "Diarization basics",
+        "summary": "Speaker diarization segments audio by speaker identity.",
+    },
+    {
+        "url": "https://ex.com/b",
+        "title": "x-vectors",
+        "evidence": "x-vectors are embeddings used to cluster speech segments.",
+    },
 ]
 
 

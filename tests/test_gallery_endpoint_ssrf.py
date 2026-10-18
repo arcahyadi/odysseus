@@ -12,6 +12,7 @@ goes through ``check_outbound_url``; these two routes were missing the same
 guard. This test pins the guard in place and confirms the validator rejects the
 metadata range.
 """
+
 import ast
 from pathlib import Path
 
@@ -40,5 +41,6 @@ def test_url_safety_blocks_metadata_endpoint():
     # The guard is only as strong as the checker: confirm the link-local cloud
     # metadata address is rejected even with private IPs otherwise allowed.
     from src.url_safety import check_outbound_url
+
     ok, _ = check_outbound_url("http://169.254.169.254/latest/meta-data")
     assert ok is False

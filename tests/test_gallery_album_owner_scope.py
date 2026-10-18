@@ -7,6 +7,7 @@ queries. The gallery route handlers are closures, so — matching the AST-assert
 convention of test_gallery_image_privileges.py — we assert the guards are present
 in the source.
 """
+
 import ast
 from pathlib import Path
 

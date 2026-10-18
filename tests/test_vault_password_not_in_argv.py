@@ -12,8 +12,8 @@ The /unlock route previously did ``_run_bw(["unlock", req.master_password,
 vault) to any local user for the lifetime of the unlock subprocess.
 """
 
-import os
 import json
+import os
 import re
 import sys
 import types
@@ -71,8 +71,7 @@ def _patch_exec(monkeypatch):
 async def test_run_bw_passwordenv_does_not_put_password_in_argv(monkeypatch):
     captured = _patch_exec(monkeypatch)
     secret = "correct horse battery staple"
-    await vr._run_bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"],
-                     bw_password=secret)
+    await vr._run_bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], bw_password=secret)
     # The secret must reach bw through the environment...
     assert captured["env"].get("BW_PASSWORD") == secret
     # ...and must NOT appear anywhere in the argv (which `ps` exposes).
@@ -95,14 +94,14 @@ def test_unlock_handler_feeds_password_on_stdin_not_argv():
         text = fh.read()
     # The old, vulnerable call shape must be gone.
     assert 'req.master_password, "--raw"' not in text
-    assert "[\"unlock\", req.master_password" not in text
+    assert '["unlock", req.master_password' not in text
     # And the safer stdin shape must be present.
-    assert "[\"unlock\", \"--raw\"]" in text
+    assert '["unlock", "--raw"]' in text
     assert re.search(r'input_text\s*=\s*req\.master_password\s*\+\s*"\\n"', text)
 
 
 def test_tool_vault_unlock_feeds_password_on_stdin_not_argv():
-    text = open("src/tool_implementations.py", encoding="utf-8").read()
+    text = open("src/tools/vault.py", encoding="utf-8").read()
 
     assert '["unlock", master_password, "--raw"]' not in text
     assert '_run_bw(["unlock", master_password' not in text

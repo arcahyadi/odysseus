@@ -24,8 +24,7 @@ import core.database as cdb
 import routes.document_routes as droutes
 from core.database import Document
 from core.database import Session as DbSession
-from routes.document_helpers import DocumentPatch
-from routes.document_helpers import _owner_session_filter
+from routes.document_helpers import DocumentPatch, _owner_session_filter
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
@@ -65,36 +64,42 @@ def _seed():
     try:
         db.add(DbSession(id=alice_session, owner="alice", name="alice", model="m", endpoint_url="http://x"))
         db.add(DbSession(id=bob_session, owner="bob", name="bob", model="m", endpoint_url="http://x"))
-        db.add(Document(
-            id=alice_doc,
-            session_id=alice_session,
-            title="alice doc",
-            language="markdown",
-            current_content="alice body",
-            version_count=1,
-            is_active=True,
-            owner="alice",
-        ))
-        db.add(Document(
-            id=bob_doc,
-            session_id=bob_session,
-            title="bob doc",
-            language="markdown",
-            current_content="bob body",
-            version_count=1,
-            is_active=True,
-            owner="bob",
-        ))
-        db.add(Document(
-            id=legacy_doc,
-            session_id=alice_session,
-            title="legacy doc",
-            language="markdown",
-            current_content="legacy body",
-            version_count=1,
-            is_active=True,
-            owner=None,
-        ))
+        db.add(
+            Document(
+                id=alice_doc,
+                session_id=alice_session,
+                title="alice doc",
+                language="markdown",
+                current_content="alice body",
+                version_count=1,
+                is_active=True,
+                owner="alice",
+            )
+        )
+        db.add(
+            Document(
+                id=bob_doc,
+                session_id=bob_session,
+                title="bob doc",
+                language="markdown",
+                current_content="bob body",
+                version_count=1,
+                is_active=True,
+                owner="bob",
+            )
+        )
+        db.add(
+            Document(
+                id=legacy_doc,
+                session_id=alice_session,
+                title="legacy doc",
+                language="markdown",
+                current_content="legacy body",
+                version_count=1,
+                is_active=True,
+                owner=None,
+            )
+        )
         db.commit()
         return alice_session, bob_session, alice_doc, bob_doc, legacy_doc
     finally:

@@ -11,9 +11,17 @@ from unittest.mock import MagicMock
 _ABSENT = object()
 _AGENT_MODULES = ["src.agent_tools", "src.tool_parsing", "src.tool_schemas"]
 _STUBBED = [
-    "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.ext", "sqlalchemy.ext.declarative",
-    "sqlalchemy.ext.hybrid", "sqlalchemy.sql", "sqlalchemy.sql.expression",
-    "src.database", "core.models", "core.database", "core.auth",
+    "sqlalchemy",
+    "sqlalchemy.orm",
+    "sqlalchemy.ext",
+    "sqlalchemy.ext.declarative",
+    "sqlalchemy.ext.hybrid",
+    "sqlalchemy.sql",
+    "sqlalchemy.sql.expression",
+    "src.database",
+    "core.models",
+    "core.database",
+    "core.auth",
 ]
 _saved_stubs = {name: sys.modules.get(name, _ABSENT) for name in _STUBBED}
 
@@ -23,7 +31,6 @@ for _mod in _STUBBED:
     if _mod not in sys.modules:
         sys.modules[_mod] = MagicMock()
 
-import pytest  # noqa: E402
 import src.agent_tools  # noqa: E402,F401
 from src.tool_parsing import parse_tool_blocks  # noqa: E402
 from src.tool_schemas import function_call_to_tool_block  # noqa: E402

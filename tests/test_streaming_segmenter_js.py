@@ -31,8 +31,7 @@ def test_streaming_segmenter_suite():
         capture_output=True,
         timeout=180,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
-        raise AssertionError(
-            f"node --test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-        )
+        raise AssertionError(f"node --test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")

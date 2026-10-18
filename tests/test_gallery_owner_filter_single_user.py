@@ -4,10 +4,10 @@ When AUTH_ENABLED=false, get_current_user returns None and gallery routes should
 stay all-visible. When AUTH_ENABLED=true and no current user resolves, the same
 None means an anonymous caller and gallery queries must fail closed.
 """
+
 import tempfile
 import uuid
 
-import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool

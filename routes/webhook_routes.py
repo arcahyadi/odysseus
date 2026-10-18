@@ -1,17 +1,16 @@
 """Webhook, API Token, and sync chat routes."""
 
-import uuid
 import logging
-from typing import Optional
+import uuid
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Form
+from fastapi import APIRouter, Form, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from core.database import SessionLocal, Webhook, ModelEndpoint
+from core.database import ModelEndpoint, SessionLocal, Webhook
 from src.auth_helpers import owner_filter
 from src.url_security import validate_public_http_url
-from src.webhook_manager import WebhookManager, validate_webhook_url, validate_events
+from src.webhook_manager import WebhookManager, validate_events, validate_webhook_url
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,7 @@ MAX_MESSAGE_LEN = 32_000
 from core.middleware import require_admin as _require_admin
 
 
-def _select_api_chat_fallback_endpoint(db, token_owner: Optional[str]):
+def _select_api_chat_fallback_endpoint(db, token_owner: str | None):
     """First enabled ModelEndpoint visible to token_owner — their own rows plus
     legacy null-owner ("shared") rows. Owner-scoped: an unscoped .first() would
     let a chat-scoped token fall back onto another user's private endpoint and
@@ -67,7 +66,6 @@ def setup_webhook_routes(
     session_manager=None,
     api_key_manager=None,
 ) -> APIRouter:
-
     @router.get("/webhooks")
     def list_webhooks(request: Request):
         _require_admin(request)
@@ -124,14 +122,16 @@ def setup_webhook_routes(
         webhook_id = str(uuid.uuid4())[:8]
         db = SessionLocal()
         try:
-            db.add(Webhook(
-                id=webhook_id,
-                name=name,
-                url=url,
-                secret=encrypted_secret,
-                events=events,
-                is_active=True,
-            ))
+            db.add(
+                Webhook(
+                    id=webhook_id,
+                    name=name,
+                    url=url,
+                    secret=encrypted_secret,
+                    events=events,
+                    is_active=True,
+                )
+            )
             db.commit()
         finally:
             db.close()
@@ -215,7 +215,7 @@ def setup_webhook_routes(
         "kimi": "kimi-code",
     }
 
-    def _resolve_base_url(model: Optional[str], provider: Optional[str]) -> Optional[str]:
+    def _resolve_base_url(model: str | None, provider: str | None) -> str | None:
         """Try to auto-resolve a base URL from provider name or model prefix."""
         if provider and provider.lower() in KNOWN_PROVIDERS:
             return KNOWN_PROVIDERS[provider.lower()]
@@ -228,11 +228,11 @@ def setup_webhook_routes(
 
     class SyncChatRequest(BaseModel):
         message: str = Field(..., max_length=MAX_MESSAGE_LEN)
-        model: Optional[str] = Field(None, max_length=200)
-        session: Optional[str] = Field(None, max_length=100)
-        api_key: Optional[str] = Field(None, max_length=256)
-        base_url: Optional[str] = Field(None, max_length=MAX_URL_LEN)
-        provider: Optional[str] = Field(None, max_length=50)
+        model: str | None = Field(None, max_length=200)
+        session: str | None = Field(None, max_length=100)
+        api_key: str | None = Field(None, max_length=256)
+        base_url: str | None = Field(None, max_length=MAX_URL_LEN)
+        provider: str | None = Field(None, max_length=50)
 
     @router.post("/v1/chat")
     async def sync_chat(request: Request, body: SyncChatRequest):
@@ -244,8 +244,8 @@ def setup_webhook_routes(
         token_owner = getattr(request.state, "api_token_owner", None)
 
         from core.models import ChatMessage
-        from src.llm_core import llm_call_async
         from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, normalize_base
+        from src.llm_core import llm_call_async
 
         message = body.message.strip()
         if not message:
@@ -266,6 +266,7 @@ def setup_webhook_routes(
             # middleware); fall back to require_user if not present.
             try:
                 from src.auth_helpers import get_current_user as _gcu
+
                 _tok_user = token_owner or getattr(request.state, "user", None) or _gcu(request)
             except Exception:
                 _tok_user = None
@@ -293,9 +294,11 @@ def setup_webhook_routes(
             else:
                 base_url = _resolve_base_url(model, body.provider)
             if not base_url:
-                raise HTTPException(400,
+                raise HTTPException(
+                    400,
                     "Could not auto-detect provider. Pass base_url (e.g. 'https://api.deepseek.com/v1') "
-                    "or provider ('deepseek', 'openai', 'groq', etc.)")
+                    "or provider ('deepseek', 'openai', 'groq', etc.)",
+                )
             base_url = normalize_base(base_url)
             endpoint_url = build_chat_url(base_url)
 
@@ -304,8 +307,11 @@ def setup_webhook_routes(
 
             sid = str(uuid.uuid4())
             sess = session_manager.create_session(
-                session_id=sid, name="API Chat", endpoint_url=endpoint_url,
-                model=model, owner=token_owner,
+                session_id=sid,
+                name="API Chat",
+                endpoint_url=endpoint_url,
+                model=model,
+                owner=token_owner,
             )
             sess.headers = build_headers(api_key, base_url)
             session_manager.save_sessions()
@@ -320,9 +326,11 @@ def setup_webhook_routes(
                 db.close()
 
             if not ep:
-                raise HTTPException(400,
+                raise HTTPException(
+                    400,
                     "No session, api_key, or configured endpoints. "
-                    "Pass api_key + model, or configure an endpoint in Admin.")
+                    "Pass api_key + model, or configure an endpoint in Admin.",
+                )
 
             base_url = normalize_base(ep.base_url)
             endpoint_url = build_chat_url(base_url)
@@ -331,6 +339,7 @@ def setup_webhook_routes(
             if getattr(ep, "provider_auth_id", None):
                 try:
                     from src.endpoint_resolver import resolve_endpoint_runtime
+
                     base_url, api_key = resolve_endpoint_runtime(ep, owner=token_owner)
                     endpoint_url = build_chat_url(base_url)
                 except Exception:
@@ -354,6 +363,7 @@ def setup_webhook_routes(
                                 ]
                         else:
                             import json as _json
+
                             ids = _json.loads(ep.cached_models or "[]")
                         model = ids[0] if ids else "auto"
                 except Exception:
@@ -364,8 +374,11 @@ def setup_webhook_routes(
 
             sid = str(uuid.uuid4())
             sess = session_manager.create_session(
-                session_id=sid, name="API Chat", endpoint_url=endpoint_url,
-                model=model, owner=token_owner,
+                session_id=sid,
+                name="API Chat",
+                endpoint_url=endpoint_url,
+                model=model,
+                owner=token_owner,
             )
             if api_key:
                 sess.headers = build_headers(api_key, base_url)
@@ -378,16 +391,24 @@ def setup_webhook_routes(
         messages = [{"role": m.role, "content": m.content} for m in sess.history]
 
         reply = await llm_call_async(
-            sess.endpoint_url, sess.model, messages,
-            headers=sess.headers, timeout=120,
+            sess.endpoint_url,
+            sess.model,
+            messages,
+            headers=sess.headers,
+            timeout=120,
         )
         sess.add_message(ChatMessage("assistant", reply))
         session_manager.save_sessions()
 
-        webhook_manager.fire_and_forget("chat.completed", {
-            "session_id": session_id, "model": sess.model,
-            "user_message": message[:2000], "response": reply[:2000],
-        })
+        webhook_manager.fire_and_forget(
+            "chat.completed",
+            {
+                "session_id": session_id,
+                "model": sess.model,
+                "user_message": message[:2000],
+                "response": reply[:2000],
+            },
+        )
 
         return {"response": reply, "session_id": session_id, "model": sess.model}
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 import importlib
 import os
 
-import src.constants as constants
+from src import constants
 
 
 def _reload_with(monkeypatch, value):
@@ -44,7 +44,7 @@ def test_empty_fastembed_cache_path_falls_back_to_default(monkeypatch):
     try:
         mod = _reload_with(monkeypatch, "")
         assert mod.FASTEMBED_CACHE_DIR, "empty env must not yield an empty path"
-        assert mod.FASTEMBED_CACHE_DIR == os.path.join(mod.DATA_DIR, "fastembed_cache")
+        assert os.path.join(mod.DATA_DIR, "fastembed_cache") == mod.FASTEMBED_CACHE_DIR
     finally:
         _restore(monkeypatch)
 
@@ -53,7 +53,7 @@ def test_unset_fastembed_cache_path_uses_default(monkeypatch):
     """Sanity: an absent variable also resolves to the default."""
     try:
         mod = _reload_with(monkeypatch, None)
-        assert mod.FASTEMBED_CACHE_DIR == os.path.join(mod.DATA_DIR, "fastembed_cache")
+        assert os.path.join(mod.DATA_DIR, "fastembed_cache") == mod.FASTEMBED_CACHE_DIR
     finally:
         _restore(monkeypatch)
 
@@ -64,6 +64,6 @@ def test_explicit_fastembed_cache_path_is_respected(monkeypatch):
     custom = os.path.join("custom", "fastembed-cache")
     try:
         mod = _reload_with(monkeypatch, custom)
-        assert mod.FASTEMBED_CACHE_DIR == custom
+        assert custom == mod.FASTEMBED_CACHE_DIR
     finally:
         _restore(monkeypatch)

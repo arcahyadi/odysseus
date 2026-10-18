@@ -10,9 +10,12 @@ _resolve_allowed_personal_dir is a closure inside setup_personal_routes, so the
 source-level test pins the fix and the behavioural test proves the underlying
 confinement principle.
 """
+
 import ast
 import os
 from pathlib import Path
+
+from tests.helpers.symlink import skip_if_no_symlink
 
 SRC = Path(__file__).resolve().parent.parent / "routes" / "personal_routes.py"
 
@@ -32,11 +35,11 @@ def test_confinement_uses_realpath_not_abspath():
         "inside PERSONAL_DIR cannot escape the confinement check"
     )
     assert "os.path.abspath" not in body, (
-        "os.path.abspath does not resolve symlinks; the confinement check must "
-        "not rely on it"
+        "os.path.abspath does not resolve symlinks; the confinement check must not rely on it"
     )
 
 
+@skip_if_no_symlink
 def test_realpath_catches_symlink_escape(tmp_path):
     # The principle the fix relies on: abspath keeps the symlink path inside the
     # base (confinement fooled); realpath resolves it outside (confinement holds).

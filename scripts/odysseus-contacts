@@ -16,21 +16,22 @@ Subcommands:
     config    Show the current CardDAV config (URL/user; password masked)
 """
 
-
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
 
 import argparse
-import json
 import logging
 import os
 import sys
-from pathlib import Path
+
 
 def quiet_logs() -> None:
     level_name = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -45,10 +46,11 @@ quiet_logs()
 
 try:
     from routes.contacts_routes import (
-        _get_carddav_config,
-        _fetch_contacts,
         _create_contact,
+        _fetch_contacts,
+        _get_carddav_config,
     )
+
     quiet_logs()
 except ModuleNotFoundError as e:
     sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
@@ -66,6 +68,7 @@ def _contact_rows(contacts):
 
 # ─── list ────────────────────────────────────────────────────────────
 
+
 def cmd_list(args) -> None:
     cfg = _get_carddav_config()
     if not cfg["url"]:
@@ -76,20 +79,19 @@ def cmd_list(args) -> None:
 
 # ─── search ──────────────────────────────────────────────────────────
 
+
 def cmd_search(args) -> None:
     cfg = _get_carddav_config()
     if not cfg["url"]:
         fail("CardDAV not configured.")
     q = args.query.lower()
     contacts = _contact_rows(_fetch_contacts())
-    matches = [
-        c for c in contacts
-        if q in (c.get("name") or "").lower() or q in (c.get("email") or "").lower()
-    ]
+    matches = [c for c in contacts if q in (c.get("name") or "").lower() or q in (c.get("email") or "").lower()]
     emit(matches, args)
 
 
 # ─── add ─────────────────────────────────────────────────────────────
+
 
 def cmd_add(args) -> None:
     cfg = _get_carddav_config()
@@ -103,6 +105,7 @@ def cmd_add(args) -> None:
 
 # ─── config ──────────────────────────────────────────────────────────
 
+
 def cmd_config(args) -> None:
     cfg = _get_carddav_config()
     safe = dict(cfg)
@@ -112,6 +115,7 @@ def cmd_config(args) -> None:
 
 
 # ─── argparse ────────────────────────────────────────────────────────
+
 
 def _build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)

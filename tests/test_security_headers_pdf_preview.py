@@ -31,6 +31,4 @@ def test_document_pdf_preview_can_be_framed_by_same_origin():
     response = _client().get("/api/document/doc-123/render-pdf")
 
     assert response.headers["X-Frame-Options"] == "SAMEORIGIN"
-    assert response.headers["Content-Security-Policy"] == (
-        "default-src 'none'; frame-ancestors 'self'"
-    )
+    assert response.headers["Content-Security-Policy"] == ("default-src 'none'; frame-ancestors 'self'")

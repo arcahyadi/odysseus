@@ -15,11 +15,11 @@ while completing reliably everywhere.
 import tempfile
 import uuid
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
-from unittest.mock import MagicMock
 
 from tests.helpers.import_state import clear_fake_database_modules
 
@@ -30,7 +30,7 @@ import routes.document_routes as droutes
 from core.database import Document
 from core.database import Session as DbSession
 from routes.document_helpers import DocumentPatch
-from src.agent_tools.document_tools import set_active_document, get_active_document
+from src.agent_tools.document_tools import get_active_document, set_active_document
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
@@ -61,9 +61,14 @@ def _make_doc():
     try:
         db.add(DbSession(id=sid, owner="tester", name="s", model="m", endpoint_url="http://x"))
         doc = Document(
-            id=str(uuid.uuid4()), session_id=sid, title="t",
-            language="markdown", current_content="hi", version_count=1,
-            is_active=True, owner="tester",
+            id=str(uuid.uuid4()),
+            session_id=sid,
+            title="t",
+            language="markdown",
+            current_content="hi",
+            version_count=1,
+            is_active=True,
+            owner="tester",
         )
         db.add(doc)
         db.commit()

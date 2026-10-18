@@ -17,8 +17,8 @@ sqlalchemy stub, then restore sys.modules so the stubs don't leak into sibling
 test modules.
 """
 
-import sys
 import importlib
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -42,6 +42,7 @@ with preserve_import_state(*_TEMP_STUBS, "core.session_manager", "routes.session
 
 
 # ── backend: GET /api/sessions model redaction ─────────────────────────────
+
 
 def test_public_model_blanks_blind_compare_sessions():
     """A blind-compare helper session ("[CMP] Model A") must not expose its
@@ -73,6 +74,7 @@ def test_compare_prefix_constant_matches_frontend():
 
 # ── frontend: every [CMP] session name is blind-guarded ────────────────────
 
+
 def test_compare_session_names_are_blind_guarded():
     """Every line in static/js/compare/ that builds a '[CMP]' session name
     must branch on state._blindMode, so a blind comparison is never named
@@ -81,12 +83,7 @@ def test_compare_session_names_are_blind_guarded():
     assert compare_dir.is_dir(), f"missing {compare_dir}"
     offenders = []
     for path in sorted(compare_dir.glob("*.js")):
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), 1
-        ):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if "'[CMP] '" in line and "_blindMode" not in line:
                 offenders.append(f"{path.name}:{lineno}: {line.strip()}")
-    assert not offenders, (
-        "Compare session names must be blind-guarded (issue #1285):\n"
-        + "\n".join(offenders)
-    )
+    assert not offenders, "Compare session names must be blind-guarded (issue #1285):\n" + "\n".join(offenders)

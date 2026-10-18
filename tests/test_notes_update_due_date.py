@@ -6,14 +6,13 @@ action stored the raw value verbatim, so a reminder edited with natural language
 was saved as an unparseable literal the frontend's `new Date()` can't read — and
 the reminder never fired. Both actions must route due_date through the parser.
 """
+
 import asyncio
 import json
 import sys
 import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-
-import pytest
 
 from src import tool_implementations
 
@@ -75,15 +74,21 @@ def _run_update(args):
 
 def test_update_parses_natural_language_due_date(monkeypatch):
     note = SimpleNamespace(
-        id="abc12345-existing", owner=None, title="Dentist", content=None,
-        note_type="note", color=None, label=None, items=None,
-        pinned=False, archived=False, due_date=None,
+        id="abc12345-existing",
+        owner=None,
+        title="Dentist",
+        content=None,
+        note_type="note",
+        color=None,
+        label=None,
+        items=None,
+        pinned=False,
+        archived=False,
+        due_date=None,
     )
     calls = _install_fakes(monkeypatch, note)
 
-    result = _run_update(
-        {"action": "update", "id": "abc12345", "due_date": "tomorrow at 9am"}
-    )
+    result = _run_update({"action": "update", "id": "abc12345", "due_date": "tomorrow at 9am"})
 
     assert result.get("exit_code") == 0
     # Stored value went through the parser, not the raw literal.
@@ -93,15 +98,21 @@ def test_update_parses_natural_language_due_date(monkeypatch):
 
 def test_update_still_sets_other_fields_without_parsing_them(monkeypatch):
     note = SimpleNamespace(
-        id="abc12345-existing", owner=None, title="Old", content=None,
-        note_type="note", color=None, label=None, items=None,
-        pinned=False, archived=False, due_date=None,
+        id="abc12345-existing",
+        owner=None,
+        title="Old",
+        content=None,
+        note_type="note",
+        color=None,
+        label=None,
+        items=None,
+        pinned=False,
+        archived=False,
+        due_date=None,
     )
     calls = _install_fakes(monkeypatch, note)
 
-    result = _run_update(
-        {"action": "update", "id": "abc12345", "title": "New", "label": "home"}
-    )
+    result = _run_update({"action": "update", "id": "abc12345", "title": "New", "label": "home"})
 
     assert result.get("exit_code") == 0
     assert note.title == "New"

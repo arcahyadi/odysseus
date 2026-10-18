@@ -1,16 +1,17 @@
 """Tests for endpoint_resolver — pure functions tested directly."""
+
 import json
 
 import pytest
 
 from src.endpoint_resolver import (
-    _first_chat_model,
-    _endpoint_hidden_models,
     _endpoint_enabled_models,
-    normalize_base,
+    _endpoint_hidden_models,
+    _first_chat_model,
     build_chat_url,
-    build_models_url,
     build_headers,
+    build_models_url,
+    normalize_base,
 )
 
 
@@ -71,11 +72,14 @@ class TestBuildChatUrl:
     def test_ollama_v1_preserves_openai_compat(self):
         assert build_chat_url("http://nas:11434/v1") == "http://nas:11434/v1/chat/completions"
 
-    @pytest.mark.parametrize("bad_base", [
-        "https://api.example.com/v1?token=abc",
-        "https://api.example.com/v1#fragment",
-        "http://localhost:1234?",
-    ])
+    @pytest.mark.parametrize(
+        "bad_base",
+        [
+            "https://api.example.com/v1?token=abc",
+            "https://api.example.com/v1#fragment",
+            "http://localhost:1234?",
+        ],
+    )
     def test_rejects_query_or_fragment_base(self, bad_base):
         with pytest.raises(ValueError, match="query or fragment"):
             build_chat_url(bad_base)
@@ -91,11 +95,14 @@ class TestBuildModelsUrl:
     def test_ollama_tags(self):
         assert build_models_url("https://ollama.com/api") == "https://ollama.com/api/tags"
 
-    @pytest.mark.parametrize("bad_base", [
-        "https://api.example.com/v1?token=abc",
-        "https://api.example.com/v1#fragment",
-        "http://localhost:1234?",
-    ])
+    @pytest.mark.parametrize(
+        "bad_base",
+        [
+            "https://api.example.com/v1?token=abc",
+            "https://api.example.com/v1#fragment",
+            "http://localhost:1234?",
+        ],
+    )
     def test_rejects_query_or_fragment_base(self, bad_base):
         with pytest.raises(ValueError, match="query or fragment"):
             build_models_url(bad_base)
@@ -109,7 +116,10 @@ class TestBuildHeaders:
         assert build_headers("sk-abc", "https://api.openai.com/v1") == {"Authorization": "Bearer sk-abc"}
 
     def test_anthropic_headers(self):
-        assert build_headers("sk-ant-abc", "https://api.anthropic.com") == {"x-api-key": "sk-ant-abc", "anthropic-version": "2023-06-01"}
+        assert build_headers("sk-ant-abc", "https://api.anthropic.com") == {
+            "x-api-key": "sk-ant-abc",
+            "anthropic-version": "2023-06-01",
+        }
 
     def test_empty_key(self):
         assert build_headers("", "https://api.openai.com/v1") == {}
@@ -117,6 +127,7 @@ class TestBuildHeaders:
 
 class _Ep:
     """Minimal ModelEndpoint stand-in for the model-picking helpers."""
+
     def __init__(self, cached=None, hidden=None):
         self.cached_models = json.dumps(cached) if cached is not None else None
         self.hidden_models = json.dumps(hidden) if hidden is not None else None
@@ -138,11 +149,14 @@ class TestEnabledModels:
     def test_excludes_hidden(self):
         # The Groq repro: 16 models, only gpt-oss-120b enabled.
         cached = [
-            "openai/gpt-oss-safeguard-20b", "canopylabs/orpheus-arabic-saudi",
-            "whisper-large-v3", "openai/gpt-oss-120b",
+            "openai/gpt-oss-safeguard-20b",
+            "canopylabs/orpheus-arabic-saudi",
+            "whisper-large-v3",
+            "openai/gpt-oss-120b",
         ]
         hidden = [
-            "openai/gpt-oss-safeguard-20b", "canopylabs/orpheus-arabic-saudi",
+            "openai/gpt-oss-safeguard-20b",
+            "canopylabs/orpheus-arabic-saudi",
             "whisper-large-v3",
         ]
         ep = _Ep(cached=cached, hidden=hidden)

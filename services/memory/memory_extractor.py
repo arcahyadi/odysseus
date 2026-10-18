@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import re
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +31,7 @@ def _tidy_state_path(memory_manager) -> str:
 def _fingerprint_entries(entries) -> str:
     """Stable hash of an owner's memories — order-independent, depends
     only on id+text+category. Any add/edit/delete invalidates it."""
-    items = sorted(
-        (str(e.get("id", "")), e.get("text", ""), e.get("category", ""))
-        for e in _memory_dicts(entries)
-    )
+    items = sorted((str(e.get("id", "")), e.get("text", ""), e.get("category", "")) for e in _memory_dicts(entries))
     h = hashlib.sha256()
     for triple in items:
         h.update(("\x1f".join(triple) + "\x1e").encode("utf-8"))
@@ -51,14 +47,14 @@ def _memory_dicts(entries):
 def _load_tidy_state(memory_manager) -> dict:
     path = _tidy_state_path(memory_manager)
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
-def _save_tidy_state(memory_manager, owner: Optional[str], fingerprint: str) -> None:
+def _save_tidy_state(memory_manager, owner: str | None, fingerprint: str) -> None:
     path = _tidy_state_path(memory_manager)
     state = _load_tidy_state(memory_manager)
     state[owner or ""] = {"fingerprint": fingerprint}
@@ -67,6 +63,7 @@ def _save_tidy_state(memory_manager, owner: Optional[str], fingerprint: str) -> 
             json.dump(state, f, indent=2)
     except OSError as e:
         logger.warning(f"Could not persist tidy fingerprint: {e}")
+
 
 EXTRACT_SYSTEM_PROMPT = (
     "You are a memory extraction assistant. Analyze the conversation and extract ONLY "
@@ -248,6 +245,7 @@ def _parse_extraction_json(raw: str) -> list:
     text = (raw or "").strip()
     try:
         from src.text_helpers import strip_think as _strip_think
+
         text = _strip_think(text, prose=True, prompt_echo=True).strip()
     except Exception:
         pass
@@ -279,7 +277,7 @@ async def extract_and_store(
     memory_vector,
     endpoint_url: str,
     model: str,
-    headers: Optional[dict] = None,
+    headers: dict | None = None,
 ):
     """Extract facts from recent conversation and store them.
 
@@ -335,19 +333,20 @@ async def extract_and_store(
         def _flatten_msg(m):
             c = m.get("content", "")
             if isinstance(c, list):
-                c = " ".join(
-                    b.get("text", "") for b in c
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
+                c = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
             return f"{m.get('role', '?')}: {c}"
 
         transcript = "\n\n".join(_flatten_msg(m) for m in stripped_recent)
         extraction_messages = [
             {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
-            {"role": "user", "content": (
-                "Conversation to analyze:\n\n" + transcript
-                + "\n\nReturn the JSON array of durable facts now (or [] if none)."
-            )},
+            {
+                "role": "user",
+                "content": (
+                    "Conversation to analyze:\n\n"
+                    + transcript
+                    + "\n\nReturn the JSON array of durable facts now (or [] if none)."
+                ),
+            },
         ]
 
         facts = []
@@ -385,7 +384,7 @@ async def extract_and_store(
             return
 
         # Get owner from session
-        _owner = getattr(session, 'owner', None)
+        _owner = getattr(session, "owner", None)
 
         existing = memory_manager.load_all()
         added = 0
@@ -429,7 +428,9 @@ async def extract_and_store(
                         continue
 
             # Text dedup fallback: exact match + fuzzy similarity
-            user_existing = [e for e in existing if e.get("owner") == _owner or e.get("owner") is None] if _owner else existing
+            user_existing = (
+                [e for e in existing if e.get("owner") == _owner or e.get("owner") is None] if _owner else existing
+            )
             if memory_manager.find_duplicates(fact_text, user_existing):
                 continue
             # Fuzzy text similarity check (catches rephrased duplicates when vector index is unavailable)
@@ -463,6 +464,7 @@ async def extract_and_store(
             memory_manager.save(existing)
             try:
                 from src.event_bus import fire_event
+
                 for _ in range(added):
                     fire_event("memory_added", _owner)
             except Exception:
@@ -474,9 +476,7 @@ async def extract_and_store(
             if _extractions_since_audit >= AUDIT_INTERVAL:
                 _extractions_since_audit = 0
                 logger.info("Audit threshold reached, running memory audit")
-                await audit_memories(
-                    memory_manager, memory_vector, endpoint_url, model, headers, owner=_owner
-                )
+                await audit_memories(memory_manager, memory_vector, endpoint_url, model, headers, owner=_owner)
         else:
             logger.info("Auto memory extraction ran: 0 added")
 
@@ -489,8 +489,8 @@ async def audit_memories(
     memory_vector,
     endpoint_url: str,
     model: str,
-    headers: Optional[dict] = None,
-    owner: Optional[str] = None,
+    headers: dict | None = None,
+    owner: str | None = None,
 ):
     """Send all memories to the LLM for deduplication and consolidation.
 
@@ -529,10 +529,7 @@ async def audit_memories(
             }
 
         # Build payload: list of {id, text, category} for the LLM
-        memory_payload = [
-            {"id": m["id"], "text": m["text"], "category": m.get("category", "fact")}
-            for m in existing
-        ]
+        memory_payload = [{"id": m["id"], "text": m["text"], "category": m.get("category", "fact")} for m in existing]
 
         audit_messages = [
             {"role": "system", "content": AUDIT_SYSTEM_PROMPT},
@@ -557,13 +554,14 @@ async def audit_memories(
         # Parse the JSON list, tolerating reasoning-model noise: <think> blocks,
         # markdown fences, leading prose, and trailing commas.
         import re as _re
+
         text = (raw or "").strip()
-        text = _re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', text, flags=_re.I).strip()
+        text = _re.sub(r"<think(?:ing)?>[\s\S]*?</think(?:ing)?>", "", text, flags=_re.I).strip()
 
         def _loads_list(s):
             if not s:
                 return None
-            for cand in (s, _re.sub(r',(\s*[}\]])', r'\1', s)):
+            for cand in (s, _re.sub(r",(\s*[}\]])", r"\1", s)):
                 try:
                     v = json.loads(cand)
                     if isinstance(v, list):
@@ -574,13 +572,13 @@ async def audit_memories(
 
         cleaned = _loads_list(text)
         if cleaned is None:
-            _m = _re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', text)
+            _m = _re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text)
             if _m:
                 cleaned = _loads_list(_m.group(1).strip())
         if cleaned is None:
-            _a, _b = text.find('['), text.rfind(']')
+            _a, _b = text.find("["), text.rfind("]")
             if _a >= 0 and _b > _a:
-                cleaned = _loads_list(text[_a:_b + 1])
+                cleaned = _loads_list(text[_a : _b + 1])
         if cleaned is None:
             logger.error(f"Memory audit returned non-JSON: {text[:300]}")
             return {"before": before_count, "after": before_count, "error": "bad_json"}
@@ -631,7 +629,11 @@ async def audit_memories(
             other_entries = [e for e in all_entries if e.get("owner") != owner and (e.get("owner") is not None)]
             # Also keep legacy entries that weren't part of this audit
             for e in all_entries:
-                if e.get("owner") is None and e["id"] not in audited_ids and e["id"] not in {o["id"] for o in other_entries}:
+                if (
+                    e.get("owner") is None
+                    and e["id"] not in audited_ids
+                    and e["id"] not in {o["id"] for o in other_entries}
+                ):
                     other_entries.append(e)
             saved_entries = final_entries + other_entries
         else:

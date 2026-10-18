@@ -5,7 +5,7 @@ Pins the pure budget computation and the explicit-override detection.
 
 import json
 
-from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX
+from src.context_budget import DEFAULT_HARD_MAX, compute_input_token_budget
 
 
 def test_default_scales_to_context_window():
@@ -34,7 +34,7 @@ def test_unknown_window_falls_back_to_configured():
 
 
 def test_is_setting_overridden_reads_raw_saved_file(tmp_path, monkeypatch):
-    import src.settings as settings
+    from src import settings
 
     f = tmp_path / "settings.json"
     f.write_text(json.dumps({"agent_input_token_budget": 12000}), encoding="utf-8")
@@ -53,6 +53,7 @@ def test_is_setting_overridden_reads_raw_saved_file(tmp_path, monkeypatch):
 # This test pins the function-level override (the `hard_max` parameter); without
 # a raisable ceiling, admins on 1M+ context APIs would be stuck at the 200K default.
 # ---------------------------------------------------------------------------
+
 
 def test_custom_hard_max_overrides_default_in_auto_branch():
     """A caller-supplied hard_max lifts the auto-derived ceiling."""
@@ -79,6 +80,7 @@ def test_hard_max_has_no_effect_on_explicit_branch():
 def test_default_settings_registers_hard_max_key():
     """Required so /api/auth/settings and manage_settings can persist the key."""
     from src.settings import DEFAULT_SETTINGS
+
     assert "agent_input_token_hard_max" in DEFAULT_SETTINGS
     assert DEFAULT_SETTINGS["agent_input_token_hard_max"] == DEFAULT_HARD_MAX
 
@@ -86,7 +88,9 @@ def test_default_settings_registers_hard_max_key():
 def test_alias_map_registers_friendly_names():
     """`manage_settings` should accept 'hard max' and friends."""
     from pathlib import Path
-    src = Path("src/tool_implementations.py").read_text()
+
+    # manage_settings (and its alias map) moved to agent_tools/admin_tools.py in #3629.
+    src = Path("src/agent_tools/admin_tools.py").read_text()
     assert '"hard max": "agent_input_token_hard_max"' in src
     assert '"token budget cap": "agent_input_token_hard_max"' in src
     assert '"input budget cap": "agent_input_token_hard_max"' in src
@@ -95,7 +99,8 @@ def test_alias_map_registers_friendly_names():
 def test_agent_loop_reads_hard_max_setting(tmp_path, monkeypatch):
     """End-to-end: a saved settings.json value for agent_input_token_hard_max
     must reach compute_input_token_budget on the real agent_loop call path."""
-    import src.settings as settings
+    from src import settings
+
     # Point SETTINGS_FILE at a temp file with our override.
     f = tmp_path / "settings.json"
     f.write_text(json.dumps({"agent_input_token_hard_max": 750_000}), encoding="utf-8")

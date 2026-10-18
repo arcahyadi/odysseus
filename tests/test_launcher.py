@@ -1,10 +1,9 @@
 # tests/test_launcher.py
-import sys
-import os
 from unittest import mock
+
 import pytest
 
-from launcher import NullWriter, create_tray_image, on_open_browser, on_exit, open_browser
+from launcher import NullWriter, create_tray_image, on_exit, on_open_browser, open_browser
 
 
 def test_null_writer():
@@ -18,6 +17,7 @@ def test_null_writer():
 def test_create_tray_image():
     try:
         from PIL import Image
+
         img = create_tray_image()
         assert isinstance(img, Image.Image)
         assert img.size == (64, 64)
@@ -44,17 +44,14 @@ def test_on_exit():
 
 
 def test_open_browser():
-    with mock.patch("webbrowser.open") as mock_open, \
-         mock.patch("time.sleep") as mock_sleep:
-
+    with mock.patch("webbrowser.open") as mock_open, mock.patch("time.sleep") as mock_sleep:
         # Test when splash_root is None
         with mock.patch("launcher.splash_root", None):
             open_browser("http://127.0.0.1:7000")
             mock_open.assert_called_once_with("http://127.0.0.1:7000")
             mock_sleep.assert_called_once_with(3.5)
 
-    with mock.patch("webbrowser.open") as mock_open, \
-         mock.patch("time.sleep") as mock_sleep:
+    with mock.patch("webbrowser.open") as mock_open, mock.patch("time.sleep") as mock_sleep:
         # Test when splash_root is present and gets destroyed
         mock_splash = mock.Mock()
         with mock.patch("launcher.splash_root", mock_splash):

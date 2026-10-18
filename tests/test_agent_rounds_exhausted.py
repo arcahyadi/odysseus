@@ -15,6 +15,7 @@ import src.agent_loop as al
 def _collect(gen):
     async def _run():
         return [c async for c in gen]
+
     return asyncio.run(_run())
 
 
@@ -38,17 +39,20 @@ def _patch_common(monkeypatch):
 
     async def _fake_exec(block, *a, **k):
         return ("bash", {"output": "ok", "exit_code": 0})
+
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
 
 def _run_loop(monkeypatch, round_text, max_rounds=2):
     async def _fake_stream(_candidates, messages, **kwargs):
-        yield f'data: {json.dumps({"delta": round_text})}\n\n'
+        yield f"data: {json.dumps({'delta': round_text})}\n\n"
         yield "data: [DONE]\n\n"
+
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
     gen = al.stream_agent_loop(
-        "http://x/v1", "m",
+        "http://x/v1",
+        "m",
         [{"role": "user", "content": "do a long multi-step task"}],
         max_rounds=max_rounds,
         relevant_tools={"bash"},

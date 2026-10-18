@@ -13,7 +13,7 @@ def _source(fn) -> str:
 def test_model_resolver_applies_owner_filter():
     body = _source(ai_interaction._resolve_model)
 
-    assert "owner: Optional[str] = None" in body
+    assert "owner: Optional[str] = None" in body or "owner: str | None = None" in body
     assert "from src.auth_helpers import owner_filter" in body
     assert "owner_filter(query, ModelEndpoint, owner)" in body
 
@@ -23,7 +23,7 @@ def test_model_listing_and_image_fallback_are_owner_scoped():
     list_body = _source(model_interaction_tools.list_models)
     image_body = _source(ai_interaction.do_generate_image)
 
-    assert "owner: Optional[str] = None" in list_body
+    assert "owner: Optional[str] = None" in list_body or "owner: str | None = None" in list_body
     assert "owner_filter(query, ModelEndpoint, owner)" in list_body
     assert "_resolve_model(candidate, owner=owner)" in image_body
     assert "owner_filter(_img_q, ModelEndpoint, owner)" in image_body
@@ -34,10 +34,13 @@ def test_model_listing_and_image_fallback_are_owner_scoped():
 # and no longer route through dispatch_ai_tool; their owner threading is covered
 # by tests/test_model_interaction_registry.py. The remaining model-ish tools
 # still dispatched here:
-@pytest.mark.parametrize("tool,content", [
-    ("pipeline", "gpt-test | summarize this"),
-    ("ui_control", "switch_model gpt-test"),
-])
+@pytest.mark.parametrize(
+    "tool,content",
+    [
+        ("pipeline", "gpt-test | summarize this"),
+        ("ui_control", "switch_model gpt-test"),
+    ],
+)
 async def test_dispatch_passes_owner_to_model_tools(monkeypatch, tool, content):
     seen = {}
 

@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-import routes.memory_routes as memory_routes
+from routes import memory_routes
 from src.memory import MemoryManager
 
 
@@ -13,9 +13,7 @@ def test_memory_search_returns_only_callers_memories(monkeypatch, tmp_path):
     monkeypatch.setattr(memory_routes, "get_current_user", lambda request: "bob")
     router = memory_routes.setup_memory_routes(manager, MagicMock())
     search = next(
-        route.endpoint
-        for route in router.routes
-        if route.path == "/api/memory/search" and "POST" in route.methods
+        route.endpoint for route in router.routes if route.path == "/api/memory/search" and "POST" in route.methods
     )
 
     result = search(

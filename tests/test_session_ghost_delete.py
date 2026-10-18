@@ -16,8 +16,8 @@ so the real route + manager code can be imported under the MagicMock sqlalchemy
 stub from conftest.
 """
 
-import sys
 import importlib
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -47,7 +47,6 @@ with preserve_import_state(*_TEMP_STUBS, "core.session_manager", "routes.session
 
 from fastapi import HTTPException  # noqa: E402
 
-
 _MISSING = object()
 
 
@@ -72,6 +71,7 @@ def _manager_with(sessions):
 
 
 # --- route layer: _verify_session_owner ghost fallback ---------------------
+
 
 def test_owned_ghost_is_allowed_when_manager_passed(monkeypatch):
     # No DB row, but the caller owns the in-memory ghost -> must NOT raise.
@@ -113,6 +113,7 @@ def test_unauthenticated_still_403(monkeypatch):
 
 
 # --- manager layer: delete_session clears memory-only ghosts ---------------
+
 
 def test_manager_deletes_memory_only_ghost(monkeypatch):
     # No DB row, but the session is in memory -> delete it and report success.

@@ -6,6 +6,7 @@ double space after "Re:" on every non-ASCII subject, a spurious space in
 "Name <addr>" senders, and violated RFC 2047 6.2 which requires whitespace
 between two adjacent encoded-words to be dropped.
 """
+
 import json
 import sqlite3
 
@@ -51,7 +52,16 @@ def _init_accounts_db(path):
                 'smtp.example.com', 465, 'ssl', ?, '', ?, ?)
         """,
         [
-            ("acct-alice", "alice", "Alice Mail", 1, "alice@example.com", "alice@example.com", "alice@example.com", "2026-01-01"),
+            (
+                "acct-alice",
+                "alice",
+                "Alice Mail",
+                1,
+                "alice@example.com",
+                "alice@example.com",
+                "alice@example.com",
+                "2026-01-01",
+            ),
             ("acct-bob", "bob", "Bob Mail", 1, "bob@example.com", "bob@example.com", "bob@example.com", "2026-01-02"),
         ],
     )
@@ -139,7 +149,7 @@ def test_mcp_email_scoped_owner_without_visible_account_skips_legacy_fallback(tm
 
 @pytest.mark.asyncio
 async def test_mcp_send_email_stages_owner_scoped_pending_draft(tmp_path, monkeypatch):
-    import src.constants as constants
+    from src import constants
 
     db_path = tmp_path / "scheduled_emails.db"
     monkeypatch.setattr(constants, "SCHEDULED_EMAILS_DB", str(db_path))
@@ -159,9 +169,7 @@ async def test_mcp_send_email_stages_owner_scoped_pending_draft(tmp_path, monkey
     assert "Nothing has been sent yet" in out[0].text
     conn = sqlite3.connect(db_path)
     try:
-        row = conn.execute(
-            "SELECT owner, status, to_addr, subject FROM scheduled_emails"
-        ).fetchone()
+        row = conn.execute("SELECT owner, status, to_addr, subject FROM scheduled_emails").fetchone()
     finally:
         conn.close()
     assert row == ("alice", "agent_draft", "recipient@example.com", "Review")

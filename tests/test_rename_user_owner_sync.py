@@ -23,6 +23,7 @@ owner column, but three file-backed / in-memory stores are left stale:
 Regression coverage: these bugs are invisible in unit tests that mock the DB
 loop but don't exercise the file/cache patches added to the route.
 """
+
 import asyncio
 import json
 import sys
@@ -44,8 +45,8 @@ def _route(router, name):
 
 @pytest.fixture
 def rename_endpoint(monkeypatch, tmp_path):
-    import routes.auth_routes as ar
     import core.database as cdb
+    import routes.auth_routes as ar
 
     # Neutralize the DB owner-rename loop.
     monkeypatch.setattr(cdb, "SessionLocal", lambda: MagicMock())
@@ -146,6 +147,7 @@ def _force_sql_owner_migration_failure(monkeypatch):
 # 1. In-memory session cache
 # ---------------------------------------------------------------------------
 
+
 def test_rename_updates_in_memory_session_owner(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
 
@@ -199,6 +201,7 @@ def test_rename_no_session_manager_does_not_crash(rename_endpoint):
 # 2. deep_research JSON files
 # ---------------------------------------------------------------------------
 
+
 def test_rename_updates_research_json_owner(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
 
@@ -219,7 +222,7 @@ def test_rename_research_json_case_insensitive(rename_endpoint):
 
     dr_dir = tmp_path / "deep_research"
     dr_dir.mkdir()
-    p = (dr_dir / "r1.json")
+    p = dr_dir / "r1.json"
     p.write_text(json.dumps({"owner": "Alice"}), encoding="utf-8")
 
     asyncio.run(endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path)))
@@ -274,27 +277,30 @@ def test_rename_updates_active_research_task_owner(rename_endpoint):
         },
     }
 
-    asyncio.run(endpoint(
-        "alice",
-        SimpleNamespace(username="alice2"),
-        _request(tmp_path, research_handler=rh),
-    ))
+    asyncio.run(
+        endpoint(
+            "alice",
+            SimpleNamespace(username="alice2"),
+            _request(tmp_path, research_handler=rh),
+        )
+    )
 
     assert rh._active_tasks["alice-task"]["owner"] == "alice2"
     assert rh._active_tasks["carol-task"]["owner"] == "carol"
 
     router = setup_research_routes(rh)
-    active = next(
-        r.endpoint for r in router.routes
-        if getattr(r, "path", "") == "/api/research/active"
-    )
+    active = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/research/active")
 
-    alice2 = asyncio.run(active(
-        SimpleNamespace(state=SimpleNamespace(current_user="alice2")),
-    ))
-    alice = asyncio.run(active(
-        SimpleNamespace(state=SimpleNamespace(current_user="alice")),
-    ))
+    alice2 = asyncio.run(
+        active(
+            SimpleNamespace(state=SimpleNamespace(current_user="alice2")),
+        )
+    )
+    alice = asyncio.run(
+        active(
+            SimpleNamespace(state=SimpleNamespace(current_user="alice")),
+        )
+    )
 
     assert [item["session_id"] for item in alice2["active"]] == ["alice-task"]
     assert alice["active"] == []
@@ -342,11 +348,13 @@ def test_rename_updates_active_research_before_completed_json_sweep(rename_endpo
         def rename_owner(self, _old, _new):
             owner_seen_by_active_hook.append(json.loads(report.read_text(encoding="utf-8"))["owner"])
 
-    asyncio.run(endpoint(
-        "alice",
-        SimpleNamespace(username="alice2"),
-        _request(tmp_path, research_handler=FakeResearchHandler()),
-    ))
+    asyncio.run(
+        endpoint(
+            "alice",
+            SimpleNamespace(username="alice2"),
+            _request(tmp_path, research_handler=FakeResearchHandler()),
+        )
+    )
 
     assert owner_seen_by_active_hook == ["alice"]
     assert json.loads(report.read_text(encoding="utf-8"))["owner"] == "alice2"
@@ -357,8 +365,8 @@ def test_rename_research_respects_custom_data_dir(monkeypatch, tmp_path):
     hardcoded relative path. Before the fix, setting ODYSSEUS_DATA_DIR made
     the rename silently patch a different directory from where research files
     actually live, so reports still disappeared after rename."""
-    import routes.auth_routes as ar
     import core.database as cdb
+    import routes.auth_routes as ar
 
     custom_dr = tmp_path / "custom_data" / "deep_research"
     custom_dr.mkdir(parents=True)
@@ -392,12 +400,13 @@ def test_rename_research_respects_custom_data_dir(monkeypatch, tmp_path):
 # 3. memory.json
 # ---------------------------------------------------------------------------
 
+
 def test_rename_updates_memory_json_owner(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
 
     entries = [
         {"id": "1", "text": "Lives in Berlin", "owner": "alice"},
-        {"id": "2", "text": "Likes Python",    "owner": "carol"},
+        {"id": "2", "text": "Likes Python", "owner": "carol"},
     ]
     (tmp_path / "memory.json").write_text(json.dumps(entries), encoding="utf-8")
 
@@ -405,7 +414,7 @@ def test_rename_updates_memory_json_owner(rename_endpoint):
 
     updated = json.loads((tmp_path / "memory.json").read_text(encoding="utf-8"))
     assert updated[0]["owner"] == "alice2", "memory.json entry owner was not updated on rename"
-    assert updated[1]["owner"] == "carol",  "unrelated memory entry was modified"
+    assert updated[1]["owner"] == "carol", "unrelated memory entry was modified"
 
 
 def test_rename_memory_json_case_insensitive(rename_endpoint):
@@ -429,6 +438,7 @@ def test_rename_no_memory_json_does_not_crash(rename_endpoint):
 # ---------------------------------------------------------------------------
 # 4. uploads.json
 # ---------------------------------------------------------------------------
+
 
 def test_rename_updates_upload_metadata_owner(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
@@ -489,13 +499,12 @@ def test_rename_updates_personal_rag_upload_owner(rename_endpoint, monkeypatch):
     rag = SimpleNamespace(
         rename_owner=lambda old, new, path_map=None, path_prefixes=None: rag_calls.append(
             (old, new, dict(path_map or {}), list(path_prefixes or []))
-        ) or {"success": True, "updated_count": 1},
+        )
+        or {"success": True, "updated_count": 1},
     )
     personal_docs_manager = SimpleNamespace(
         rag_manager=rag,
-        rename_directory=lambda old, new, path_map=None: manager_calls.append(
-            (old, new, dict(path_map or {}))
-        ),
+        rename_directory=lambda old, new, path_map=None: manager_calls.append((old, new, dict(path_map or {}))),
     )
 
     asyncio.run(
@@ -632,6 +641,7 @@ def test_rename_usage_keys_case_insensitive(rename_endpoint):
 # 6. Rollback: auth rename must be restored if SQL owner migration fails
 # ---------------------------------------------------------------------------
 
+
 def test_owner_migration_failure_rolls_back_auth_rename(monkeypatch, tmp_path):
     import routes.auth_routes as ar
 
@@ -693,13 +703,14 @@ def test_self_rename_owner_migration_failure_rolls_back_auth_session(monkeypatch
 # 7. P1 regression: rejected auth rename must not mutate file-backed stores
 # ---------------------------------------------------------------------------
 
+
 def test_rejected_rename_does_not_mutate_files(monkeypatch, tmp_path):
     """If auth_manager.rename_user() returns False, no file-backed store
     should be touched. Before the fix the deep_research and memory writes
     ran before the auth check, so a rejected rename (e.g. reserved username)
     silently moved owner fields to the new name."""
-    import routes.auth_routes as ar
     import core.database as cdb
+    import routes.auth_routes as ar
 
     monkeypatch.setattr(cdb, "SessionLocal", lambda: MagicMock())
     monkeypatch.setattr(cdb, "Base", SimpleNamespace(registry=SimpleNamespace(mappers=[])), raising=False)

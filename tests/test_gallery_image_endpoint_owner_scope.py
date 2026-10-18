@@ -8,7 +8,7 @@ base URL can borrow another account's private image API key.
 
 from types import SimpleNamespace
 
-import routes.gallery_routes as gallery_routes
+from routes import gallery_routes
 
 
 class _Predicate:

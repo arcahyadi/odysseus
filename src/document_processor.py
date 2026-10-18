@@ -1,12 +1,12 @@
 # src/document_processor.py
 """Document processing: PDF/OCR extraction, text file handling, image VL analysis, user content building."""
 
-import os
+import base64
 import logging
 import mimetypes
-import base64
+import os
 import tempfile
-from typing import List, Dict, Any
+from typing import Any
 
 from src.llm_core import llm_call
 
@@ -27,13 +27,32 @@ def _is_text_file(path: str) -> bool:
 def _process_text_file(path: str) -> str:
     """Process text file with enhanced formatting and metadata."""
     language_map = {
-        ".py": "python", ".js": "javascript", ".html": "html", ".css": "css",
-        ".json": "json", ".md": "markdown", ".txt": "text", ".csv": "csv",
-        ".log": "log", ".sh": "bash", ".bash": "bash", ".nix": "nix",
-        ".yml": "yaml", ".yaml": "yaml",
-        ".xml": "xml", ".sql": "sql", ".cpp": "cpp", ".c": "c",
-        ".java": "java", ".go": "go", ".rs": "rust", ".php": "php",
-        ".rb": "ruby", ".ts": "typescript", ".jsx": "javascript", ".tsx": "typescript",
+        ".py": "python",
+        ".js": "javascript",
+        ".html": "html",
+        ".css": "css",
+        ".json": "json",
+        ".md": "markdown",
+        ".txt": "text",
+        ".csv": "csv",
+        ".log": "log",
+        ".sh": "bash",
+        ".bash": "bash",
+        ".nix": "nix",
+        ".yml": "yaml",
+        ".yaml": "yaml",
+        ".xml": "xml",
+        ".sql": "sql",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".java": "java",
+        ".go": "go",
+        ".rs": "rust",
+        ".php": "php",
+        ".rb": "ruby",
+        ".ts": "typescript",
+        ".jsx": "javascript",
+        ".tsx": "typescript",
     }
 
     filename = os.path.basename(path)
@@ -43,6 +62,7 @@ def _process_text_file(path: str) -> str:
 
     try:
         from src.personal_docs import read_text_file
+
         content = read_text_file(path)
     except Exception:
         try:
@@ -52,6 +72,7 @@ def _process_text_file(path: str) -> str:
                 content = raw_data.decode("utf-8")
             except UnicodeDecodeError:
                 from charset_normalizer import detect
+
                 encoding = (detect(raw_data) or {}).get("encoding") or "utf-8"
                 content = raw_data.decode(encoding, errors="replace")
         except Exception as e:
@@ -92,9 +113,29 @@ def _process_text_file(path: str) -> str:
     header += f"[Type: {language}, Lines: {line_count}, Size: {size_str} bytes]"
 
     code_extensions = {
-        ".py", ".js", ".html", ".css", ".json", ".md", ".sh", ".bash", ".nix",
-        ".yml", ".yaml", ".xml", ".sql", ".cpp", ".c", ".java", ".go", ".rs", ".php", ".rb",
-        ".ts", ".jsx", ".tsx",
+        ".py",
+        ".js",
+        ".html",
+        ".css",
+        ".json",
+        ".md",
+        ".sh",
+        ".bash",
+        ".nix",
+        ".yml",
+        ".yaml",
+        ".xml",
+        ".sql",
+        ".cpp",
+        ".c",
+        ".java",
+        ".go",
+        ".rs",
+        ".php",
+        ".rb",
+        ".ts",
+        ".jsx",
+        ".tsx",
     }
     if ext in code_extensions:
         code_block = f"```{language}\n{content}"
@@ -110,9 +151,37 @@ def _process_text_file(path: str) -> str:
 
 
 def _process_pdf(path: str, owner: str | None = None) -> str:
-    """Process PDF file with text extraction (pypdf). Uses VL model for image-heavy pages."""
+    """Process PDF file with text extraction.
+
+    Tries Docling first (when ODYSSEUS_DOCLING=on and docling is installed)
+    for layout-aware Markdown with tables and reading order. Falls back to
+    pypdf when docling is unavailable or disabled.
+    """
+    # --- Docling fast-path (opt-in via kill-switch) ---
+    docling_md = None
+    try:
+        from src.docling_runtime import is_docling_enabled
+
+        if is_docling_enabled():
+            from services.documents.docling_processor import get_docling_processor
+
+            proc = get_docling_processor()
+            if proc.available:
+                docling_md = proc.pdf_to_markdown(path)
+    except Exception as _docling_err:
+        logger.debug("Docling fast-path skipped: %s", _docling_err)
+        docling_md = None
+
+    if docling_md:
+        truncated = len(docling_md) > 15000
+        if truncated:
+            docling_md = docling_md[:15000] + "\n[PDF content truncated]"
+        return f"\n\n[PDF content — Docling Markdown]:\n{docling_md}"
+
+    # --- pypdf fallback ---
     try:
         from pypdf import PdfReader
+
         pdf_text = ""
         reader = PdfReader(path)
 
@@ -203,7 +272,7 @@ def _process_office_document(
     path: str,
     display_name: str,
     session_id: str | None = None,
-    auto_opened_docs: list[Dict[str, Any]] | None = None,
+    auto_opened_docs: list[dict[str, Any]] | None = None,
     owner: str | None = None,
 ) -> str:
     """Extract an Office/EPUB document to Markdown via the optional markitdown dep.
@@ -215,8 +284,8 @@ def _process_office_document(
     `manage_documents action=read offset=…` after the inline copy is capped.
     """
     from src.markitdown_runtime import (
-        is_markitdown_format,
         convert_to_markdown,
+        is_markitdown_format,
         load_markitdown,
     )
 
@@ -234,6 +303,7 @@ def _process_office_document(
         if session_id:
             try:
                 from src.office_doc import create_office_document
+
                 doc_id = create_office_document(
                     session_id=session_id,
                     upload_id=os.path.basename(path),
@@ -241,18 +311,21 @@ def _process_office_document(
                     body_text=markdown,
                 )
                 if doc_id and auto_opened_docs is not None:
-                    from src.database import SessionLocal, Document
+                    from src.database import Document, SessionLocal
+
                     _db = SessionLocal()
                     try:
                         _d = _db.query(Document).filter(Document.id == doc_id).first()
                         if _d:
-                            auto_opened_docs.append({
-                                "doc_id": _d.id,
-                                "title": _d.title,
-                                "language": _d.language,
-                                "content": _d.current_content,
-                                "version": _d.version_count,
-                            })
+                            auto_opened_docs.append(
+                                {
+                                    "doc_id": _d.id,
+                                    "title": _d.title,
+                                    "language": _d.language,
+                                    "content": _d.current_content,
+                                    "version": _d.version_count,
+                                }
+                            )
                     finally:
                         _db.close()
             except Exception as e:
@@ -298,6 +371,7 @@ def _load_vl_settings() -> dict:
     """Load admin settings from disk."""
     try:
         from src.settings import load_settings
+
         return load_settings()
     except Exception:
         return {}
@@ -316,10 +390,17 @@ def _resolve_vl_model(configured: str, owner: str | None = None) -> tuple:
 
     # Auto-detect: try known vision-capable models in priority order
     candidates = [
-        "gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini",
-        "claude-sonnet-4-5-20250929", "claude-opus-4-20250514",
-        "gemini-2.0-flash", "gemini-2.5-pro",
-        "llava", "pixtral", "qwen2-vl",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "claude-sonnet-4-5-20250929",
+        "claude-opus-4-20250514",
+        "gemini-2.0-flash",
+        "gemini-2.5-pro",
+        "llava",
+        "pixtral",
+        "qwen2-vl",
     ]
     for candidate in candidates:
         try:
@@ -365,6 +446,7 @@ def analyze_image_with_vl_result(image_path: str, owner: str | None = None) -> d
         # — same shape as task/chat but its own list (`vision_model_fallbacks`).
         try:
             from src.endpoint_resolver import resolve_vision_fallback_candidates
+
             _vl_candidates = [(url, model_id, headers)] + resolve_vision_fallback_candidates(owner=owner)
         except Exception:
             _vl_candidates = [(url, model_id, headers)]
@@ -398,10 +480,10 @@ def build_user_content(
     upload_dir: str,
     upload_handler,
     session_id: str | None = None,
-    auto_opened_docs: list[Dict[str, Any]] | None = None,
+    auto_opened_docs: list[dict[str, Any]] | None = None,
     owner: str | None = None,
-    resolved_uploads: dict[str, Dict[str, Any]] | None = None,
-) -> str | List[Dict[str, Any]]:
+    resolved_uploads: dict[str, dict[str, Any]] | None = None,
+) -> str | list[dict[str, Any]]:
     """Build user content with attachments (text, images, audio, documents).
 
     If session_id is provided and an attached PDF contains AcroForm fields,
@@ -441,10 +523,12 @@ def build_user_content(
                 with open(path, "rb") as image_file:
                     encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
                 image_format = ext[1:]
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/{image_format};base64,{encoded_string}"},
-                })
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/{image_format};base64,{encoded_string}"},
+                    }
+                )
             except Exception as e:
                 logger.error(f"Failed to encode image {fid}: {e}")
                 if content and content[0]["type"] == "text":
@@ -457,10 +541,12 @@ def build_user_content(
                 with open(path, "rb") as audio_file:
                     encoded_string = base64.b64encode(audio_file.read()).decode("utf-8")
                 audio_format = ext[1:]
-                content.append({
-                    "type": "audio",
-                    "audio": {"url": f"data:audio/{audio_format};base64,{encoded_string}"},
-                })
+                content.append(
+                    {
+                        "type": "audio",
+                        "audio": {"url": f"data:audio/{audio_format};base64,{encoded_string}"},
+                    }
+                )
             except Exception as e:
                 logger.error(f"Failed to encode audio {fid}: {e}")
                 if content and content[0]["type"] == "text":
@@ -473,12 +559,13 @@ def build_user_content(
                 extracted_text = None
                 if session_id:
                     try:
-                        from src.pdf_forms import has_form_fields, extract_fields
                         from src.pdf_form_doc import (
-                            save_field_sidecar,
                             create_form_markdown_document,
                             create_plain_pdf_document,
+                            save_field_sidecar,
                         )
+                        from src.pdf_forms import extract_fields, has_form_fields
+
                         title = os.path.splitext(os.path.basename(display_name))[0]
                         # Pull the PDF prose once — used as either intro_text
                         # (form path) or the doc body (plain path).
@@ -506,8 +593,7 @@ def build_user_content(
                         if body_for_chat and len(body_for_chat) > _MAX_INLINE_CHARS:
                             body_for_chat = body_for_chat[:_MAX_INLINE_CHARS]
                             truncated_marker = (
-                                "\n[…truncated for inline context — full text "
-                                "available in the document viewer.]"
+                                "\n[…truncated for inline context — full text available in the document viewer.]"
                             )
 
                         if is_form:
@@ -527,9 +613,7 @@ def build_user_content(
                                     f"the Export PDF button when done.]"
                                 )
                                 if body_for_chat:
-                                    extracted_text += (
-                                        f"\n\n[PDF content — {title}]:\n{body_for_chat}{truncated_marker}"
-                                    )
+                                    extracted_text += f"\n\n[PDF content — {title}]:\n{body_for_chat}{truncated_marker}"
                         else:
                             doc_id = create_plain_pdf_document(
                                 session_id=session_id,
@@ -538,29 +622,26 @@ def build_user_content(
                                 body_text=pdf_body_text,
                             )
                             if doc_id:
-                                extracted_text = (
-                                    f"\n\n[PDF attached: {title} — opened in document viewer.]"
-                                )
+                                extracted_text = f"\n\n[PDF attached: {title} — opened in document viewer.]"
                                 if body_for_chat:
-                                    extracted_text += (
-                                        f"\n\n[PDF content — {title}]:\n{body_for_chat}{truncated_marker}"
-                                    )
+                                    extracted_text += f"\n\n[PDF content — {title}]:\n{body_for_chat}{truncated_marker}"
 
                         if doc_id and auto_opened_docs is not None:
-                            from src.database import SessionLocal, Document
+                            from src.database import Document, SessionLocal
+
                             _db = SessionLocal()
                             try:
-                                _d = _db.query(Document).filter(
-                                    Document.id == doc_id
-                                ).first()
+                                _d = _db.query(Document).filter(Document.id == doc_id).first()
                                 if _d:
-                                    auto_opened_docs.append({
-                                        "doc_id": _d.id,
-                                        "title": _d.title,
-                                        "language": _d.language,
-                                        "content": _d.current_content,
-                                        "version": _d.version_count,
-                                    })
+                                    auto_opened_docs.append(
+                                        {
+                                            "doc_id": _d.id,
+                                            "title": _d.title,
+                                            "language": _d.language,
+                                            "content": _d.current_content,
+                                            "version": _d.version_count,
+                                        }
+                                    )
                             finally:
                                 _db.close()
                     except Exception as e:
@@ -587,11 +668,10 @@ def build_user_content(
                 content[0]["text"] += extracted_text
             else:
                 content.insert(0, {"type": "text", "text": extracted_text.lstrip()})
+        elif content and content[0]["type"] == "text":
+            content[0]["text"] += "\n\n[Attached non-text file]"
         else:
-            if content and content[0]["type"] == "text":
-                content[0]["text"] += "\n\n[Attached non-text file]"
-            else:
-                content.insert(0, {"type": "text", "text": "[Attached non-text file]"})
+            content.insert(0, {"type": "text", "text": "[Attached non-text file]"})
 
     has_media = any(item.get("type") in ["image_url", "audio"] for item in content if isinstance(item, dict))
     if not has_media and content:

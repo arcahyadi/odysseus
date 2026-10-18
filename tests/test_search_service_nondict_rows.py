@@ -3,6 +3,7 @@ import asyncio
 import services.search.service as svc_mod
 from services.search.service import SearchService
 
+
 def test_search_skips_non_dict_results(monkeypatch):
     # comprehensive_web_search aggregates external provider + cache results;
     # a malformed row (string/None) made the old loop call r.get and crash,

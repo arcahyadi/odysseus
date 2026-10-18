@@ -1,27 +1,32 @@
-"""Search routes — /api/search/config GET, /api/search POST."""
+"""Search routes — /api/search/config GET, /api/search POST.
+
+Includes /api/search/fulltext for Meilisearch-powered full-text search
+across messages, notes, and documents (kill-switch: ODYSSEUS_MEILISEARCH).
+"""
 
 import logging
-from typing import Dict, Any
+import time
+from typing import Any
 
 from fastapi import APIRouter, Request
 
-import time
-
-from services.search import get_search_config, comprehensive_web_search, PROVIDER_INFO
+from services.search import PROVIDER_INFO, comprehensive_web_search, get_search_config
 from services.search.core import _call_provider
+from services.search.meilisearch_client import is_enabled as meilisearch_enabled
+from services.search.meilisearch_client import search_all as meilisearch_search
 from services.search.providers import _get_provider_key, _get_search_instance
 
 logger = logging.getLogger(__name__)
 
 
-async def _request_values(request: Request) -> Dict[str, Any]:
+async def _request_values(request: Request) -> dict[str, Any]:
     """Accept JSON, form data, or query params for search endpoints.
 
     The browser UI posts FormData, while the agent's generic app_api tool
     posts JSON. FastAPI Form(...) rejects JSON with a 422 before our handler
     runs, which made the model think SearXNG was broken.
     """
-    values: Dict[str, Any] = dict(request.query_params)
+    values: dict[str, Any] = dict(request.query_params)
     content_type = (request.headers.get("content-type") or "").lower()
     try:
         if "application/json" in content_type:
@@ -40,11 +45,11 @@ def setup_search_routes(config) -> APIRouter:
     router = APIRouter(tags=["search"])
 
     @router.get("/api/search/config")
-    async def get_search_settings() -> Dict[str, Any]:
+    async def get_search_settings() -> dict[str, Any]:
         return get_search_config()
 
     @router.post("/api/search")
-    async def do_web_search(request: Request) -> Dict[str, Any]:
+    async def do_web_search(request: Request) -> dict[str, Any]:
         """Standalone web search — returns context string + source list.
 
         Used by Compare mode to pre-search once and share results across panes.
@@ -58,7 +63,9 @@ def setup_search_routes(config) -> APIRouter:
             time_filter = str(time_filter).strip() or None
         try:
             context, sources = comprehensive_web_search(
-                query, return_sources=True, time_filter=time_filter,
+                query,
+                return_sources=True,
+                time_filter=time_filter,
             )
             return {"context": context, "sources": sources}
         except Exception as e:
@@ -77,15 +84,48 @@ def setup_search_routes(config) -> APIRouter:
                 available = False
             if needs_url and pid == "searxng" and not _get_search_instance():
                 available = False
-            providers.append({
-                "id": pid,
-                "label": label,
-                "available": available,
-            })
+            providers.append(
+                {
+                    "id": pid,
+                    "label": label,
+                    "available": available,
+                }
+            )
         return providers
 
+    @router.get("/api/search/fulltext")
+    async def fulltext_search(request: Request) -> dict[str, Any]:
+        """Full-text search across messages, notes, and documents.
+
+        Requires ODYSSEUS_MEILISEARCH=on and a running Meilisearch instance.
+        Falls back to SQLite LIKE when Meilisearch is unavailable.
+        """
+        if not meilisearch_enabled():
+            return {
+                "query": request.query_params.get("q", ""),
+                "hits": [],
+                "total": 0,
+                "engine": "sqlite_like",
+                "message": "Meilisearch is disabled (ODYSSEUS_MEILISEARCH=off). Using SQLite LIKE fallback.",
+            }
+        query = str(request.query_params.get("q") or "").strip()
+        if not query:
+            return {"hits": [], "total": 0, "query": "", "error": "q parameter is required"}
+        type_filter = request.query_params.get("type")
+        try:
+            limit = min(int(request.query_params.get("limit", 20)), 100)
+        except (ValueError, TypeError):
+            limit = 20
+        try:
+            offset = int(request.query_params.get("offset", 0))
+        except (ValueError, TypeError):
+            offset = 0
+        results = meilisearch_search(query, type_filter=type_filter, limit=limit, offset=offset)
+        results["engine"] = "meilisearch"
+        return results
+
     @router.post("/api/search/query")
-    async def search_with_provider(request: Request) -> Dict[str, Any]:
+    async def search_with_provider(request: Request) -> dict[str, Any]:
         """Search using a specific provider. Used by compare search mode."""
         values = await _request_values(request)
         query = str(values.get("query") or values.get("q") or "").strip()

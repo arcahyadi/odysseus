@@ -7,15 +7,41 @@ scheduler without needing an LLM call.
 
 import logging
 import os
-from datetime import datetime
-from typing import Tuple
+from datetime import UTC, datetime
 
-from src.auth_helpers import owner_filter
-from core.platform_compat import IS_WINDOWS, find_bash
 from core.constants import internal_api_base
-from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, TIDY_CALENDAR_STATE_FILE, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
+from core.platform_compat import IS_WINDOWS, find_bash
+from src.auth_helpers import owner_filter
+from src.constants import (
+    COOKBOOK_STATE_FILE,
+    DATA_DIR,
+    DEEP_RESEARCH_DIR,
+    EMAIL_URGENCY_CACHE_DIR,
+    TIDY_CALENDAR_STATE_FILE,
+)
 
 logger = logging.getLogger(__name__)
+
+# Registre central pour les actions (MOD-2) — remplace les imports locaux
+from src.route_registry import get_action as _get_action
+
+# Interrupteur de l'exécution DISTANTE de scripts (v9 §1.1). Nommé ici pour que
+# le code et le registre ne puissent pas diverger sur l'orthographe : une
+# divergence donnerait un interrupteur au tableau et une porte au code, chacun
+# ignorant l'autre — c'est-à-dire aucune porte du tout.
+REMOTE_SSH_ENV = "ODYSSEUS_REMOTE_SSH"
+
+
+def _get_action(name: str):
+    """Récupère une action depuis le registre central (MOD-2).
+    
+    Remplace les imports locaux de routes.* par une lookup centralisée.
+    """
+    from src.route_registry import get_action
+    action = get_action(name)
+    if action is None:
+        raise RuntimeError(f"Action '{name}' non enregistrée dans le registre central")
+    return action
 
 
 class TaskNoop(BaseException):
@@ -39,19 +65,21 @@ class TaskDeferred(BaseException):
         self.delay_seconds = delay_seconds
 
 
-async def action_tidy_sessions(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_tidy_sessions(owner: str, **kwargs) -> tuple[str, bool]:
     """Delete empty sessions for the owner. Pure heuristic —
     the LLM folder-sort phase is skipped (user opted to keep this task
     LLM-free; sorting can be triggered manually via the Chats UI)."""
     try:
         import asyncio
+
         from src.session_actions import run_auto_sort
+
         result = await asyncio.wait_for(
             run_auto_sort(owner, skip_llm=True, delete_throwaway=False),
             timeout=60,
         )
         return result, True
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("tidy_sessions action timed out")
         return "Chat session tidy timed out", False
     except Exception as e:
@@ -59,10 +87,11 @@ async def action_tidy_sessions(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_tidy_documents(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_tidy_documents(owner: str, **kwargs) -> tuple[str, bool]:
     """Run tidy on documents for the owner."""
     try:
         from src.document_actions import run_document_tidy
+
         result = await run_document_tidy(owner)
         return result, True
     except Exception as e:
@@ -70,7 +99,7 @@ async def action_tidy_documents(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_consolidate_memory(owner: str, **kwargs) -> tuple[str, bool]:
     """Consolidate/deduplicate memories for the owner."""
     try:
         import json
@@ -91,9 +120,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
         # Built-in housekeeping can run without an owner. In that case scan all
         # memories, but keep every AI prompt/apply step owner-local.
         if _owner_clean:
-            memory_groups = {
-                _owner_clean: [m for m in all_memories if _memory_owner(m) == _owner_clean]
-            }
+            memory_groups = {_owner_clean: [m for m in all_memories if _memory_owner(m) == _owner_clean]}
         else:
             memory_groups = {}
             for mem in all_memories:
@@ -116,6 +143,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                 return False
 
             from src.task_endpoint import resolve_task_candidates
+
             candidates = resolve_task_candidates(owner=group_owner or None)
             if not candidates:
                 return False
@@ -141,8 +169,8 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                     "contacts, project context, and instructions. If memories conflict, keep the clearest/latest "
                     "one and drop the obsolete one.\n\n"
                     "JSON shape:\n"
-                    "{\"keep\":[{\"id\":\"existing id\",\"text\":\"cleaned text\",\"category\":\"fact|preference|identity|event|contact|project|instruction\"}],"
-                    "\"drop\":[{\"id\":\"existing id\",\"reason\":\"short reason\"}]}\n\n"
+                    '{"keep":[{"id":"existing id","text":"cleaned text","category":"fact|preference|identity|event|contact|project|instruction"}],'
+                    '"drop":[{"id":"existing id","reason":"short reason"}]}\n\n'
                     f"MEMORIES:\n{json.dumps(items, ensure_ascii=False)}"
                 )
                 raw = await llm_call_async_with_fallback(
@@ -159,7 +187,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                 start = raw.find("{")
                 end = raw.rfind("}")
                 if start != -1 and end != -1 and end > start:
-                    decision = json.loads(raw[start:end + 1])
+                    decision = json.loads(raw[start : end + 1])
                     keep_items = decision.get("keep") if isinstance(decision, dict) else None
                     drop_items = decision.get("drop") if isinstance(decision, dict) else None
                     if isinstance(keep_items, list) and isinstance(drop_items, list):
@@ -187,11 +215,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                         # complement of `keep` as deletions meant a model that
                         # forgot to re-list an id (common) silently destroyed that
                         # memory. Honor the explicit `drop` set instead.
-                        drop_ids = {
-                            d.get("id")
-                            for d in drop_items
-                            if isinstance(d, dict) and d.get("id") in by_id
-                        }
+                        drop_ids = {d.get("id") for d in drop_items if isinstance(d, dict) and d.get("id") in by_id}
                         # Never delete a memory the model only saw truncated.
                         drop_ids -= truncated_ids
 
@@ -223,11 +247,13 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                                 total_removed += removed
                                 total_cleaned += changed_text
                                 ai_used = True
-                                ai_reasons.extend([
-                                    (d.get("reason") or "").strip()
-                                    for d in drop_items
-                                    if isinstance(d, dict) and (d.get("reason") or "").strip()
-                                ])
+                                ai_reasons.extend(
+                                    [
+                                        (d.get("reason") or "").strip()
+                                        for d in drop_items
+                                        if isinstance(d, dict) and (d.get("reason") or "").strip()
+                                    ]
+                                )
                             return True
             except Exception as ai_err:
                 logger.warning("AI memory tidy failed; falling back to duplicate cleanup: %s", ai_err)
@@ -259,10 +285,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                 continue
 
             group_ref_ids = {id(m) for m in group_memories}
-            all_memories = [
-                m for m in all_memories
-                if id(m) not in group_ref_ids or id(m) in keep_refs
-            ]
+            all_memories = [m for m in all_memories if id(m) not in group_ref_ids or id(m) in keep_refs]
             total_removed += group_removed
 
         if total_removed or total_cleaned:
@@ -288,14 +311,24 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
 # Registry: action name -> async function(owner, **kwargs) -> (result_str, success_bool)
 
 
-async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, label: str = "Command") -> Tuple[str, bool]:
+async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, label: str = "Command") -> tuple[str, bool]:
     """Shared subprocess runner. Wraps the blocking subprocess.run in
     asyncio.to_thread so the event loop stays responsive."""
     import asyncio
     import subprocess
+
     try:
+        import os
+
+        _cwd = os.environ.get("SHELL_CWD", "/app") if os.path.isdir("/app") else None
         result = await asyncio.to_thread(
-            subprocess.run, argv, shell=shell, capture_output=True, text=True, timeout=timeout,
+            subprocess.run,
+            argv,
+            shell=shell,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=_cwd,
         )
         output = (result.stdout or "").strip()
         if result.returncode != 0 and result.stderr:
@@ -307,10 +340,36 @@ async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, labe
         return str(e), False
 
 
-async def action_ssh_command(owner: str, command: str = "", host: str = "localhost", **kwargs) -> Tuple[str, bool]:
+def _validate_shell_or_block(command: str, session_id: str | None = None) -> str | None:
+    """Run the Phase-12 command_validator over a shell string.
+
+    Returns a "🛡️ SANDBOX BLOCKED: ..." message when the command is blocked
+    (caller must return it as a failure), or None when the command is allowed.
+    Warnings are logged but do not block. Shared by every action that reaches a
+    shell (ssh_command, run_script, run_local) so no entrypoint can bypass the
+    validator (M3.4). If the validator can't be imported, fail open (None) to
+    preserve prior behaviour rather than break scheduled tasks.
+    """
+    try:
+        from src.command_validator import validate_and_log
+    except ImportError:
+        return None
+    _ok, _reason = validate_and_log(command, session_id)
+    if not _ok:
+        return f"🛡️ SANDBOX BLOCKED: {_reason}"
+    if _reason not in ("validée", "safe", "commande vide") and not _reason.startswith("whitelisté"):
+        logger.warning(f"Command WARNING: {_reason}")
+    return None
+
+
+async def action_ssh_command(owner: str, command: str = "", host: str = "localhost", **kwargs) -> tuple[str, bool]:
     """Run a shell command locally or on a remote host via SSH."""
     if not command:
         return "No command specified", False
+    # COMMAND VALIDATOR — Phase 12
+    _blocked = _validate_shell_or_block(command, kwargs.get("session_id"))
+    if _blocked:
+        return _blocked, False
     if host in ("localhost", "127.0.0.1", "local"):
         if IS_WINDOWS:
             bash = find_bash()
@@ -319,40 +378,74 @@ async def action_ssh_command(owner: str, command: str = "", host: str = "localho
             return await _run_subprocess(command, shell=True, timeout=120, label="Command")
         return await _run_subprocess(["bash", "-c", command], timeout=120, label="Command")
     return await _run_subprocess(
-        ["ssh", "-o", "ConnectTimeout=10", host, command], timeout=120, label="Command",
+        ["ssh", "-o", "ConnectTimeout=10", host, command],
+        timeout=120,
+        label="Command",
     )
 
 
-async def action_run_script(owner: str, script: str = "", host: str = "", **kwargs) -> Tuple[str, bool]:
+async def action_run_script(owner: str, script: str = "", host: str = "", **kwargs) -> tuple[str, bool]:
     """Run a script locally, or via SSH when a host is configured."""
     if not script:
         return "No script specified", False
+    _blocked = _validate_shell_or_block(script, kwargs.get("session_id"))
+    if _blocked:
+        return _blocked, False
     target_host = (host or os.getenv("ODYSSEUS_SCRIPT_HOST", "localhost")).strip()
     if target_host in ("", "localhost", "127.0.0.1", "local"):
         if IS_WINDOWS and find_bash():
             return await _run_subprocess([find_bash(), "-c", script], timeout=300, label="Script")
         return await _run_subprocess(script, shell=True, timeout=300, label="Script")
+
+    # P18 / v9 §1.1 — l'exécution DISTANTE avait une capacité sans interrupteur.
+    #
+    # Mesuré avant de fermer, comme le v9 l'exige : personne ne passe `host` à
+    # cette action, et son seul point d'entrée est la route de tâches, dont les
+    # actions d'exécution sont admin-only. Donc aucun chemin de code réel n'en
+    # profitait — et la seule façon de l'atteindre était de poser
+    # `ODYSSEUS_SCRIPT_HOST`, ce qu'un opérateur fait, pas un appelant.
+    #
+    # Le défaut est `off` et NON « refléter le comportement actuel » : une
+    # capacité d'exécution de code à distance n'a pas un comportement à
+    # préserver, elle a une exposition à fermer. C'est aussi pourquoi le refus
+    # nomme l'interrupteur — un refus muet laisse l'appelant croire qu'il a
+    # obtenu une exécution.
+    #
+    # La branche n'est pas SUPPRIMÉE : elle est une porte. La fermer définitivement
+    # rendrait la capacité non gouvernable — il faudrait la réécrire le jour où on
+    # la veut, au lieu de la déverrouiller.
+    if os.getenv(REMOTE_SSH_ENV, "off").strip().lower() not in {"1", "true", "yes", "on"}:
+        return (
+            f"Execution distante refusee : {REMOTE_SSH_ENV} est a off. "
+            f"Cible demandee : {target_host}. Cette capacite execute du code sur "
+            "une autre machine ; elle reste fermee par defaut.",
+            False,
+        )
     return await _run_subprocess(["ssh", target_host, script], timeout=300, label="Script")
 
 
-async def action_run_local(owner: str, script: str = "", **kwargs) -> Tuple[str, bool]:
+async def action_run_local(owner: str, script: str = "", **kwargs) -> tuple[str, bool]:
     """Run a script locally (no SSH)."""
     if not script:
         return "No script specified", False
+    _blocked = _validate_shell_or_block(script, kwargs.get("session_id"))
+    if _blocked:
+        return _blocked, False
     if IS_WINDOWS and find_bash():
         return await _run_subprocess([find_bash(), "-c", script], timeout=300, label="Script")
     return await _run_subprocess(script, shell=True, timeout=300, label="Script")
 
 
-async def action_tidy_research(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_tidy_research(owner: str, **kwargs) -> tuple[str, bool]:
     """Remove only broken research files (empty or unparseable JSON).
 
     Research history lives entirely in data/deep_research/<id>.json and is NOT
     backed by chat-session rows — so a file must never be deleted just because
     no chat session matches its id. Only prune files that fail to load."""
     try:
-        from pathlib import Path
         import json as _json
+        from pathlib import Path
+
         research_dir = Path(DEEP_RESEARCH_DIR)
         if not research_dir.exists():
             raise TaskNoop("no research directory")
@@ -375,7 +468,7 @@ async def action_tidy_research(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_tidy_calendar(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_tidy_calendar(owner: str, **kwargs) -> tuple[str, bool]:
     """Find duplicate calendar events (same title + start time) and DELETE the dups,
     keeping the oldest (first-seen) instance.
 
@@ -388,8 +481,10 @@ async def action_tidy_calendar(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         import json
         from pathlib import Path
-        from core.database import SessionLocal, CalendarEvent
+
         from sqlalchemy import func
+
+        from core.database import CalendarEvent, SessionLocal
 
         STATE_FILE = Path(TIDY_CALENDAR_STATE_FILE)
         last_watermark = None
@@ -438,7 +533,7 @@ async def action_tidy_calendar(owner: str, **kwargs) -> Tuple[str, bool]:
                 title = (e.summary or "").strip()
                 key = (title.lower(), e.dtstart)
                 if key in seen:
-                    when = e.dtstart.strftime('%Y-%m-%d %H:%M') if e.dtstart else '?'
+                    when = e.dtstart.strftime("%Y-%m-%d %H:%M") if e.dtstart else "?"
                     removed.append(f"{title} @ {when}")
                     db.delete(e)
                 else:
@@ -451,12 +546,18 @@ async def action_tidy_calendar(owner: str, **kwargs) -> Tuple[str, bool]:
             try:
                 STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
                 if newest is not None:
-                    STATE_FILE.write_text(json.dumps({
-                        "last_created_at": newest.isoformat(),
-                        "last_run_at": datetime.utcnow().isoformat(),
-                        "scanned": len(events),
-                        "removed": len(removed),
-                    }, indent=2), encoding="utf-8")
+                    STATE_FILE.write_text(
+                        json.dumps(
+                            {
+                                "last_created_at": newest.isoformat(),
+                                "last_run_at": datetime.utcnow().isoformat(),
+                                "scanned": len(events),
+                                "removed": len(removed),
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
             except Exception as se:
                 logger.warning(f"tidy_calendar watermark save failed: {se}")
 
@@ -497,11 +598,11 @@ def _result_has_work(result: str | None) -> bool:
     return True
 
 
-async def action_summarize_emails(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_summarize_emails(owner: str, **kwargs) -> tuple[str, bool]:
     """Run one pass of email summary background processing."""
     try:
-        from routes.email_pollers import _run_auto_summarize_once
-        result = await _run_auto_summarize_once(do_summary=True, do_reply=False)
+        
+        result = await _get_action("_run_auto_summarize_once")(do_summary=True, do_reply=False)
         if not _result_has_work(result):
             raise TaskNoop(f"summarize: {result or 'no new emails'}")
         return result, True
@@ -510,11 +611,11 @@ async def action_summarize_emails(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_draft_email_replies(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_draft_email_replies(owner: str, **kwargs) -> tuple[str, bool]:
     """Run one pass of AI reply drafting."""
     try:
-        from routes.email_pollers import _run_auto_summarize_once
-        result = await _run_auto_summarize_once(
+        
+        result = await _get_action("_run_auto_summarize_once")(
             do_summary=False,
             do_reply=True,
             days_back=7,
@@ -529,34 +630,110 @@ async def action_draft_email_replies(owner: str, **kwargs) -> Tuple[str, bool]:
 
 
 _TYPE_COLORS = {
-    "work":     "#5b8abf",  # blue
+    "work": "#5b8abf",  # blue
     "personal": "#a07ae0",  # purple
-    "health":   "#e06c75",  # red
-    "travel":   "#e5a33a",  # orange
-    "meal":     "#d8b974",  # tan
-    "social":   "#82c882",  # green
-    "admin":    "#888888",  # gray
-    "other":    "#6b9cb5",  # default
+    "health": "#e06c75",  # red
+    "travel": "#e5a33a",  # orange
+    "meal": "#d8b974",  # tan
+    "social": "#82c882",  # green
+    "admin": "#888888",  # gray
+    "other": "#6b9cb5",  # default
 }
 
 _HEURISTIC_TYPES = {
-    "health":  ["doctor", "dentist", "clinic", "hospital", "appointment", "checkup", "therapy",
-                "physio", "chiropract", "vaccine", "blood test", "xray", "scan", "surgery"],
-    "travel":  ["flight", "airport", "train", "shinkansen", "boarding", "uber", "taxi", "trip",
-                "hotel", "airbnb", "depart", "arrival", "check-in", "checkout"],
-    "meal":    ["lunch", "dinner", "breakfast", "brunch", "coffee", "drinks", "restaurant",
-                "reservation", "bar", "cafe"],
-    "social":  ["birthday", "party", "hangout", "wedding", "date with", "drinks with",
-                "anniversary", "baby shower", "graduation", "picnic", "bbq"],
-    "admin":   ["bill", "renewal", "tax", "deadline", "filing", "submit", "due date",
-                "registration", "license", "passport", "visa", "form"],
-    "work":    ["meeting", "standup", "sync", "1:1", "1on1", "review", "interview",
-                "demo", "presentation", "kickoff", "retro", "all-hands", "town hall",
-                "call with", "client", "deck"],
+    "health": [
+        "doctor",
+        "dentist",
+        "clinic",
+        "hospital",
+        "appointment",
+        "checkup",
+        "therapy",
+        "physio",
+        "chiropract",
+        "vaccine",
+        "blood test",
+        "xray",
+        "scan",
+        "surgery",
+    ],
+    "travel": [
+        "flight",
+        "airport",
+        "train",
+        "shinkansen",
+        "boarding",
+        "uber",
+        "taxi",
+        "trip",
+        "hotel",
+        "airbnb",
+        "depart",
+        "arrival",
+        "check-in",
+        "checkout",
+    ],
+    "meal": ["lunch", "dinner", "breakfast", "brunch", "coffee", "drinks", "restaurant", "reservation", "bar", "cafe"],
+    "social": [
+        "birthday",
+        "party",
+        "hangout",
+        "wedding",
+        "date with",
+        "drinks with",
+        "anniversary",
+        "baby shower",
+        "graduation",
+        "picnic",
+        "bbq",
+    ],
+    "admin": [
+        "bill",
+        "renewal",
+        "tax",
+        "deadline",
+        "filing",
+        "submit",
+        "due date",
+        "registration",
+        "license",
+        "passport",
+        "visa",
+        "form",
+    ],
+    "work": [
+        "meeting",
+        "standup",
+        "sync",
+        "1:1",
+        "1on1",
+        "review",
+        "interview",
+        "demo",
+        "presentation",
+        "kickoff",
+        "retro",
+        "all-hands",
+        "town hall",
+        "call with",
+        "client",
+        "deck",
+    ],
 }
 
-_HEURISTIC_HIGH = ["flight", "interview", "wedding", "surgery", "exam", "deadline",
-                   "court", "presentation", "demo", "kickoff", "launch"]
+_HEURISTIC_HIGH = [
+    "flight",
+    "interview",
+    "wedding",
+    "surgery",
+    "exam",
+    "deadline",
+    "court",
+    "presentation",
+    "demo",
+    "kickoff",
+    "launch",
+]
 _HEURISTIC_CRITICAL = ["surgery", "court", "wedding day", "funeral", "delivery date"]
 
 
@@ -593,29 +770,36 @@ def _memory_context_lines(mems, limit: int = 40) -> list:
     return lines
 
 
-async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_classify_events(owner: str, **kwargs) -> tuple[str, bool]:
     """Hybrid classification of upcoming calendar events: fast heuristic for
     obvious cases, LLM fallback for ambiguous ones. Assigns event_type +
     importance + color. Re-classifies anything not already set."""
     try:
+        import json as _json
+        import re as _re
         from datetime import timedelta
-        from core.database import SessionLocal, CalendarEvent
+
+        from core.database import CalendarEvent, SessionLocal
         from src.llm_core import llm_call_async_with_fallback
-        import re as _re, json as _json
 
         db = SessionLocal()
         try:
             now = datetime.utcnow()
             horizon = now + timedelta(days=30)
-            events = db.query(CalendarEvent).filter(
-                CalendarEvent.dtstart >= now,
-                CalendarEvent.dtstart <= horizon,
-                CalendarEvent.status != "cancelled",
-            ).all()
+            events = (
+                db.query(CalendarEvent)
+                .filter(
+                    CalendarEvent.dtstart >= now,
+                    CalendarEvent.dtstart <= horizon,
+                    CalendarEvent.status != "cancelled",
+                )
+                .all()
+            )
             if not events:
                 return "No upcoming events to classify", True
 
             from src.task_endpoint import resolve_task_candidates
+
             llm_candidates = resolve_task_candidates(owner=owner)
             llm_available = bool(llm_candidates)
 
@@ -625,6 +809,7 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
             _memory_context = ""
             try:
                 from core.database import Memory as _Mem
+
                 _mems = db.query(_Mem).filter(_Mem.owner == owner).limit(60).all() if owner else []
                 _lines = _memory_context_lines(_mems)
                 if _lines:
@@ -666,19 +851,21 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
             # Pass 2: batch LLM classification (10 events per call)
             BATCH = 10
             for i in range(0, len(llm_queue), BATCH):
-                batch = llm_queue[i:i+BATCH]
+                batch = llm_queue[i : i + BATCH]
                 items = [
-                    {"i": idx, "title": (ev.summary or "")[:120],
-                     "when": ev.dtstart.isoformat() if ev.dtstart else "",
-                     "loc": (ev.location or "")[:80]}
+                    {
+                        "i": idx,
+                        "title": (ev.summary or "")[:120],
+                        "when": ev.dtstart.isoformat() if ev.dtstart else "",
+                        "loc": (ev.location or "")[:80],
+                    }
                     for idx, ev in enumerate(batch)
                 ]
                 prompt = (
-                    _memory_context +
-                    "Classify these calendar events using the USER CONTEXT above (people they know, "
+                    _memory_context + "Classify these calendar events using the USER CONTEXT above (people they know, "
                     "their job, hobbies). Return ONLY a raw JSON array, no prose, no markdown.\n"
-                    "Each item: {\"i\": <index>, \"type\": \"work|personal|health|travel|meal|social|admin|other\", "
-                    "\"importance\": \"low|normal|high|critical\"}\n\n"
+                    'Each item: {"i": <index>, "type": "work|personal|health|travel|meal|social|admin|other", '
+                    '"importance": "low|normal|high|critical"}\n\n'
                     "Type guidance:\n"
                     "- personal = family, partner, kids, pets, errands, home stuff\n"
                     "- social = friends, parties, birthdays, hangouts\n"
@@ -696,10 +883,12 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
                     raw = await llm_call_async_with_fallback(
                         llm_candidates,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=0.1, max_tokens=16384,
+                        temperature=0.1,
+                        max_tokens=16384,
                         timeout=180,
                     )
                     from src.text_helpers import strip_think as _st
+
                     raw = _st(raw or "", prose=False, prompt_echo=False)
                     raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=_re.MULTILINE).strip()
                     m = _re.search(r"\[.*\]", raw, _re.DOTALL)
@@ -750,34 +939,37 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_ping_events(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_ping_events(owner: str, **kwargs) -> tuple[str, bool]:
     """Calendar event reminders are now dispatched by Notes."""
     raise TaskNoop("calendar event reminders are handled by Notes")
 
 
-async def action_extract_email_events(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_extract_email_events(owner: str, **kwargs) -> tuple[str, bool]:
     """Scan recent emails for booking confirmations / meetings / events
     and auto-add them to the calendar."""
     import asyncio as _aio
+
     try:
-        from routes.email_pollers import _run_auto_summarize_once
+        
         try:
             # Hard wall-clock budget: 5 min total. Per-LLM call already has its own timeout.
             result = await _aio.wait_for(
-                _run_auto_summarize_once(
-                    do_summary=False, do_reply=False, do_calendar=True, days_back=3,
+                _get_action("_run_auto_summarize_once")(
+                    do_summary=False,
+                    do_reply=False,
+                    do_calendar=True,
+                    days_back=3,
                 ),
                 timeout=300,
             )
             if not _result_has_work(result):
                 raise TaskNoop(f"email→calendar: {result or 'no new emails'}")
             return f"{result} (3d window)", True
-        except _aio.TimeoutError:
+        except TimeoutError:
             return "Email→calendar pass exceeded 5 min budget — try fewer emails or a faster model", False
     except Exception as e:
         logger.error(f"extract_email_events action failed: {e}")
         return str(e), False
-
 
 
 # Sender local-parts (matched exactly or by prefix) whose mail never carries a
@@ -785,31 +977,40 @@ async def action_extract_email_events(owner: str, **kwargs) -> Tuple[str, bool]:
 # (before "@"), so role names must NOT include a trailing "@" — "support@" etc.
 # could never match a local-part of "support" and were silently dead.
 _SIG_SKIP_PREFIXES = (
-    "noreply", "no-reply", "donotreply", "do-not-reply",
-    "mailer-daemon", "notifications", "notification", "bounce",
-    "newsletter", "support", "info", "admin",
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "do-not-reply",
+    "mailer-daemon",
+    "notifications",
+    "notification",
+    "bounce",
+    "newsletter",
+    "support",
+    "info",
+    "admin",
 )
 
 
-async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_learn_sender_signatures(owner: str, **kwargs) -> tuple[str, bool]:
     """For each sender with ≥3 recent inbox emails, ask the LLM to extract
     the common signature block across their messages. The cached sig is
     served on the `/read` endpoint so the renderer can fold signatures
     consistently from that address (no more heuristic regex juggling).
     Caps at 20 senders per pass; re-runs after 30 days per sender."""
     try:
-        import sqlite3 as _sql3
-        import re as _re
-        import email as _email_mod
         import asyncio as _aio
-        from datetime import datetime as _dt, timedelta as _td
-        from routes.email_helpers import _email_cache_owner_clause, _imap_connect, SCHEDULED_DB
+        import email as _email_mod
+        import re as _re
+        import sqlite3 as _sql3
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
         from src.llm_core import llm_call_async_with_fallback
 
         # 1. Pull recent UIDs + From headers cheaply (header-only fetch).
         def _pull_headers():
             results = []
-            conn = _imap_connect(None, owner=owner)
+            conn = _get_action("_imap_connect")(None, owner=owner)
             try:
                 conn.select("INBOX", readonly=True)
                 status, data = conn.search(None, "ALL")
@@ -818,9 +1019,7 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
                 uids = data[0].split()[-300:][::-1]  # newest 300
                 for uid in uids:
                     try:
-                        st, msg_data = conn.fetch(
-                            uid, "(BODY.PEEK[HEADER.FIELDS (FROM)])"
-                        )
+                        st, msg_data = conn.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM)])")
                         if st != "OK" or not msg_data or not msg_data[0]:
                             continue
                         raw = msg_data[0][1] if isinstance(msg_data[0], tuple) else None
@@ -831,15 +1030,19 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
                         from_addr = _email_mod.utils.parseaddr(from_raw)[1].lower().strip()
                         if not from_addr or "@" not in from_addr:
                             continue
-                        results.append({
-                            "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
-                            "from_address": from_addr,
-                        })
+                        results.append(
+                            {
+                                "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
+                                "from_address": from_addr,
+                            }
+                        )
                     except Exception:
                         continue
             finally:
-                try: conn.logout()
-                except Exception: pass
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
             return results
 
         mails = await _aio.to_thread(_pull_headers)
@@ -860,10 +1063,11 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
 
         # 3. Eligibility: ≥3 emails AND (no cache OR cache > 30 days old).
         try:
-            conn = _sql3.connect(SCHEDULED_DB)
-            owner_clause, owner_params = _email_cache_owner_clause(owner)
+            conn = _sql3.connect(_get_action("SCHEDULED_DB"))
+            owner_clause, owner_params = _get_action("_email_cache_owner_clause")(owner)
             cached = {
-                r[0]: r[1] for r in conn.execute(
+                r[0]: r[1]
+                for r in conn.execute(
                     f"SELECT from_address, last_built_at FROM sender_signatures WHERE {owner_clause}",
                     owner_params,
                 ).fetchall()
@@ -885,6 +1089,7 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
             return "All sender sigs already cached (or no eligible senders)", True
 
         from src.task_endpoint import resolve_task_candidates
+
         candidates = resolve_task_candidates(owner=owner)
         if not candidates:
             return "No LLM endpoint available", False
@@ -896,7 +1101,7 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
 
             def _fetch_bodies(_msgs):
                 bodies = []
-                conn2 = _imap_connect(None, owner=owner)
+                conn2 = _get_action("_imap_connect")(None, owner=owner)
                 try:
                     conn2.select("INBOX", readonly=True)
                     for mm in _msgs:
@@ -912,8 +1117,10 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
                         except Exception:
                             continue
                 finally:
-                    try: conn2.logout()
-                    except Exception: pass
+                    try:
+                        conn2.logout()
+                    except Exception:
+                        pass
                 return bodies
 
             try:
@@ -945,10 +1152,12 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
                 raw = await llm_call_async_with_fallback(
                     candidates,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0, max_tokens=600,
+                    temperature=0.0,
+                    max_tokens=600,
                     timeout=60,
                 )
                 from src.text_helpers import strip_think as _st
+
                 sig = _st(raw or "", prose=False, prompt_echo=False).strip()
                 # Strip surrounding code fences if the LLM added them.
                 sig = _re.sub(r"^```[\w]*\n?", "", sig)
@@ -960,19 +1169,14 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
 
             # NONE sentinel or out-of-bounds → cache a NULL row so we don't
             # re-try for 30 days, then move on.
-            if (
-                not sig
-                or sig.upper().strip().strip(".") == "NONE"
-                or len(sig) < 15
-                or len(sig) > 3000
-            ):
+            if not sig or sig.upper().strip().strip(".") == "NONE" or len(sig) < 15 or len(sig) > 3000:
                 cached_sig: str | None = None
                 no_sig += 1
             else:
                 cached_sig = sig
 
             try:
-                conn = _sql3.connect(SCHEDULED_DB)
+                conn = _sql3.connect(_get_action("SCHEDULED_DB"))
                 owner_value = (owner or "").strip()
                 conn.execute(
                     "INSERT OR REPLACE INTO sender_signatures "
@@ -992,16 +1196,16 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
         return str(e), False
 
 
-async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_daily_brief(owner: str, **kwargs) -> tuple[str, bool]:
     """Build a short morning digest: today's calendar events, unread email count
     + top-N senders/subjects, active todos."""
     try:
-        from datetime import datetime as _dt, timedelta as _td
         import json as _json
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
 
-        from core.database import SessionLocal, CalendarEvent, CalendarCal, Note
-        from routes.email_helpers import _imap_connect, _decode_header
-
+        from core.database import CalendarCal, CalendarEvent, Note, SessionLocal
+        
         # ----- Calendar: today's events -----
         today = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
         tomorrow = today + _td(days=1)
@@ -1011,15 +1215,20 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
         # events that happen to be stored with owner=None.
         try:
             from core.auth import AuthManager
+
             _allow_null = not AuthManager().is_configured
         except Exception:
             _allow_null = False
         db = SessionLocal()
         try:
-            ev_q = db.query(CalendarEvent).join(CalendarCal).filter(
-                CalendarEvent.dtstart < tomorrow,
-                CalendarEvent.dtend > today,
-                CalendarEvent.status != "cancelled",
+            ev_q = (
+                db.query(CalendarEvent)
+                .join(CalendarCal)
+                .filter(
+                    CalendarEvent.dtstart < tomorrow,
+                    CalendarEvent.dtend > today,
+                    CalendarEvent.status != "cancelled",
+                )
             )
             if owner:
                 ev_q = owner_filter(ev_q, CalendarCal, owner, include_shared=_allow_null)
@@ -1039,11 +1248,12 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
         recent_subjects: list[tuple[str, str]] = []
         try:
             import email as _email
-            conn = _imap_connect(None)
+
+            conn = _get_action("_imap_connect")(None)
             try:
                 conn.select("INBOX", readonly=True)
                 status, data = conn.search(None, "UNSEEN")
-                uids = (data[0].split() if status == "OK" and data and data[0] else [])
+                uids = data[0].split() if status == "OK" and data and data[0] else []
                 unread_count = len(uids)
                 # Grab headers for the most recent 5 unread (UIDs increase with arrival)
                 for uid in uids[-5:][::-1]:
@@ -1053,8 +1263,8 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
                             continue
                         hdr = msg_data[0][1] if isinstance(msg_data[0], tuple) else msg_data[0]
                         parsed = _email.message_from_bytes(hdr)
-                        subject = _decode_header(parsed.get("Subject") or "") or "(no subject)"
-                        from_raw = _decode_header(parsed.get("From") or "") or "?"
+                        subject = _get_action("_decode_header")(parsed.get("Subject") or "") or "(no subject)"
+                        from_raw = _get_action("_decode_header")(parsed.get("From") or "") or "?"
                         # Extract just the display name if "Name <addr>" form
                         if "<" in from_raw:
                             name = from_raw.split("<", 1)[0].strip().strip('"') or from_raw
@@ -1064,8 +1274,10 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
                     except Exception as fe:
                         logger.debug(f"daily_brief: header fetch for uid {uid} failed: {fe}")
             finally:
-                try: conn.logout()
-                except Exception: pass
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
         except Exception as ee:
             logger.debug(f"daily_brief: email fetch failed: {ee}")
 
@@ -1121,7 +1333,7 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_test_skills(owner: str, **kwargs) -> tuple[str, bool]:
     """Run the per-skill Test on every skill: agent runs the procedure in a
     sandbox, LLM judges the transcript, verdict is recorded on the skill.
     ADVISORY ONLY — only writes set_audit (never rewrites SKILL.md, never
@@ -1129,8 +1341,6 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         from services.memory.skills import SkillsManager
         from src.constants import DATA_DIR
-        from routes.skills_routes import _run_skill_test_once, _skill_test_task
-
         # #3 SCOPE GUARD: refuse to run on a None/empty owner — otherwise
         # `sm.load(owner=None)` returns every user's skills and we'd cross-
         # test (and write audit verdicts to) other users' data in a
@@ -1145,6 +1355,7 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             raise TaskNoop("no skills to test")
 
         from src.task_endpoint import resolve_task_candidates
+
         candidates = resolve_task_candidates(owner=owner)
         if not candidates:
             return "No Default/Utility model configured — set one in Settings.", False
@@ -1155,8 +1366,9 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         # garbage transcripts → 36 'unknown' verdicts with no hint why.
         url, model, headers = candidates[0]
         try:
-            from src.llm_core import list_model_ids
             import os as _os
+
+            from src.llm_core import list_model_ids
 
             selected = None
             mismatch_notes = []
@@ -1184,6 +1396,7 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         logger.info(f"test_skills: starting on {len(names)} skills, model={model}, owner={owner!r}")
 
         from collections import Counter
+
         tally = Counter()
         per_skill_log = []
         for skill in skills:
@@ -1195,9 +1408,9 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
                 tally["skipped"] += 1
                 per_skill_log.append(f"{name}: skipped (no SKILL.md)")
                 continue
-            task = _skill_test_task(skill)
+            task = _get_action("_skill_test_task")(skill)
             try:
-                transcript, verdict = await _run_skill_test_once(md, task, url, model, headers, owner)
+                transcript, verdict = await _get_action("_run_skill_test_once")(md, task, url, model, headers, owner)
                 v = (verdict or {}).get("verdict") or "unknown"
                 tally[v] += 1
                 summary = (verdict or {}).get("summary") or ""
@@ -1205,9 +1418,12 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
                 detail = ""
                 if v in ("unknown", "inconclusive", "fail", "needs_work"):
                     bits = []
-                    if summary: bits.append(summary[:160])
-                    if tlen < 200: bits.append(f"transcript {tlen}b")
-                    if bits: detail = " — " + "; ".join(bits)
+                    if summary:
+                        bits.append(summary[:160])
+                    if tlen < 200:
+                        bits.append(f"transcript {tlen}b")
+                    if bits:
+                        detail = " — " + "; ".join(bits)
                 per_skill_log.append(f"{name}: {v}{detail}")
                 # #4 + #8 + #12: ONLY persist a real verdict (pass / needs_work /
                 # fail / inconclusive). Skip 'unknown' — that's the judge's
@@ -1245,7 +1461,7 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_audit_skills(owner: str, **kwargs) -> tuple[str, bool]:
     """Run the real skills audit pipeline for skills that have not been audited.
 
     Unlike test_skills, this uses the same audit logic as the UI Audit all flow:
@@ -1255,12 +1471,12 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         from services.memory.skills import SkillsManager
         from src.constants import DATA_DIR
-        from routes.skills_routes import (
-            _resolve_audit_models, _run_audit_all_job, _skill_audit_jobs,
+        (
+            _resolve_audit_models,
+            _run_audit_all_job,
+            _skill_audit_jobs,
         )
-
-        if not owner:
-            return "audit_skills requires an owner — refusing to run without scope.", False
+        return "audit_skills requires an owner — refusing to run without scope.", False
 
         key = (owner or "",)
         existing = _skill_audit_jobs.get(key)
@@ -1269,16 +1485,14 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
 
         sm = SkillsManager(DATA_DIR)
         skills = sm.load(owner=owner)
-        names = [
-            s.get("name") for s in skills
-            if s.get("name") and not s.get("audit_verdict")
-        ]
+        names = [s.get("name") for s in skills if s.get("name") and not s.get("audit_verdict")]
         if not names:
             raise TaskNoop("no unaudited skills")
 
         url, model, headers, teacher = _resolve_audit_models()
         try:
             from src.llm_core import seconds_since_model_activity
+
             recent = seconds_since_model_activity(url, model)
         except Exception:
             recent = None
@@ -1289,15 +1503,22 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             )
 
         import time as _time
+
         _skill_audit_jobs[key] = {
-            "status": "running", "scope": "scheduled-unchecked", "model": model,
+            "status": "running",
+            "scope": "scheduled-unchecked",
+            "model": model,
             "teacher": teacher[1] if teacher else None,
-            "total": len(names), "done": 0, "current": None,
-            "results": [], "log": [
+            "total": len(names),
+            "done": 0,
+            "current": None,
+            "results": [],
+            "log": [
                 f"Scheduled audit of {len(names)} unaudited skill(s) with {model}"
                 + (f"; teacher {teacher[1]}" if teacher else "")
             ],
-            "started": _time.time(), "cancel": False,
+            "started": _time.time(),
+            "cancel": False,
         }
         await _run_audit_all_job(key, sm, names, url, model, headers, teacher, owner)
         job = _skill_audit_jobs.get(key, {})
@@ -1314,7 +1535,7 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_ping_notes(owner: str, **kwargs) -> tuple[str, bool]:
     """Background note-due scanner. Fires a reminder for any note whose
     `due_date` falls in the current ±5-minute window and hasn't been pinged
     within the last 25 minutes. Mirrors `action_ping_events` for calendar.
@@ -1324,10 +1545,12 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
     """
     try:
         import json as _json
-        import time as _time
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
         from pathlib import Path as _P
-        from core.database import SessionLocal as _SL, Note as _N
+
+        from core.database import Note as _N
+        from core.database import SessionLocal as _SL
 
         # Per-owner state file so cache-pruning doesn't cross-delete other
         # users' entries (review C4). Legacy path kept as fallback so a
@@ -1347,7 +1570,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         # Scanner ticks every 60s in _note_pings_loop. 90s window guarantees
         # every note's due time lands inside at least one tick's window.
         WINDOW_SEC = 90
-        REPING_MIN = 25     # don't re-ping same note more often than this
+        REPING_MIN = 25  # don't re-ping same note more often than this
 
         def _parse_due(s: str):
             """Accept '2026-05-29T16:31' (local) or '...Z' (UTC). Returns UTC datetime."""
@@ -1356,12 +1579,12 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
             try:
                 # Handle the JS-style 'Z' suffix.
                 if s.endswith("Z"):
-                    return _dt.fromisoformat(s[:-1]).replace(tzinfo=_tz.utc)
+                    return _dt.fromisoformat(s[:-1]).replace(tzinfo=UTC)
                 # Naive → assume local server time.
                 d = _dt.fromisoformat(s)
                 if d.tzinfo is None:
-                    d = d.astimezone().astimezone(_tz.utc)
-                return d.astimezone(_tz.utc)
+                    d = d.astimezone().astimezone(UTC)
+                return d.astimezone(UTC)
             except Exception:
                 return None
 
@@ -1381,7 +1604,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
             if not notes:
                 raise TaskNoop("no notes with due dates")
 
-            now = _dt.now(_tz.utc)
+            now = _dt.now(UTC)
             window = _td(seconds=WINDOW_SEC)
             reping_cutoff = now - _td(minutes=REPING_MIN)
             seen_ids = set()
@@ -1403,7 +1626,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                             last = last.get("at")
                         last_dt = _dt.fromisoformat(str(last))
                         if last_dt.tzinfo is None:
-                            last_dt = last_dt.replace(tzinfo=_tz.utc)
+                            last_dt = last_dt.replace(tzinfo=UTC)
                         if last_dt >= reping_cutoff:
                             continue
                     except Exception:
@@ -1417,20 +1640,18 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                 if n.items:
                     try:
                         items = _json.loads(n.items)
-                        pending = [
-                            it.get("text", "")
-                            for it in items
-                            if not it.get("done") and not it.get("checked")
-                        ]
+                        pending = [it.get("text", "") for it in items if not it.get("done") and not it.get("checked")]
                         if pending:
                             body_parts.append("Pending:\n" + "\n".join(f"- {t}" for t in pending[:8]))
                     except Exception:
                         pass
                 body = "\n\n".join(p for p in body_parts if p) or title
                 try:
-                    from routes.note_routes import dispatch_reminder
-                    await dispatch_reminder(
-                        title=title, note_body=body, note_id=n.id,
+                    
+                    await _get_action("dispatch_reminder")(
+                        title=title,
+                        note_body=body,
+                        note_id=n.id,
                         owner=n.owner or owner or "",
                     )
                     cache[n.id] = now.isoformat()
@@ -1461,7 +1682,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
+async def action_check_email_urgency(owner: str, **kwargs) -> tuple[str, bool]:
     """Scan unread emails across all accounts, LLM-triage new ones, cache
     per-UID verdicts, tag the inbox, and fire a reminder when a previously
     unseen UID scores reply-soon/urgent (>=2). State persists under
@@ -1477,17 +1698,17 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
 
     try:
         settings = load_settings()
-        import json as _json
-        import email as _email_mod
         import asyncio as _aio
-        import os as _os
+        import email as _email_mod
+        import json as _json
         import re as _re
         import time as _time
-        import httpx
-        from datetime import datetime as _dt, timedelta as _td
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
         from pathlib import Path as _P
-        from core.database import SessionLocal as _SL, EmailAccount as _EA
-        from routes.email_helpers import _imap_connect, _decode_header
+
+        from core.database import EmailAccount as _EA
+        from core.database import SessionLocal as _SL
         from src.llm_core import llm_call_async_with_fallback
 
         # Per-owner state file so multi-user runs don't clobber each other's
@@ -1501,15 +1722,26 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         AGE_CUTOFF = _dt.utcnow() - _td(days=7)
         TRIAGE_VERSION = 3
         CATEGORY_TAGS = {
-            "newsletter", "marketing", "notification", "finance", "bills",
-            "receipt", "travel", "security", "shopping", "social", "work",
-            "personal", "calendar",
+            "newsletter",
+            "marketing",
+            "notification",
+            "finance",
+            "bills",
+            "receipt",
+            "travel",
+            "security",
+            "shopping",
+            "social",
+            "work",
+            "personal",
+            "calendar",
         }
         MANAGED_TAGS = CATEGORY_TAGS | {"urgent", "reply-soon", "promo"}
 
         # ── 1. Resolve LLM candidates (utility primary + utility fallbacks; fall
         # through to default chat as a last resort).
         from src.task_endpoint import resolve_task_candidates
+
         candidates = resolve_task_candidates(owner=owner)
         if not candidates:
             return "No LLM endpoint available", False
@@ -1520,7 +1752,9 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         # pre-multi-user account row still gets picked up for the seeded task.
         db = _SL()
         try:
-            from sqlalchemy import and_ as _and, or_ as _or
+            from sqlalchemy import and_ as _and
+            from sqlalchemy import or_ as _or
+
             q = db.query(_EA).filter(_EA.enabled == True)  # noqa: E712
             if owner:
                 unowned = _or(_EA.owner == None, _EA.owner == "")  # noqa: E711
@@ -1533,7 +1767,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
             raise TaskNoop("no email accounts configured")
 
         urgency_prompt = settings.get("urgent_email_prompt", "")
-        per_uid_scores = {}   # key = "<acc_id>:<uid>" → {"score": 0-3, "reason": "..."}
+        per_uid_scores = {}  # key = "<acc_id>:<uid>" → {"score": 0-3, "reason": "..."}
         all_unread_keys = set()  # for cache pruning
         llm_attempts = 0
         saved_classifications = 0
@@ -1552,13 +1786,13 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
             def _scan_one(account=acc, cache_uids=cache.get("uids", {})):
                 """Sync IMAP work runs in a thread."""
                 results = []
-                conn = _imap_connect(account.id)
+                conn = _get_action("_imap_connect")(account.id)
                 try:
                     conn.select("INBOX", readonly=True)
                     # IMAP date is the only practical pre-filter — UNSEEN AND
                     # SINCE 7-days-ago. Date format is DD-Mon-YYYY.
                     since_str = AGE_CUTOFF.strftime("%d-%b-%Y")
-                    status, data = conn.search(None, f'(UNSEEN SINCE {since_str})')
+                    status, data = conn.search(None, f"(UNSEEN SINCE {since_str})")
                     if status != "OK" or not data or not data[0]:
                         return results
                     uids = data[0].split()
@@ -1598,23 +1832,31 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                             # always stamps. Anything that looks self-generated
                             # is dropped before classification to prevent the
                             # scanner from labelling its own emails "urgent".
-                            if (_ody_origin == "odysseus-ui" or _ody_kind == "reminder"
-                                    or _raw_subj.startswith("reminder (odysseus):")
-                                    or _raw_subj.startswith("reminder:")
-                                    or _raw_subj.startswith("[task]")):
+                            if (
+                                _ody_origin == "odysseus-ui"
+                                or _ody_kind == "reminder"
+                                or _raw_subj.startswith("reminder (odysseus):")
+                                or _raw_subj.startswith("reminder:")
+                                or _raw_subj.startswith("[task]")
+                            ):
                                 # Drop this candidate entirely — don't list it
                                 # in results so its UID never enters the cache
                                 # nor counts toward `scanned`.
                                 results.pop()
                                 continue
-                            subject = _decode_header(msg.get("Subject") or "")
-                            from_raw = _decode_header(msg.get("From") or "")
+                            subject = _get_action("_decode_header")(msg.get("Subject") or "")
+                            from_raw = _get_action("_decode_header")(msg.get("From") or "")
                             header_blob = "\n".join(
                                 f"{name}: {msg.get(name, '')}"
                                 for name in (
-                                    "From", "Subject", "List-Unsubscribe", "List-ID",
-                                    "Precedence", "X-Mailchimp-Campaign-Id",
-                                    "X-Campaign", "X-MC-User",
+                                    "From",
+                                    "Subject",
+                                    "List-Unsubscribe",
+                                    "List-ID",
+                                    "Precedence",
+                                    "X-Mailchimp-Campaign-Id",
+                                    "X-Campaign",
+                                    "X-MC-User",
                                 )
                                 if msg.get(name)
                             )
@@ -1623,24 +1865,32 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                                 if msg.is_multipart():
                                     for part in msg.walk():
                                         if part.get_content_type() == "text/plain":
-                                            body_snippet = part.get_payload(decode=True).decode("utf-8", errors="ignore")[:1600]
+                                            body_snippet = part.get_payload(decode=True).decode(
+                                                "utf-8", errors="ignore"
+                                            )[:1600]
                                             break
                                 else:
-                                    body_snippet = (msg.get_payload(decode=True) or b"").decode("utf-8", errors="ignore")[:1600]
+                                    body_snippet = (msg.get_payload(decode=True) or b"").decode(
+                                        "utf-8", errors="ignore"
+                                    )[:1600]
                             except Exception:
                                 body_snippet = ""
-                            results[-1].update({
-                                "subject": subject,
-                                "from": from_raw,
-                                "headers": header_blob,
-                                "body": body_snippet.strip(),
-                                "message_id": (msg.get("Message-ID") or "").strip(),
-                            })
+                            results[-1].update(
+                                {
+                                    "subject": subject,
+                                    "from": from_raw,
+                                    "headers": header_blob,
+                                    "body": body_snippet.strip(),
+                                    "message_id": (msg.get("Message-ID") or "").strip(),
+                                }
+                            )
                         except Exception as _fe:
                             logger.debug(f"urgency: header fetch for uid {uid} failed: {_fe}")
                 finally:
-                    try: conn.logout()
-                    except Exception: pass
+                    try:
+                        conn.logout()
+                    except Exception:
+                        pass
                 return results
 
             try:
@@ -1663,8 +1913,8 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                 llm_attempts += 1
                 prompt = (
                     "You are triaging ONE unread email. Return ONLY JSON: "
-                    "{\"score\":0|1|2|3,\"tags\":[\"...\"],\"spam\":false,"
-                    "\"reason\":\"one short phrase\"}.\n"
+                    '{"score":0|1|2|3,"tags":["..."],"spam":false,'
+                    '"reason":"one short phrase"}.\n'
                     "0 = trivial / promotional · 1 = informational, no reply needed · "
                     "2 = should reply within a day · 3 = urgent, reply now (deadline, blocker).\n\n"
                     "Allowed tags: newsletter, marketing, notification, finance, bills, receipt, "
@@ -1675,14 +1925,16 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                     "Important: 'I'm outside', 'I am outside', 'waiting outside', 'at the door', "
                     "'locked out', or 'can't get in' means score 3 unless clearly historical.\n\n"
                     f"User's rules:\n{urgency_prompt}\n\n"
-                    f"Email:\nFrom: {item.get('from','')}\nSubject: {item.get('subject','')}\n"
-                    f"Snippet:\n{item.get('body','')}\n"
+                    f"Email:\nFrom: {item.get('from', '')}\nSubject: {item.get('subject', '')}\n"
+                    f"Snippet:\n{item.get('body', '')}\n"
                 )
                 try:
                     raw = await llm_call_async_with_fallback(
                         candidates,
                         [{"role": "user", "content": prompt}],
-                        temperature=0.1, max_tokens=220, timeout=30,
+                        temperature=0.1,
+                        max_tokens=220,
+                        timeout=30,
                     )
                     # Tolerant JSON-parse: strip code fences if present.
                     txt = (raw or "").strip()
@@ -1691,18 +1943,20 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                         # Drop a leading "json\n" or any tag.
                         nl = txt.find("\n")
                         if nl >= 0:
-                            txt = txt[nl + 1:]
+                            txt = txt[nl + 1 :]
                     # Find first { ... } in the response.
                     s = txt.find("{")
                     e = txt.rfind("}")
                     if s < 0 or e <= s:
-                        failed_classifications.append({
-                            "subject": item.get("subject") or "(no subject)",
-                            "from": item.get("from") or "",
-                            "reason": "model returned no JSON",
-                        })
+                        failed_classifications.append(
+                            {
+                                "subject": item.get("subject") or "(no subject)",
+                                "from": item.get("from") or "",
+                                "reason": "model returned no JSON",
+                            }
+                        )
                         continue
-                    obj = _json.loads(txt[s:e + 1])
+                    obj = _json.loads(txt[s : e + 1])
                     score = int(obj.get("score", 0))
                     reason = str(obj.get("reason", ""))[:200]
                     raw_tags = obj.get("tags") or []
@@ -1724,21 +1978,25 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                         spam = bool(_spam_raw)
                     else:
                         spam = str(_spam_raw or "").strip().lower() in {"1", "true", "yes", "y"}
-                    _blob = f"{item.get('headers','')}\n{item.get('subject','')}\n{item.get('body','')}".lower()
+                    _blob = f"{item.get('headers', '')}\n{item.get('subject', '')}\n{item.get('body', '')}".lower()
                     if _re.search(r"\b(i'?m|i am|im|we'?re|we are)\s+outside\b", _blob) or _re.search(
                         r"\b(waiting outside|at the door|locked out|can'?t get in|cannot get in)\b", _blob
                     ):
                         if score < 3:
                             reason = "person is waiting outside"
                         score = max(score, 3)
-                    bulkish = bool(_re.search(
-                        r"\b(list-unsubscribe|list-id|mailchimp|mailchimpapp|view this email in your browser|unsubscribe|newsletter|digest|precedence:\s*bulk)\b",
-                        _blob,
-                    ))
-                    marketingish = bool(_re.search(
-                        r"\b(advertisement|sponsored|promo|promotion|sale|discount|offer|limited time|deal|tickets?|tour|merch|stream|purchase|sold out|low tickets|coupon|shop now|buy now)\b",
-                        _blob,
-                    ))
+                    bulkish = bool(
+                        _re.search(
+                            r"\b(list-unsubscribe|list-id|mailchimp|mailchimpapp|view this email in your browser|unsubscribe|newsletter|digest|precedence:\s*bulk)\b",
+                            _blob,
+                        )
+                    )
+                    marketingish = bool(
+                        _re.search(
+                            r"\b(advertisement|sponsored|promo|promotion|sale|discount|offer|limited time|deal|tickets?|tour|merch|stream|purchase|sold out|low tickets|coupon|shop now|buy now)\b",
+                            _blob,
+                        )
+                    )
                     if "newsletter" not in tags and bulkish:
                         tags.append("newsletter")
                     if "marketing" not in tags and marketingish:
@@ -1770,11 +2028,13 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                     per_uid_scores[key] = verdict
                     saved_classifications += 1
                 except Exception as e:
-                    failed_classifications.append({
-                        "subject": item.get("subject") or "(no subject)",
-                        "from": item.get("from") or "",
-                        "reason": str(e)[:120] or "classification failed",
-                    })
+                    failed_classifications.append(
+                        {
+                            "subject": item.get("subject") or "(no subject)",
+                            "from": item.get("from") or "",
+                            "reason": str(e)[:120] or "classification failed",
+                        }
+                    )
                     logger.debug(f"urgency: LLM classify failed for {key}: {e}")
                     continue
 
@@ -1796,10 +2056,11 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         # classified items; message_id lives on the cached verdict so this is cheap.
         try:
             import sqlite3 as _sql3
-            from routes.email_helpers import SCHEDULED_DB, _init_scheduled_db
             from datetime import datetime as _dt2
-            _init_scheduled_db()
-            _conn = _sql3.connect(SCHEDULED_DB)
+
+            
+            _get_action("_init_scheduled_db")()
+            _conn = _sql3.connect(_get_action("SCHEDULED_DB"))
             try:
                 for _key, _v in per_uid_scores.items():
                     _msg_id = (_v.get("message_id") or "").strip()
@@ -1811,7 +2072,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                         _new_tags.append("urgent")
                     elif _score >= 2:
                         _new_tags.append("reply-soon")
-                    for _tag in (_v.get("tags") or []):
+                    for _tag in _v.get("tags") or []:
                         _tag = str(_tag).strip().lower().replace("_", "-")
                         if _tag == "promo":
                             _tag = "marketing"
@@ -1845,8 +2106,17 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                         _conn.execute(
                             "UPDATE email_tags SET tags=?, spam_verdict=?, spam_reason=?, uid=?, folder=?, subject=?, sender=? "
                             "WHERE message_id=? AND owner=?",
-                            (_json.dumps(_existing), _spam, _v.get("reason", ""), _uid_only, "INBOX",
-                             _v.get("subject", ""), _v.get("from", ""), _msg_id, _owner_key),
+                            (
+                                _json.dumps(_existing),
+                                _spam,
+                                _v.get("reason", ""),
+                                _uid_only,
+                                "INBOX",
+                                _v.get("subject", ""),
+                                _v.get("from", ""),
+                                _msg_id,
+                                _owner_key,
+                            ),
                         )
                     else:
                         if not _new_tags and not _spam:
@@ -1855,9 +2125,17 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                             "INSERT INTO email_tags "
                             "(message_id, owner, uid, folder, subject, sender, tags, spam_verdict, spam_reason, created_at) "
                             "VALUES (?, ?, ?, 'INBOX', ?, ?, ?, ?, ?, ?)",
-                            (_msg_id, _owner_key, _uid_only, _v.get("subject", ""),
-                             _v.get("from", ""), _json.dumps(_new_tags), _spam, _v.get("reason", ""),
-                             _dt2.utcnow().isoformat()),
+                            (
+                                _msg_id,
+                                _owner_key,
+                                _uid_only,
+                                _v.get("subject", ""),
+                                _v.get("from", ""),
+                                _json.dumps(_new_tags),
+                                _spam,
+                                _v.get("reason", ""),
+                                _dt2.utcnow().isoformat(),
+                            ),
                         )
                 _conn.commit()
             finally:
@@ -1891,10 +2169,12 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
             # Sort: highest-scored UIDs first; cap at 10 to keep the email tidy.
             sorted_urgent = sorted(
                 ((k, per_uid_scores[k]) for k in urgent_keys),
-                key=lambda kv: kv[1].get("score", 0), reverse=True,
+                key=lambda kv: kv[1].get("score", 0),
+                reverse=True,
             )[:10]
             _pub = (settings.get("app_public_url") or "").strip().rstrip("/")
             from urllib.parse import quote as _quote
+
             lines = [f"{total_urgent} email" + ("" if total_urgent == 1 else "s") + " need an urgent reply:", ""]
             for i, (k, v) in enumerate(sorted_urgent, 1):
                 subj = (v.get("subject") or "(no subject)")[:160]
@@ -1915,12 +2195,14 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                 lines.append(f"…and {total_urgent - len(sorted_urgent)} more.")
             body = "\n".join(lines)
             try:
-                # Call dispatch_reminder DIRECTLY (no HTTP/auth roundtrip — the
+                # Call _get_action("dispatch_reminder") DIRECTLY (no HTTP/auth roundtrip — the
                 # endpoint version 401's the background scheduler because it
                 # has no session cookie).
-                from routes.note_routes import dispatch_reminder
-                dispatch_result = await dispatch_reminder(
-                    title=title, note_body=body, note_id="urgent-email",
+                
+                dispatch_result = await _get_action("dispatch_reminder")(
+                    title=title,
+                    note_body=body,
+                    note_id="urgent-email",
                     owner=owner or "",
                 )
                 channel = (settings.get("reminder_channel") or "browser").strip().lower()
@@ -1935,7 +2217,9 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                     newly_notified.update(new_urgent)
                 else:
                     notify_failed.update(new_urgent)
-                    logger.warning(f"urgency: reminder dispatch returned no successful delivery path: {dispatch_result}")
+                    logger.warning(
+                        f"urgency: reminder dispatch returned no successful delivery path: {dispatch_result}"
+                    )
             except Exception as e:
                 logger.warning(f"urgency: reminder dispatch failed: {e}")
                 notify_failed.update(new_urgent)
@@ -1986,7 +2270,11 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
             subj = (v.get("subject") or "(no subject)")[:80]
             frm = v.get("from") or ""
             why = v.get("reason") or ""
-            tag = " · *notified now*" if key in newly_notified_set else (" · *notify failed*" if key in failed_set else "")
+            tag = (
+                " · *notified now*"
+                if key in newly_notified_set
+                else (" · *notify failed*" if key in failed_set else "")
+            )
             line = f"- **{subj}**" + (f" — _{frm}_" if frm else "")
             if why:
                 line += f" — {why}"
@@ -2036,7 +2324,7 @@ async def action_cookbook_serve(
     progress_cb=None,
     command: str = "",
     **kwargs,
-) -> Tuple[str, bool]:
+) -> tuple[str, bool]:
     """Launch a Cookbook model serve as a scheduled task.
 
     `command` is the JSON config string the task carries in `prompt`,
@@ -2046,10 +2334,12 @@ async def action_cookbook_serve(
     """
     import json
     import time as _time
-    import httpx
     from pathlib import Path
-    from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+
+    import httpx
+
     from core.atomic_io import atomic_write_json
+    from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
 
     headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
     try:
@@ -2095,22 +2385,27 @@ async def action_cookbook_serve(
         # Strategy 1: exact name match.
         if preset_name:
             chosen = next(
-                (p for p in presets if isinstance(p, dict)
-                 and (p.get("name") or "").lower() == preset_name.lower()),
+                (p for p in presets if isinstance(p, dict) and (p.get("name") or "").lower() == preset_name.lower()),
                 None,
             )
         # Strategy 2: repo_id matches the preset's model field.
         if chosen is None and repo_id:
             chosen = next(
-                (p for p in presets if isinstance(p, dict)
-                 and (p.get("model") or p.get("modelId") or "").lower() == repo_id.lower()),
+                (
+                    p
+                    for p in presets
+                    if isinstance(p, dict) and (p.get("model") or p.get("modelId") or "").lower() == repo_id.lower()
+                ),
                 None,
             )
         # Strategy 3: model's short name matches the preset_name.
         if chosen is None and preset_name:
             chosen = next(
-                (p for p in presets if isinstance(p, dict)
-                 and _short(p.get("model") or p.get("modelId") or "") == preset_name.lower()),
+                (
+                    p
+                    for p in presets
+                    if isinstance(p, dict) and _short(p.get("model") or p.get("modelId") or "") == preset_name.lower()
+                ),
                 None,
             )
         if chosen is not None:
@@ -2121,32 +2416,40 @@ async def action_cookbook_serve(
         # Surface what we tried so the user can name their preset to match.
         preset_names = [(p.get("name") or "") for p in (state.get("presets") or []) if isinstance(p, dict)]
         hint = f" Saved presets: {preset_names!r}" if preset_names else ""
-        return (f"No launchable config for {preset_name!r} (repo_id={repo_id!r}). "
-                f"Check Cookbook → Presets has a real cmd, not 'adopted'.{hint}", False)
+        return (
+            f"No launchable config for {preset_name!r} (repo_id={repo_id!r}). "
+            f"Check Cookbook → Presets has a real cmd, not 'adopted'.{hint}",
+            False,
+        )
 
     # Resolve env_prefix etc. from the host's saved cookbook server entry,
     # matching the chat agent's serve_model path.
     body = {"repo_id": repo_id, "cmd": cmd}
     if host:
         body["remote_host"] = host
-    env = (state.get("env") or {})
+    env = state.get("env") or {}
     srv = next(
-        (s for s in (env.get("servers") or [])
-         if isinstance(s, dict) and (s.get("host") == host or s.get("name") == host)),
+        (
+            s
+            for s in (env.get("servers") or [])
+            if isinstance(s, dict) and (s.get("host") == host or s.get("name") == host)
+        ),
         {},
     )
     if srv.get("env") == "venv" and srv.get("envPath"):
         body["env_prefix"] = f"source {srv['envPath']}/bin/activate"
     elif srv.get("env") == "conda" and srv.get("envPath"):
         body["env_prefix"] = f"conda activate {srv['envPath']}"
-    if srv.get("hfToken"): body["hf_token"] = srv["hfToken"]
-    if srv.get("port"): body["ssh_port"] = str(srv["port"])
-    if srv.get("platform"): body["platform"] = srv["platform"]
+    if srv.get("hfToken"):
+        body["hf_token"] = srv["hfToken"]
+    if srv.get("port"):
+        body["ssh_port"] = str(srv["port"])
+    if srv.get("platform"):
+        body["platform"] = srv["platform"]
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(f"{internal_api_base()}/api/model/serve",
-                                  json=body, headers=headers)
+            r = await client.post(f"{internal_api_base()}/api/model/serve", json=body, headers=headers)
             data = r.json() if r.content else {}
     except Exception as e:
         return f"Launch HTTP failed: {e}", False

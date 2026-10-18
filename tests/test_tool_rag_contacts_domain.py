@@ -15,9 +15,9 @@ can be exercised directly.
 """
 
 from src.agent_loop import (
-    _classify_agent_request,
-    _DOMAIN_TOOL_MAP,
     _DOMAIN_RULES,
+    _DOMAIN_TOOL_MAP,
+    _classify_agent_request,
     _domain_rules_for_tools,
 )
 
@@ -44,8 +44,7 @@ def test_contact_lookup_requests_get_contacts_domain():
 
 def test_contact_management_requests_get_contacts_domain():
     """Add/update/delete contact phrasings also resolve to the contacts domain."""
-    for p in ("add a new contact", "update Bob's phone number", "delete that contact",
-              "save this person to contacts"):
+    for p in ("add a new contact", "update Bob's phone number", "delete that contact", "save this person to contacts"):
         intent = _classify(p)
         assert "contacts" in intent["domains"], f"expected contacts domain for: {p!r}"
 

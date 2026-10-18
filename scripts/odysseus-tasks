@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 """odysseus-tasks — shell wrapper for the scheduled-tasks feature.
 
-    odysseus-tasks list [--status active|paused|completed] [--limit N]
-    odysseus-tasks show TASK_ID
-    odysseus-tasks pause TASK_ID
-    odysseus-tasks resume TASK_ID
-    odysseus-tasks runs [--task TASK_ID] [--limit N]
+odysseus-tasks list [--status active|paused|completed] [--limit N]
+odysseus-tasks show TASK_ID
+odysseus-tasks pause TASK_ID
+odysseus-tasks resume TASK_ID
+odysseus-tasks runs [--task TASK_ID] [--limit N]
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, sys
-from pathlib import Path
+import argparse
+import os
+import sys
 
 try:
-    from core.database import SessionLocal, ScheduledTask, TaskRun
+    from core.database import ScheduledTask, SessionLocal, TaskRun
+
     quiet_logs()
 except ModuleNotFoundError as e:
     sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
@@ -31,7 +36,7 @@ def _preview_text(value, limit: int = 200) -> str:
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
-def _serialize_task(t: "ScheduledTask") -> dict:
+def _serialize_task(t: ScheduledTask) -> dict:
     return {
         "id": t.id,
         "name": t.name,
@@ -49,7 +54,7 @@ def _serialize_task(t: "ScheduledTask") -> dict:
     }
 
 
-def _serialize_run(r: "TaskRun") -> dict:
+def _serialize_run(r: TaskRun) -> dict:
     return {
         "id": r.id,
         "task_id": r.task_id,
@@ -84,9 +89,7 @@ def cmd_show(args):
         out["endpoint_url"] = t.endpoint_url or ""
         out["session_id"] = t.session_id or ""
         out["webhook_token"] = "***" if t.webhook_token else ""
-        runs = db.query(TaskRun).filter(TaskRun.task_id == t.id).order_by(
-            TaskRun.started_at.desc()
-        ).limit(5).all()
+        runs = db.query(TaskRun).filter(TaskRun.task_id == t.id).order_by(TaskRun.started_at.desc()).limit(5).all()
         out["recent_runs"] = [_serialize_run(r) for r in runs]
         emit(out, args)
     finally:

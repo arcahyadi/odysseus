@@ -11,18 +11,26 @@ optional SVG) in the `signatures` table, keyed by id + owner.
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, base64, json, logging, os, sys
+import argparse
+import base64
+import os
+import sys
 from pathlib import Path
 
 try:
     from sqlalchemy import text
+
     from core.database import engine
+
     quiet_logs()
 except ModuleNotFoundError as e:
     sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
@@ -46,13 +54,19 @@ def cmd_list(args):
     """No `Signature` SQLAlchemy model is registered for the
     `signatures` table — query via raw SQL so we don't depend on it."""
     with engine.connect() as conn:
-        rows = conn.execute(text(
-            "SELECT id, owner, name, width, height, "
-            "       length(data_png) AS png_len, "
-            "       svg IS NOT NULL AS has_svg, "
-            "       created_at "
-            "FROM signatures ORDER BY created_at DESC"
-        )).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT id, owner, name, width, height, "
+                    "       length(data_png) AS png_len, "
+                    "       svg IS NOT NULL AS has_svg, "
+                    "       created_at "
+                    "FROM signatures ORDER BY created_at DESC"
+                )
+            )
+            .mappings()
+            .all()
+        )
     out = [
         {
             "id": r["id"],
@@ -63,29 +77,37 @@ def cmd_list(args):
             "png_bytes_approx": r["png_len"],
             "has_svg": bool(r["has_svg"]),
             "created_at": str(r["created_at"] or ""),
-        } for r in rows
+        }
+        for r in rows
     ]
     emit(out, args)
 
 
 def cmd_show(args):
     with engine.connect() as conn:
-        row = conn.execute(text(
-            "SELECT id, owner, name, width, height, data_png, svg, created_at "
-            "FROM signatures WHERE id = :id"
-        ), {"id": args.id}).mappings().first()
+        row = (
+            conn.execute(
+                text("SELECT id, owner, name, width, height, data_png, svg, created_at FROM signatures WHERE id = :id"),
+                {"id": args.id},
+            )
+            .mappings()
+            .first()
+        )
     if not row:
         fail(f"no signature with id {args.id!r}")
-    emit({
-        "id": row["id"],
-        "owner": row["owner"] or "",
-        "name": row["name"],
-        "width": row["width"],
-        "height": row["height"],
-        "data_png": row["data_png"],
-        "has_svg": bool(row["svg"]),
-        "created_at": str(row["created_at"] or ""),
-    }, args)
+    emit(
+        {
+            "id": row["id"],
+            "owner": row["owner"] or "",
+            "name": row["name"],
+            "width": row["width"],
+            "height": row["height"],
+            "data_png": row["data_png"],
+            "has_svg": bool(row["svg"]),
+            "created_at": str(row["created_at"] or ""),
+        },
+        args,
+    )
 
 
 def cmd_export(args):
@@ -93,9 +115,7 @@ def cmd_export(args):
     `data_png` is stored as a data URL (`data:image/png;base64,...`).
     We strip the prefix, base64-decode, and write the bytes."""
     with engine.connect() as conn:
-        row = conn.execute(text(
-            "SELECT data_png FROM signatures WHERE id = :id"
-        ), {"id": args.id}).mappings().first()
+        row = conn.execute(text("SELECT data_png FROM signatures WHERE id = :id"), {"id": args.id}).mappings().first()
     if not row:
         fail(f"no signature with id {args.id!r}")
     png_bytes = _decode_png_data(row["data_png"] or "")

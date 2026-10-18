@@ -5,15 +5,16 @@ LM Studio, vLLM, and other OpenAI-compatible servers commonly run on the same
 port. A URL on port 11434 with a /v1 path must remain OpenAI-compatible;
 only explicit /api or /api/... paths (and ollama.com) are native Ollama.
 """
+
 import pytest
 
-from src import llm_core, endpoint_resolver
+from src import endpoint_resolver, llm_core
 from src.endpoint_resolver import build_chat_url
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def _stub_dns(monkeypatch):
@@ -24,6 +25,7 @@ def _stub_dns(monkeypatch):
 # ---------------------------------------------------------------------------
 # _is_ollama_native_url: /v1 on port 11434 is NOT native Ollama
 # ---------------------------------------------------------------------------
+
 
 class TestIsOllamaNativeUrlRejectsV1Paths:
     """Port alone is not enough — /v1 paths are OpenAI-compatible."""
@@ -54,6 +56,7 @@ class TestIsOllamaNativeUrlRejectsV1Paths:
 # _is_ollama_native_url: /api paths and ollama.com ARE native Ollama
 # ---------------------------------------------------------------------------
 
+
 class TestIsOllamaNativeUrlAcceptsNativePaths:
     def test_localhost_api(self):
         assert llm_core._is_ollama_native_url("http://localhost:11434/api")
@@ -78,6 +81,7 @@ class TestIsOllamaNativeUrlAcceptsNativePaths:
 # build_chat_url: port 11434 + /v1 → OpenAI-compatible /chat/completions
 # ---------------------------------------------------------------------------
 
+
 class TestBuildChatUrlPort11434V1IsOpenAICompat:
     def test_localhost_v1(self):
         assert build_chat_url("http://localhost:11434/v1") == "http://localhost:11434/v1/chat/completions"
@@ -92,6 +96,7 @@ class TestBuildChatUrlPort11434V1IsOpenAICompat:
 # ---------------------------------------------------------------------------
 # build_chat_url: native Ollama /api → /api/chat
 # ---------------------------------------------------------------------------
+
 
 class TestBuildChatUrlNativeOllamaRoutesToApiChat:
     def test_localhost_api(self):

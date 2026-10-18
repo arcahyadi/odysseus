@@ -5,6 +5,7 @@ results) previously raised KeyError in the hot path for llm_call,
 llm_call_async, stream_llm, and _build_anthropic_payload. The fix is
 m.get("content", "") in every spot that reads system message content.
 """
+
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")

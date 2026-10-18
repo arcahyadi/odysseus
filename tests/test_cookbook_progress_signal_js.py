@@ -36,7 +36,11 @@ def node_available():
 def _run_node(script: str) -> dict:
     res = subprocess.run(
         ["node", "--input-type=module", "-e", script],
-        cwd=_REPO, capture_output=True, timeout=15, text=True,
+        cwd=_REPO,
+        capture_output=True,
+        timeout=15,
+        text=True,
+        check=False,
     )
     if res.returncode != 0:
         raise AssertionError(f"node failed:\n{res.stderr}")

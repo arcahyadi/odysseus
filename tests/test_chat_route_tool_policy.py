@@ -12,8 +12,6 @@ Fix: (1) Read from JSON body as fallback.
 import ast
 from pathlib import Path
 
-import pytest
-
 _CHAT_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "chat_routes.py"
 
 
@@ -43,9 +41,7 @@ def test_allow_bash_reads_from_body_as_fallback():
                     src_segment = ast.get_source_segment(source, node)
                     if src_segment and "body" in src_segment:
                         found_body_fallback = True
-    assert found_body_fallback, (
-        "allow_bash assignment in chat_stream must fall back to JSON body"
-    )
+    assert found_body_fallback, "allow_bash assignment in chat_stream must fall back to JSON body"
 
 
 def test_allow_web_search_reads_from_body_as_fallback():
@@ -68,9 +64,7 @@ def test_allow_web_search_reads_from_body_as_fallback():
                     src_segment = ast.get_source_segment(source, node)
                     if src_segment and "body" in src_segment:
                         found_body_fallback = True
-    assert found_body_fallback, (
-        "allow_web_search assignment in chat_stream must fall back to JSON body"
-    )
+    assert found_body_fallback, "allow_web_search assignment in chat_stream must fall back to JSON body"
 
 
 def test_disabled_tools_does_not_bash_when_allow_bash_is_none():
@@ -83,9 +77,7 @@ def test_disabled_tools_does_not_bash_when_allow_bash_is_none():
     #   if str(allow_bash).lower() != "true":
     # to:
     #   if allow_bash is not None and str(allow_bash).lower() != "true":
-    assert "allow_bash is not None" in source, (
-        "disabled_tools check must guard against allow_bash being None"
-    )
+    assert "allow_bash is not None" in source, "disabled_tools check must guard against allow_bash being None"
     assert "allow_web_search is not None" in source, (
         "disabled_tools check must guard against allow_web_search being None"
     )
@@ -113,11 +105,7 @@ def _build_disabled_tools(
     # Issue #3229 fix: only disable when explicitly set to a falsy value.
     if allow_bash is not None and str(allow_bash).lower() != "true":
         disabled_tools.add("bash")
-    if (
-        allow_web_search is not None
-        and str(allow_web_search).lower() != "true"
-        and not explicit_web_intent
-    ):
+    if allow_web_search is not None and str(allow_web_search).lower() != "true" and not explicit_web_intent:
         disabled_tools.add("web_search")
         disabled_tools.add("web_fetch")
 
@@ -207,7 +195,7 @@ def test_form_data_none_body_true_works():
     """
     # Simulate the fallback logic
     form_data_val = None  # not in form_data
-    body_val = "true"     # from JSON body
+    body_val = "true"  # from JSON body
     allow_bash = form_data_val or body_val
     assert str(allow_bash).lower() == "true"
 
@@ -218,7 +206,8 @@ def test_form_data_none_body_true_works():
 def test_explicit_false_disables_even_for_admin():
     """An admin who explicitly sends allow_bash=false should have bash disabled."""
     disabled = _build_disabled_tools(
-        allow_bash="false", can_use_bash=True,
+        allow_bash="false",
+        can_use_bash=True,
     )
     assert "bash" in disabled
 
@@ -232,8 +221,7 @@ def test_frontend_always_sends_explicit_allow_bash():
     """chat.js must always send allow_bash (both true and false), not only on toggle ON."""
     source = _CHAT_JS.read_text(encoding="utf-8")
     # Must not only append 'true' — must also handle the false case
-    assert "allow_bash', el('bash-toggle').checked ? 'true' : 'false'" in source or \
-           "allow_bash', 'false'" in source, (
+    assert "allow_bash', el('bash-toggle').checked ? 'true' : 'false'" in source or "allow_bash', 'false'" in source, (
         "Frontend must send explicit allow_bash=false when toggle is off"
     )
 

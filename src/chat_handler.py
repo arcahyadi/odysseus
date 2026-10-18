@@ -1,29 +1,30 @@
 # src/chat_handler.py
 """Handler for chat endpoint operations."""
-import os
+
 import asyncio
 import logging
-from typing import Dict, List, Optional, Any
+import os
+from typing import Any
 
 from fastapi import HTTPException
 
-from src.constants import (
-    MAX_CONTEXT_MESSAGES,
-    DEFAULT_TEMPERATURE,
-    DEFAULT_MAX_TOKENS,
-    UPLOAD_DIR,
-)
 from core.models import ChatMessage
 from src.chat_helpers import extract_urls, model_supports_vision
-from src.document_processor import build_user_content, analyze_image_with_vl_result
+from src.constants import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_TEMPERATURE,
+    MAX_CONTEXT_MESSAGES,
+    UPLOAD_DIR,
+)
+from src.document_processor import analyze_image_with_vl_result, build_user_content
 from src.youtube_handler import (
-    is_youtube_url,
-    extract_youtube_id,
+    YOUTUBE_INSTRUCTION_PROMPT,
     extract_transcript_async,
-    format_transcript_for_context,
+    extract_youtube_id,
     fetch_youtube_comments,
     format_comments_for_context,
-    YOUTUBE_INSTRUCTION_PROMPT,
+    format_transcript_for_context,
+    is_youtube_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ class ChatHandler:
     # Preset helpers
     # ------------------------------------------------------------------
 
-    def validate_and_extract_preset(self, preset_id: Optional[str]) -> tuple:
+    def validate_and_extract_preset(self, preset_id: str | None) -> tuple:
         """Returns (temperature, max_tokens, preset_system_prompt, character_name)."""
         if preset_id and preset_id not in self.preset_manager.presets:
             raise HTTPException(400, f"Invalid preset_id: {preset_id}")
@@ -95,9 +96,9 @@ class ChatHandler:
     async def preprocess_message(
         self,
         message: str,
-        att_ids: List[str],
+        att_ids: list[str],
         sess,
-        auto_opened_docs: Optional[List[Dict[str, Any]]] = None,
+        auto_opened_docs: list[dict[str, Any]] | None = None,
         allow_tool_preprocessing: bool = True,
     ) -> tuple:
         """
@@ -110,11 +111,11 @@ class ChatHandler:
         new doc so the caller can announce it to the frontend before streaming.
         """
         enhanced_message = message
-        attachment_meta: List[Dict[str, Any]] = []
+        attachment_meta: list[dict[str, Any]] = []
 
         # Extract URLs and process YouTube transcripts
         urls = extract_urls(enhanced_message) if allow_tool_preprocessing else []
-        youtube_transcripts: List[str] = []
+        youtube_transcripts: list[str] = []
 
         has_youtube = False
         for url in urls:
@@ -127,15 +128,11 @@ class ChatHandler:
                 # Fetch transcript and comments in parallel
                 transcript_task = extract_transcript_async(url, video_id)
                 comments_task = fetch_youtube_comments(video_id)
-                transcript_data, comments_data = await asyncio.gather(
-                    transcript_task, comments_task
-                )
+                transcript_data, comments_data = await asyncio.gather(transcript_task, comments_task)
                 # Extract title/channel from comments metadata
                 title = comments_data.get("title", "")
                 channel = comments_data.get("channel", "")
-                youtube_transcripts.append(
-                    format_transcript_for_context(transcript_data, url, title, channel)
-                )
+                youtube_transcripts.append(format_transcript_for_context(transcript_data, url, title, channel))
                 comments_ctx = format_comments_for_context(comments_data, url)
                 if comments_ctx:
                     youtube_transcripts.append(comments_ctx)
@@ -146,7 +143,7 @@ class ChatHandler:
 
         # Resolve uploads once with the session owner. Attachment IDs are
         # bearer-like references; never trust them without an owner check.
-        files_by_id: Dict[str, Dict] = {}
+        files_by_id: dict[str, dict] = {}
         owner = getattr(sess, "owner", None)
         effective_att_ids = att_ids if allow_tool_preprocessing else []
         if effective_att_ids:
@@ -158,14 +155,16 @@ class ChatHandler:
             for att_id in effective_att_ids:
                 fi = files_by_id.get(att_id)
                 if fi:
-                    attachment_meta.append({
-                        "id": fi["id"],
-                        "name": fi.get("name") or fi.get("original_name") or fi["id"],
-                        "mime": fi.get("mime", ""),
-                        "size": fi.get("size", 0),
-                        "width": fi.get("width"),
-                        "height": fi.get("height"),
-                    })
+                    attachment_meta.append(
+                        {
+                            "id": fi["id"],
+                            "name": fi.get("name") or fi.get("original_name") or fi["id"],
+                            "mime": fi.get("mime", ""),
+                            "size": fi.get("size", 0),
+                            "width": fi.get("width"),
+                            "height": fi.get("height"),
+                        }
+                    )
 
         # Analyze images only when attachment preprocessing is actually
         # allowed. The vision capability check can probe local model endpoints,
@@ -174,6 +173,7 @@ class ChatHandler:
         main_is_vision = False
         if effective_att_ids:
             from src.settings import get_setting
+
             vision_enabled = get_setting("vision_enabled", True)
             if vision_enabled:
                 main_is_vision = await asyncio.to_thread(
@@ -186,9 +186,7 @@ class ChatHandler:
             meta_by_id = {m["id"]: m for m in attachment_meta}
             for att_id in effective_att_ids:
                 file_info = files_by_id.get(att_id)
-                if file_info and self.upload_handler.is_image_file(
-                    file_info["name"], file_info.get("mime", "")
-                ):
+                if file_info and self.upload_handler.is_image_file(file_info["name"], file_info.get("mime", "")):
                     if main_is_vision:
                         # Main model can see images — just note it, image is passed via build_user_content.
                         enhanced_message = f"{enhanced_message}\n\n[Image attached: {file_info['name']}]"
@@ -249,7 +247,10 @@ class ChatHandler:
                             _m["vision_model"] = vl_model
 
         user_content = build_user_content(
-            enhanced_message, effective_att_ids, UPLOAD_DIR, self.upload_handler,
+            enhanced_message,
+            effective_att_ids,
+            UPLOAD_DIR,
+            self.upload_handler,
             session_id=getattr(sess, "id", None),
             auto_opened_docs=auto_opened_docs,
             owner=owner,
@@ -257,16 +258,14 @@ class ChatHandler:
         )
 
         # Strip image_url entries for text-only models (VL description is already in the text)
-        if not vision_enabled and isinstance(user_content, list):
+        if (
+            not vision_enabled
+            and isinstance(user_content, list)
+            or not main_is_vision
+            and isinstance(user_content, list)
+        ):
             text_parts = [
-                item.get("text", "") for item in user_content
-                if isinstance(item, dict) and item.get("type") == "text"
-            ]
-            user_content = "\n".join(text_parts).strip() if text_parts else enhanced_message
-        elif not main_is_vision and isinstance(user_content, list):
-            text_parts = [
-                item.get("text", "") for item in user_content
-                if isinstance(item, dict) and item.get("type") == "text"
+                item.get("text", "") for item in user_content if isinstance(item, dict) and item.get("type") == "text"
             ]
             user_content = "\n".join(text_parts).strip() if text_parts else enhanced_message
 
@@ -294,11 +293,9 @@ class ChatHandler:
         if len(session.history) > MAX_CONTEXT_MESSAGES:
             session.history = session.history[-MAX_CONTEXT_MESSAGES:]
 
-    async def handle_memory_command(self, session, message: str) -> Optional[str]:
+    async def handle_memory_command(self, session, message: str) -> str | None:
         """Process inline memory commands. Returns response string or None."""
-        is_memory_cmd, memory_text = self.memory_manager.process_inline_memory_command(
-            message
-        )
+        is_memory_cmd, memory_text = self.memory_manager.process_inline_memory_command(message)
         if is_memory_cmd and memory_text:
             mem = self.memory_manager.load()
             if not self.memory_manager.find_duplicates(memory_text, mem):
@@ -307,9 +304,7 @@ class ChatHandler:
                 self.memory_manager.save(mem)
 
             session.add_message(ChatMessage("user", message))
-            session.add_message(
-                ChatMessage("assistant", f"Saved to memory: {memory_text}")
-            )
+            session.add_message(ChatMessage("assistant", f"Saved to memory: {memory_text}"))
 
             from src.database import update_session_last_accessed
 

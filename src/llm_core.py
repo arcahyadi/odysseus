@@ -1,22 +1,29 @@
 # src/llm_core.py
-import httpx
+# Canonical LLM dispatch: stream_llm / stream_llm_with_fallback (httpx) driven by
+# the native resolve_endpoint role/fallback chain. The old LiteLLM ModelRouter
+# migration note was removed with llm_router.py (M3.1, graded REDUNDANT).
 import asyncio
-import time
+import hashlib
 import json
 import logging
-import hashlib
-import threading
-import re
 import os
-from fastapi import HTTPException
-from typing import Optional, Dict, List, Tuple
-from src.model_context import get_context_length, DEFAULT_CONTEXT
+import re
+import threading
+import time
 from urllib.parse import urlparse
+
+import httpx
+from fastapi import HTTPException
+
+from services.observability.langfuse_tracer import observe
+from src.model_context import DEFAULT_CONTEXT, get_context_length
 
 logger = logging.getLogger(__name__)
 
+
 class LLMConfig:
     """Configuration constants for LLM operations."""
+
     DEFAULT_TIMEOUT = 30
     DEFAULT_TEMPERATURE = 1.0
     DEFAULT_MAX_TOKENS = 0
@@ -30,7 +37,7 @@ class LLMConfig:
     # streaming path (which, unlike llm_call, does not retry the connect). A
     # genuinely dead upstream stays bounded by the dead-host cooldown. Override
     # with env LLM_CONNECT_TIMEOUT (seconds).
-    CONNECT_TIMEOUT = float(os.getenv('LLM_CONNECT_TIMEOUT', '10') or '10')
+    CONNECT_TIMEOUT = float(os.getenv("LLM_CONNECT_TIMEOUT", "10") or "10")
 
 
 def _call_timeout(read_timeout) -> httpx.Timeout:
@@ -44,22 +51,19 @@ def _stream_timeout(read_timeout) -> httpx.Timeout:
 
 
 # Cache for LLM responses
-def _get_cache_key(url: str, model: str, messages: List[Dict], 
-                   temperature: float, max_tokens: int) -> str:
+def _get_cache_key(url: str, model: str, messages: list[dict], temperature: float, max_tokens: int) -> str:
     """Generate cache key for LLM requests."""
     hashable_messages = []
     for msg in messages:
         sorted_items = tuple(sorted(msg.items()))
         hashable_messages.append(sorted_items)
-    
-    content = json.dumps({
-        'url': url,
-        'model': model, 
-        'messages': hashable_messages,
-        'temp': temperature,
-        'max_tokens': max_tokens
-    }, sort_keys=True)
+
+    content = json.dumps(
+        {"url": url, "model": model, "messages": hashable_messages, "temp": temperature, "max_tokens": max_tokens},
+        sort_keys=True,
+    )
     return hashlib.sha256(content.encode()).hexdigest()
+
 
 _response_cache = {}
 
@@ -76,15 +80,15 @@ _response_cache = {}
 #   - any success resets the failure counter immediately
 DEAD_HOST_COOLDOWN = 20.0
 _HOST_FAIL_THRESHOLD = 2
-_dead_hosts: Dict[str, float] = {}
-_host_fails: Dict[str, int] = {}
+_dead_hosts: dict[str, float] = {}
+_host_fails: dict[str, int] = {}
 # Guards the two maps above. The synchronous llm_call() runs inside FastAPI's
 # threadpool (sync routes such as /sessions/auto-sort) while llm_call_async()
 # runs on the event loop, so these maps are mutated from multiple OS threads.
 # Without the lock the get()+1+set on _host_fails is a read-modify-write that
 # loses failure counts under concurrent connect errors (issue #659).
 _host_health_lock = threading.Lock()
-_model_activity: Dict[str, float] = {}
+_model_activity: dict[str, float] = {}
 
 _HARMONY_MARKER_RE = re.compile(
     r"<\|channel\|>(analysis|commentary|final)"
@@ -127,19 +131,19 @@ class _HarmonyStreamRouter:
     def __init__(self) -> None:
         self._buf = ""
         self._seen_harmony = False
-        self._channel: Optional[str] = None
+        self._channel: str | None = None
         self._in_message = False
 
-    def feed(self, text: str) -> List[Tuple[str, bool]]:
+    def feed(self, text: str) -> list[tuple[str, bool]]:
         if not text:
             return []
         self._buf += text
         return self._drain(final=False)
 
-    def flush(self) -> List[Tuple[str, bool]]:
+    def flush(self) -> list[tuple[str, bool]]:
         return self._drain(final=True)
 
-    def _append_text(self, out: List[Tuple[str, bool]], text: str) -> None:
+    def _append_text(self, out: list[tuple[str, bool]], text: str) -> None:
         if not text:
             return
         if not self._seen_harmony:
@@ -164,15 +168,15 @@ class _HarmonyStreamRouter:
             if marker in {"<|end|>", "<|return|>", "<|call|>"}:
                 self._channel = None
 
-    def _drain(self, *, final: bool) -> List[Tuple[str, bool]]:
-        out: List[Tuple[str, bool]] = []
+    def _drain(self, *, final: bool) -> list[tuple[str, bool]]:
+        out: list[tuple[str, bool]] = []
         while True:
             match = _HARMONY_MARKER_RE.search(self._buf)
             if not match:
                 break
-            self._append_text(out, self._buf[:match.start()])
+            self._append_text(out, self._buf[: match.start()])
             self._handle_marker(match)
-            self._buf = self._buf[match.end():]
+            self._buf = self._buf[match.end() :]
 
         hold = 0 if final else _harmony_suffix_hold_len(self._buf)
         emit = self._buf if hold == 0 else self._buf[:-hold]
@@ -187,11 +191,14 @@ def _stream_delta_event(text: str, *, thinking: bool = False) -> str:
         payload["thinking"] = True
     return f"data: {json.dumps(payload)}\n\n"
 
+
 def _model_activity_key(url: str, model: str) -> str:
     return f"{(url or '').strip()}|{(model or '').strip()}"
 
+
 def _same_model_identity(left: str, right: str) -> bool:
     return (left or "").strip().lower() == (right or "").strip().lower()
+
 
 def note_model_activity(url: str, model: str):
     """Record that a real upstream request used this endpoint/model."""
@@ -199,17 +206,21 @@ def note_model_activity(url: str, model: str):
         return
     _model_activity[_model_activity_key(url, model)] = time.time()
 
-def seconds_since_model_activity(url: str, model: str) -> Optional[float]:
+
+def seconds_since_model_activity(url: str, model: str) -> float | None:
     """Seconds since the endpoint/model was last used in this process."""
     ts = _model_activity.get(_model_activity_key(url, model))
     if not ts:
         return None
     return max(0.0, time.time() - ts)
 
+
 def _host_key(url: str) -> str:
     from urllib.parse import urlsplit
+
     s = urlsplit(url)
     return f"{s.scheme}://{s.netloc}" if s.scheme and s.netloc else url
+
 
 def _is_host_dead(url: str) -> bool:
     key = _host_key(url)
@@ -221,6 +232,7 @@ def _is_host_dead(url: str) -> bool:
             _dead_hosts.pop(key, None)
             return False
         return True
+
 
 def _mark_host_dead(url: str) -> bool:
     """Record a connect failure. Only actually cools the host after
@@ -236,6 +248,7 @@ def _mark_host_dead(url: str) -> bool:
             return True
         return False
 
+
 def _clear_host_dead(url: str) -> None:
     key = _host_key(url)
     with _host_health_lock:
@@ -246,22 +259,28 @@ def _clear_host_dead(url: str) -> None:
 # Shared async HTTP client. Reusing one client keeps connections warm:
 # repeat calls to api.anthropic.com / api.openai.com / openrouter skip the
 # 100-500ms TCP+TLS handshake. Lazy init so we bind to the running event loop.
-_http_client: Optional[httpx.AsyncClient] = None
+_http_client: httpx.AsyncClient | None = None
 _http_limits = httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30.0)
+
 
 def _get_http_client() -> httpx.AsyncClient:
     """Return process-wide AsyncClient. Per-request timeout is passed at call time."""
     global _http_client
     if _http_client is None or _http_client.is_closed:
         from src.tls_overrides import llm_verify
+
         _http_client = httpx.AsyncClient(
-            limits=_http_limits, http2=False, verify=llm_verify(),
+            limits=_http_limits,
+            http2=False,
+            verify=llm_verify(),
         )
     return _http_client
 
-def _get_cached_response(cache_key: str) -> Optional[str]:
+
+def _get_cached_response(cache_key: str) -> str | None:
     """Get cached response if it exists."""
     return _response_cache.get(cache_key)
+
 
 def _set_cached_response(cache_key: str, response: str) -> None:
     """Store response in cache."""
@@ -274,12 +293,20 @@ def _set_cached_response(cache_key: str, response: str) -> None:
             _response_cache.pop(key, None)
     _response_cache[cache_key] = response
 
+
 # ── Anthropic native API adapter ──
 
 ANTHROPIC_MODELS = [
-    "claude-opus-4-20250514", "claude-opus-4",
-    "claude-sonnet-4-20250514", "claude-sonnet-4", "claude-sonnet-4-5-20250929", "claude-sonnet-4-5",
-    "claude-haiku-4-20250514", "claude-haiku-4", "claude-haiku-3-5-20241022", "claude-haiku-3-5",
+    "claude-opus-4-20250514",
+    "claude-opus-4",
+    "claude-sonnet-4-20250514",
+    "claude-sonnet-4",
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-20250514",
+    "claude-haiku-4",
+    "claude-haiku-3-5-20241022",
+    "claude-haiku-3-5",
 ]
 
 
@@ -345,52 +372,110 @@ def _normalize_ollama_url(url: str) -> str:
     return base.rstrip("/") + "/chat"
 
 
-def _ollama_normalize_tool_messages(messages: List[Dict]) -> List[Dict]:
+def _ollama_normalize_messages(messages: list[dict]) -> list[dict]:
     """Adapt Odysseus' canonical OpenAI-style messages to native Ollama /api/chat.
 
-    Odysseus carries assistant tool calls in the OpenAI shape, where
-    `function.arguments` is a JSON *string*. Native Ollama expects it to be a
-    JSON *object*; given the string it fails the whole request with HTTP 400
-    "Value looks like object, but can't find closing '}' symbol", which aborts
-    every follow-up (tool-result) round. Parse the arguments back into an object
-    here, on a shallow copy, leaving non-tool messages untouched. The opaque
-    Gemini `extra_content` (thought_signature) is dropped — it is meaningless to
-    Ollama and only matters when the conversation is replayed to Gemini.
+    Two shape mismatches silently break requests:
+
+    1. Tool calls: Odysseus carries `function.arguments` as a JSON *string*.
+       Native Ollama expects a JSON *object* and rejects the string form with
+       HTTP 400 ("Value looks like object, but can't find closing '}' symbol"),
+       aborting every follow-up (tool-result) round. Parse the arguments back
+       into an object here, on a shallow copy, leaving non-tool messages
+       untouched. The opaque Gemini `extra_content` (thought_signature) is
+       dropped — it is meaningless to Ollama and only matters when the
+       conversation is replayed to Gemini.
+
+    2. Images (issue #4723): Odysseus carries multimodal user content as an
+       OpenAI-style list ``[{type: "text", ...}, {type: "image_url",
+       image_url: {url: "data:image/...;base64,XXX"}}, ...]``. Native Ollama
+       does not accept a list for ``content`` — it wants ``content`` as a
+       string plus a separate ``images`` array of raw base64 strings (no
+       ``data:`` prefix). Without this conversion the image blocks pass
+       through untouched, the vision-capable model never sees the picture,
+       and the user gets "I can't see any image" even though the request
+       succeeded.
     """
-    out: List[Dict] = []
+    out: list[dict] = []
     for m in messages or []:
-        tcs = m.get("tool_calls") if isinstance(m, dict) else None
-        if not tcs:
+        if not isinstance(m, dict):
             out.append(m)
             continue
-        new_calls = []
-        for tc in tcs:
-            fn = tc.get("function") or {}
-            args = fn.get("arguments")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args) if args.strip() else {}
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-            call: Dict = {"function": {"name": fn.get("name", ""), "arguments": args or {}}}
-            if tc.get("id"):
-                call["id"] = tc["id"]
-            new_calls.append(call)
+
         nm = dict(m)
-        nm["tool_calls"] = new_calls
+
+        # 1. Tool-call argument strings -> objects.
+        tcs = nm.get("tool_calls")
+        if tcs:
+            new_calls = []
+            for tc in tcs:
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args) if args.strip() else {}
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                call: dict = {"function": {"name": fn.get("name", ""), "arguments": args or {}}}
+                if tc.get("id"):
+                    call["id"] = tc["id"]
+                new_calls.append(call)
+            nm["tool_calls"] = new_calls
+
+        # 2. Multimodal content list -> native content string + images array.
+        content = nm.get("content")
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            images: list[str] = list(nm.get("images") or [])
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    t = block.get("text")
+                    if t:
+                        text_parts.append(str(t))
+                elif btype == "image_url":
+                    url = (block.get("image_url") or {}).get("url", "")
+                    if not url:
+                        continue
+                    if url.startswith("data:"):
+                        # Strip the ``data:[...];base64,`` prefix — native
+                        # Ollama wants only the base64 bytes.
+                        _, _, b64 = url.partition(",")
+                        if b64:
+                            images.append(b64)
+                    else:
+                        # Native Ollama images[] is base64-only; it does
+                        # not fetch HTTP URLs.  Skip unsupported schemes
+                        # rather than sending a non-base64 string that the
+                        # model silently ignores.
+                        logger.warning(
+                            "Skipping non-data image_url (Ollama images[] requires base64): %s",
+                            url[:80],
+                        )
+            nm["content"] = "\n".join(text_parts).strip()
+            if images:
+                nm["images"] = images
+
         out.append(nm)
     return out
 
 
+# Backward-compatible alias for callers/tests that imported the older name
+# (it only handled tool messages originally — issue #4723 broadened scope).
+_ollama_normalize_tool_messages = _ollama_normalize_messages
+
+
 def _build_ollama_payload(
     model: str,
-    messages: List[Dict],
+    messages: list[dict],
     temperature: float,
     max_tokens: int,
     stream: bool = False,
-    tools: Optional[List[Dict]] = None,
-    num_ctx: Optional[int] = None,
-) -> Dict:
+    tools: list[dict] | None = None,
+    num_ctx: int | None = None,
+) -> dict:
     """Build the JSON payload for Ollama's /api/chat endpoint.
 
     ``num_ctx`` sets the input context window. Ollama defaults to 2048
@@ -402,12 +487,12 @@ def _build_ollama_payload(
     don't guess for unknown models but do tell Ollama the real window
     when we know it — even if it's smaller than 2048.
     """
-    payload: Dict = {
+    payload: dict = {
         "model": model,
-        "messages": _ollama_normalize_tool_messages(messages),
+        "messages": _ollama_normalize_messages(messages),
         "stream": stream,
     }
-    options: Dict = {}
+    options: dict = {}
     if temperature is not None:
         options["temperature"] = temperature
     if max_tokens and max_tokens > 0:
@@ -487,11 +572,7 @@ def _is_kimi_code_access_denied(status: int, body: bytes | str) -> bool:
         return False
     text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else (body or "")
     lower = text.lower()
-    return (
-        "access_terminated_error" in lower
-        or "coding agents" in lower
-        or "only available for coding" in lower
-    )
+    return "access_terminated_error" in lower or "coding agents" in lower or "only available for coding" in lower
 
 
 def _kimi_code_ua_candidates(url: str) -> list[str]:
@@ -508,7 +589,7 @@ def _remember_kimi_code_user_agent(url: str, user_agent: str) -> None:
     _kimi_code_ua_cache[_kimi_code_base_key(url)] = user_agent
 
 
-def apply_kimi_code_headers(headers: Optional[Dict], url: str) -> Dict[str, str]:
+def apply_kimi_code_headers(headers: dict | None, url: str) -> dict[str, str]:
     """Pick a Kimi Code User-Agent (cached probe when possible)."""
     h = dict(headers or {})
     if not _is_kimi_code_url(url):
@@ -520,6 +601,7 @@ def apply_kimi_code_headers(headers: Optional[Dict], url: str) -> Dict[str, str]
         return h
     models_url = base_key.rstrip("/") + "/models"
     from src.tls_overrides import llm_verify
+
     for ua in KIMI_CODE_USER_AGENTS:
         trial = dict(h)
         trial["User-Agent"] = ua
@@ -539,7 +621,7 @@ def apply_kimi_code_headers(headers: Optional[Dict], url: str) -> Dict[str, str]
     return h
 
 
-def httpx_get_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
+def httpx_get_kimi_aware(url: str, headers: dict | None, **kwargs):
     h = apply_kimi_code_headers(headers, url)
     if not _is_kimi_code_url(url):
         return httpx.get(url, headers=h, **kwargs)
@@ -555,7 +637,7 @@ def httpx_get_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
     return last
 
 
-def httpx_post_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
+def httpx_post_kimi_aware(url: str, headers: dict | None, **kwargs):
     h = apply_kimi_code_headers(headers, url)
     if not _is_kimi_code_url(url):
         return httpx.post(url, headers=h, **kwargs)
@@ -571,7 +653,7 @@ def httpx_post_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
     return last
 
 
-async def httpx_post_kimi_aware_async(client, url: str, headers: Optional[Dict], **kwargs):
+async def httpx_post_kimi_aware_async(client, url: str, headers: dict | None, **kwargs):
     h = apply_kimi_code_headers(headers, url)
     if not _is_kimi_code_url(url):
         return await client.post(url, headers=h, **kwargs)
@@ -613,11 +695,15 @@ def _detect_provider(url: str) -> str:
     if _host_match(url, "moonshot.ai") or _host_match(url, "moonshot.cn"):
         return "moonshot"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
+
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
     from src.copilot import is_copilot_base
+
     if is_copilot_base(url):
         return "copilot"
+    if _host_match(url, "mistral.ai"):
+        return "mistral"
     return "openai"
 
 
@@ -641,10 +727,11 @@ def _is_self_hosted_openai_compatible(url: str) -> bool:
     if _detect_provider(url) != "openai" or _host_match(url, "openai.com"):
         return False
     from src.model_context import is_local_endpoint
+
     return is_local_endpoint(url)
 
 
-def _apply_local_cache_affinity(payload: Dict, url: str, session_id: Optional[str]) -> None:
+def _apply_local_cache_affinity(payload: dict, url: str, session_id: str | None) -> None:
     """Add llama.cpp-server slot-affinity hints to an outgoing payload, in place.
 
     As diagnosed in issue #2927, llama.cpp assigns requests to processing
@@ -668,7 +755,7 @@ def _apply_local_cache_affinity(payload: Dict, url: str, session_id: Optional[st
     payload.setdefault("cache_prompt", True)
 
 
-def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str, str]:
+def _provider_headers(provider: str, headers: dict | None = None) -> dict[str, str]:
     h = {"Content-Type": "application/json"}
     if isinstance(headers, dict):
         h.update(headers)
@@ -681,6 +768,7 @@ def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str
         # already injects these for the live chat path; setdefault keeps any
         # request-specific values (x-initiator/vision) the caller set.
         from src.copilot import copilot_headers
+
         for k, v in copilot_headers(None).items():
             h.setdefault(k, v)
     return h
@@ -690,36 +778,62 @@ def _provider_label(url: str) -> str:
     """Human-friendly provider name for error messages."""
     if not url:
         return "provider"
-    if _host_match(url, "anthropic.com"): return "Anthropic"
-    if _host_match(url, "ollama.com"): return "Ollama Cloud"
-    if _host_match(url, "x.ai"): return "xAI"
-    if _host_match(url, "openai.com"): return "OpenAI"
-    if _host_match(url, "openrouter.ai"): return "OpenRouter"
-    if _host_match(url, "opencode.ai/zen/go"): return "OpenCode Go"
-    if _host_match(url, "opencode.ai/zen"): return "OpenCode Zen"
-    if _host_match(url, "groq.com"): return "Groq"
+    if _host_match(url, "anthropic.com"):
+        return "Anthropic"
+    if _host_match(url, "ollama.com"):
+        return "Ollama Cloud"
+    if _host_match(url, "x.ai"):
+        return "xAI"
+    if _host_match(url, "openai.com"):
+        return "OpenAI"
+    if _host_match(url, "openrouter.ai"):
+        return "OpenRouter"
+    if _host_match(url, "opencode.ai/zen/go"):
+        return "OpenCode Go"
+    if _host_match(url, "opencode.ai/zen"):
+        return "OpenCode Zen"
+    if _host_match(url, "groq.com"):
+        return "Groq"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
-    if is_chatgpt_subscription_base(url): return "ChatGPT Subscription"
+
+    if is_chatgpt_subscription_base(url):
+        return "ChatGPT Subscription"
     from src.copilot import is_copilot_base
-    if is_copilot_base(url): return "GitHub Copilot"
-    if _host_match(url, "mistral.ai"): return "Mistral"
-    if _host_match(url, "deepseek.com"): return "DeepSeek"
-    if _host_match(url, "nvidia.com"): return "NVIDIA"
-    if _host_match(url, "googleapis.com"): return "Google"
-    if _host_match(url, "together.xyz", "together.ai"): return "Together"
-    if _host_match(url, "fireworks.ai"): return "Fireworks"
+
+    if is_copilot_base(url):
+        return "GitHub Copilot"
+    if _host_match(url, "mistral.ai"):
+        return "Mistral"
+    if _host_match(url, "deepseek.com"):
+        return "DeepSeek"
+    if _host_match(url, "nvidia.com"):
+        return "NVIDIA"
+    if _host_match(url, "googleapis.com"):
+        return "Google"
+    if _host_match(url, "together.xyz", "together.ai"):
+        return "Together"
+    if _host_match(url, "fireworks.ai"):
+        return "Fireworks"
     if _host_match(url, "kimi.com"):
         try:
             if "/coding" in (urlparse(url).path or ""):
                 return "Kimi Code"
         except Exception:
             pass
-    if _is_ollama_native_url(url): return "Ollama"
+    if _is_ollama_native_url(url):
+        return "Ollama"
     try:
-        host = (urlparse(url).hostname or "").lower()
+        _parsed_local = urlparse(url)
+        host = (_parsed_local.hostname or "").lower()
+        port = _parsed_local.port
     except Exception:
         return "provider"
     if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        # A port alone is not authoritative: vLLM, SGLang, llama.cpp and plain
+        # OpenAI-compatible servers all routinely share 8000/8080, so naming the
+        # serving tool from the port here would mislabel real setups. The tool is
+        # identified by probing llama-server's native /props endpoint during
+        # discovery (see ModelDiscovery._fingerprint_provider); this stays neutral.
         return "local endpoint"
     return host or "provider"
 
@@ -750,7 +864,7 @@ def _message_content_as_text(content) -> str:
     return "" if content is None else str(content)
 
 
-def _chatgpt_subscription_instructions(messages: List[Dict]) -> str:
+def _chatgpt_subscription_instructions(messages: list[dict]) -> str:
     instructions = [
         _message_content_as_text(msg.get("content")).strip()
         for msg in messages or []
@@ -764,16 +878,16 @@ def _chatgpt_subscription_instructions(messages: List[Dict]) -> str:
 
 def _build_chatgpt_responses_payload(
     model: str,
-    messages: List[Dict],
+    messages: list[dict],
     temperature: float,
     max_tokens: int,
     *,
     stream: bool = False,
-) -> Dict:
+) -> dict:
     from src.chatgpt_subscription import build_responses_input
 
     conversation = [msg for msg in (messages or []) if (msg.get("role") or "") != "system"]
-    payload: Dict = {
+    payload: dict = {
         "model": model,
         "instructions": _chatgpt_subscription_instructions(messages),
         "input": build_responses_input(conversation),
@@ -827,7 +941,7 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
             msg = f"{provider} denied access (403)"
         if detail:
             msg += f" — {detail}"
-        msg += ". Check Model Endpoints → {} and re-paste the key.".format(provider)
+        msg += f". Check Model Endpoints → {provider} and re-paste the key."
         return msg
     if status == 404:
         return f"{provider} returned 404 — check the base URL and model name." + (f" ({detail})" if detail else "")
@@ -837,8 +951,10 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
         return f"{provider} is having an outage (HTTP {status})." + (f" {detail}" if detail else "")
     return f"{provider} returned HTTP {status}" + (f": {detail}" if detail else "")
 
+
 # Models that require max_completion_tokens instead of max_tokens
 _MAX_COMPLETION_TOKENS_MODELS = {"o1", "o3", "o4", "gpt-4.5", "gpt-5"}
+
 
 def _uses_max_completion_tokens(model: str) -> bool:
     """Check if a model requires max_completion_tokens instead of max_tokens."""
@@ -846,6 +962,7 @@ def _uses_max_completion_tokens(model: str) -> bool:
         return False
     m = model.lower()
     return any(m.startswith(p) or f"/{p}" in m for p in _MAX_COMPLETION_TOKENS_MODELS)
+
 
 # OpenAI reasoning models (o1, o3, o4, gpt-5 families) only accept the default
 # temperature. Sending any explicit value — even 0.0 — returns HTTP 400
@@ -855,6 +972,7 @@ def _uses_max_completion_tokens(model: str) -> bool:
 # the API use its required default. (gpt-4.5 is intentionally excluded — it is
 # not a reasoning model and accepts temperature normally.)
 _FIXED_TEMPERATURE_MODELS = ("o1", "o3", "o4", "gpt-5", "kimi-for-coding")
+
 
 def _restricts_temperature(model: str) -> bool:
     """Check if a model rejects any non-default temperature."""
@@ -880,9 +998,7 @@ def _moonshot_rejects_custom_temperature(provider: str, model: str) -> bool:
 
 def _omit_temperature(provider: str, model: str) -> bool:
     """Check if a request should use the provider's default temperature."""
-    return _restricts_temperature(model) or _moonshot_rejects_custom_temperature(
-        provider, model
-    )
+    return _restricts_temperature(model) or _moonshot_rejects_custom_temperature(provider, model)
 
 
 # Anthropic removed the sampling parameters (temperature, top_p, top_k) starting
@@ -906,11 +1022,30 @@ def _anthropic_rejects_temperature(model: str) -> bool:
         return False
     return (int(match.group(1)), int(match.group(2))) >= (4, 7)
 
+
+# Reasoning effort level sent to Mistral thinking-capable models. Mistral's
+# API accepts "high", "medium", "low", "none" — see
+# https://docs.mistral.ai/capabilities/reasoning/. Override via env var
+# ODYSSEUS_MISTRAL_REASONING_EFFORT (e.g. set to "medium" for cheaper chat).
+_MISTRAL_REASONING_EFFORT = os.getenv("ODYSSEUS_MISTRAL_REASONING_EFFORT", "high")
+
 # Models that support structured thinking — may output </think> without opening tag
 _THINKING_MODEL_PATTERNS = (
-    "qwen3", "qwq", "deepseek-r1", "deepseek-reasoner", "minimax",
-    "m2-reap", "gemma", "stepfun", "step-3", "step3",
+    "qwen3",
+    "qwq",
+    "deepseek-r1",
+    "deepseek-reasoner",
+    "minimax",
+    "m2-reap",
+    "gemma",
+    "stepfun",
+    "step-3",
+    "step3",
+    "magistral",
+    "mistral-small",
+    "mistral-medium",
 )
+
 
 def _supports_thinking(model: str) -> bool:
     """Check if model supports structured thinking output."""
@@ -918,6 +1053,39 @@ def _supports_thinking(model: str) -> bool:
         return False
     m = model.lower()
     return any(p in m for p in _THINKING_MODEL_PATTERNS)
+
+
+def _normalize_mistral_content(content):
+    """Mistral returns content as a structured array when reasoning is on:
+        [{"type": "thinking", "thinking": [{"type": "text", "text": "..."}], "closed": true},
+         {"type": "text", "text": "...final answer..."}]
+    Convert to (text, thinking) tuple of plain strings. Pass through strings
+    unchanged so non-Mistral OpenAI-compat endpoints are unaffected.
+    """
+    if isinstance(content, str):
+        return content, ""
+    if not isinstance(content, list):
+        return "", ""
+    text_parts = []
+    thinking_parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            t = block.get("text", "")
+            if t:
+                text_parts.append(t)
+        elif btype == "thinking":
+            inner = block.get("thinking", [])
+            if isinstance(inner, list):
+                for tb in inner:
+                    if isinstance(tb, dict) and tb.get("text"):
+                        thinking_parts.append(tb["text"])
+            elif isinstance(inner, str):
+                thinking_parts.append(inner)
+    return "".join(text_parts), "".join(thinking_parts)
+
 
 def _convert_openai_content_to_anthropic(content):
     """Convert OpenAI multimodal content blocks to Anthropic format.
@@ -941,20 +1109,24 @@ def _convert_openai_content_to_anthropic(content):
                     media_type = header.split(";")[0].replace("data:", "")
                 except (ValueError, IndexError):
                     continue
-                converted.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": b64_data,
-                    },
-                })
+                converted.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64_data,
+                        },
+                    }
+                )
             else:
                 # External URL — use Anthropic's URL source
-                converted.append({
-                    "type": "image",
-                    "source": {"type": "url", "url": url},
-                })
+                converted.append(
+                    {
+                        "type": "image",
+                        "source": {"type": "url", "url": url},
+                    }
+                )
         elif block.get("type") == "text":
             converted.append(block)
         else:
@@ -971,14 +1143,18 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
             system_parts.append(m.get("content") or "")
         elif m.get("role") == "tool":
             # Convert OpenAI tool result to Anthropic format
-            chat_messages.append({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": m.get("tool_call_id", ""),
-                    "content": m.get("content", ""),
-                }],
-            })
+            chat_messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": m.get("tool_call_id", ""),
+                            "content": m.get("content", ""),
+                        }
+                    ],
+                }
+            )
         elif m.get("role") == "assistant" and isinstance(m.get("tool_calls"), list):
             # Convert OpenAI assistant tool_calls to Anthropic format
             content = []
@@ -991,12 +1167,14 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
                     args = json.loads(args_str) if isinstance(args_str, str) else args_str
                 except (json.JSONDecodeError, TypeError):
                     args = {}
-                content.append({
-                    "type": "tool_use",
-                    "id": tc.get("id", ""),
-                    "name": fn.get("name", ""),
-                    "input": args,
-                })
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "input": args,
+                    }
+                )
             chat_messages.append({"role": "assistant", "content": content})
         else:
             # Convert multimodal content (image_url → image) for Anthropic
@@ -1037,17 +1215,20 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
         for t in tools:
             if t.get("type") == "function":
                 fn = t["function"]
-                anthropic_tools.append({
-                    "name": fn["name"],
-                    "description": fn.get("description", ""),
-                    "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
-                })
+                anthropic_tools.append(
+                    {
+                        "name": fn["name"],
+                        "description": fn.get("description", ""),
+                        "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+                    }
+                )
         if anthropic_tools:
             # Cache the tool schemas too — they're stable for the whole agent run.
             # The breakpoint caches all tool defs preceding it in the request.
             anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
             payload["tools"] = anthropic_tools
     return payload
+
 
 def _build_anthropic_headers(headers):
     """Convert Bearer auth to x-api-key for Anthropic."""
@@ -1059,6 +1240,7 @@ def _build_anthropic_headers(headers):
             else:
                 h[k] = v
     return h
+
 
 def _parse_anthropic_response(data: dict) -> str:
     """Extract text from an Anthropic response.
@@ -1075,7 +1257,7 @@ def _parse_anthropic_response(data: dict) -> str:
     )
 
 
-def _as_content_blocks(content) -> List[Dict]:
+def _as_content_blocks(content) -> list[dict]:
     """Coerce a message `content` into a list of content blocks.
 
     A list (multimodal: text + image parts) passes through; a non-empty string
@@ -1089,7 +1271,7 @@ def _as_content_blocks(content) -> List[Dict]:
     return []
 
 
-def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
+def _sanitize_llm_messages(messages: list[dict]) -> list[dict]:
     """Strip Odysseus-only metadata before sending messages to providers.
 
     Per the OpenAI chat format: user/system messages must have content; a tool
@@ -1130,7 +1312,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
     # "Messages with role 'tool' must be a response to a preceding message with
     # 'tool_calls'". Also strip unanswered assistant tool_calls; some providers
     # reject those as incomplete conversations.
-    repaired: List[Dict] = []
+    repaired: list[dict] = []
     i = 0
     while i < len(cleaned):
         msg = cleaned[i]
@@ -1149,11 +1331,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
             i += 1
             continue
 
-        call_ids = [
-            str(tc.get("id"))
-            for tc in tool_calls
-            if isinstance(tc, dict) and tc.get("id")
-        ]
+        call_ids = [str(tc.get("id")) for tc in tool_calls if isinstance(tc, dict) and tc.get("id")]
         expected = set(call_ids)
         answered_ids = []
         tool_batch = []
@@ -1177,10 +1355,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
             continue
 
         answered = set(answered_ids)
-        pruned_calls = [
-            tc for tc in tool_calls
-            if isinstance(tc, dict) and str(tc.get("id")) in answered
-        ]
+        pruned_calls = [tc for tc in tool_calls if isinstance(tc, dict) and str(tc.get("id")) in answered]
         fixed = dict(msg)
         fixed["tool_calls"] = pruned_calls
         if "content" not in fixed:
@@ -1193,7 +1368,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
 
     # Merge consecutive user messages to satisfy strict role alternation
     # requirements after invalid tool-call fragments have been removed.
-    merged: List[Dict] = []
+    merged: list[dict] = []
     for item in repaired:
         if not merged:
             merged.append(item)
@@ -1227,6 +1402,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
 
     return merged
 
+
 def _normalize_anthropic_url(url: str) -> str:
     """Ensure Anthropic URL points to /v1/messages."""
     url = url.rstrip("/")
@@ -1249,7 +1425,7 @@ def _model_list_base(url: str) -> str:
     return base
 
 
-def _parse_model_cache(raw) -> List[str]:
+def _parse_model_cache(raw) -> list[str]:
     if not raw:
         return []
     try:
@@ -1272,15 +1448,15 @@ def _parse_model_cache(raw) -> List[str]:
 def _configured_cached_model_ids(
     endpoint_url: str,
     *,
-    owner: Optional[str] = None,
-    endpoint_id: Optional[str] = None,
-) -> List[str]:
+    owner: str | None = None,
+    endpoint_id: str | None = None,
+) -> list[str]:
     """Return cached models for a configured endpoint matching endpoint_url."""
     target = _model_list_base(endpoint_url)
     if not target:
         return []
     try:
-        from src.database import SessionLocal, ModelEndpoint
+        from src.database import ModelEndpoint, SessionLocal
     except Exception:
         return []
     db = SessionLocal()
@@ -1290,6 +1466,7 @@ def _configured_cached_model_ids(
             q = q.filter(ModelEndpoint.id == endpoint_id)
         if owner:
             from src.auth_helpers import owner_filter
+
             q = owner_filter(q, ModelEndpoint, owner)
         rows = q.all()
         for ep in rows:
@@ -1313,11 +1490,11 @@ def _configured_cached_model_ids(
 def list_model_ids(
     base_chat_url: str,
     timeout: int = LLMConfig.DEFAULT_TIMEOUT,
-    headers: Optional[Dict] = None,
+    headers: dict | None = None,
     *,
-    owner: Optional[str] = None,
-    endpoint_id: Optional[str] = None,
-) -> List[str]:
+    owner: str | None = None,
+    endpoint_id: str | None = None,
+) -> list[str]:
     """List available model IDs from an endpoint."""
     cached = _configured_cached_model_ids(base_chat_url, owner=owner, endpoint_id=endpoint_id)
     if cached:
@@ -1341,9 +1518,7 @@ def list_model_ids(
         model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
         if not model_ids:
             model_ids = [
-                m.get("name") or m.get("model")
-                for m in (data.get("models") or [])
-                if m.get("name") or m.get("model")
+                m.get("name") or m.get("model") for m in (data.get("models") or []) if m.get("name") or m.get("model")
             ]
         return model_ids
     except Exception:
@@ -1352,19 +1527,24 @@ def list_model_ids(
                 root = base_chat_url.replace("/v1/chat/completions", "").replace("/chat/completions", "").rstrip("/")
                 r = httpx.get(root + "/api/tags", timeout=timeout)
                 r.raise_for_status()
-                return [m.get("name") or m.get("model") for m in (r.json().get("models") or []) if m.get("name") or m.get("model")]
+                return [
+                    m.get("name") or m.get("model")
+                    for m in (r.json().get("models") or [])
+                    if m.get("name") or m.get("model")
+                ]
         except Exception as e:
             logger.warning("Failed to fetch model list from configured endpoint", exc_info=e)
         return []
+
 
 def normalize_model_id(
     endpoint_url: str,
     requested: str,
     timeout: int = LLMConfig.DEFAULT_TIMEOUT,
     *,
-    owner: Optional[str] = None,
-    endpoint_id: Optional[str] = None,
-) -> Optional[str]:
+    owner: str | None = None,
+    endpoint_id: str | None = None,
+) -> str | None:
     """Normalize a model ID to match available models."""
     avail = list_model_ids(endpoint_url, timeout, owner=owner, endpoint_id=endpoint_id)
     if not avail:
@@ -1372,15 +1552,24 @@ def normalize_model_id(
     if requested in avail:
         return requested
     import os as _os
+
     req_base = _os.path.basename(requested.rstrip("/"))
     for a in avail:
         if _os.path.basename(a.rstrip("/")) == req_base:
             return a
     return None
 
-def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
+
+def llm_call(
+    url: str,
+    model: str,
+    messages: list[dict],
+    temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+    max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS,
+    headers: dict | None = None,
+    timeout: int = LLMConfig.DEFAULT_TIMEOUT,
+    prompt_type: str | None = None,
+) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
@@ -1401,7 +1590,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     non_sys = []
     for m in messages_copy:
         if m.get("role") == "system":
-            sys_parts.append(m.get('content') or '')
+            sys_parts.append(m.get("content") or "")
         else:
             non_sys.append(m)
     if sys_parts:
@@ -1423,13 +1612,18 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     elif provider == "ollama":
         target_url = _normalize_ollama_url(url)
         payload = _build_ollama_payload(
-            model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            model,
+            messages_copy,
+            temperature,
+            max_tokens,
+            stream=False,
+            num_ctx=get_context_length(url, model),
         )
     else:
         target_url = url
         if provider == "copilot":
             from src.copilot import apply_request_headers
+
             apply_request_headers(h, messages_copy)
         payload = {
             "model": model,
@@ -1441,6 +1635,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        if provider == "mistral" and _supports_thinking(model):
+            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
     try:
         note_model_activity(target_url, model)
         r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
@@ -1456,7 +1652,16 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             response = _parse_ollama_response(data)
         else:
             msg = data["choices"][0]["message"]
-            response = msg.get("content") or msg.get("reasoning_content") or ""
+            content = msg.get("content")
+            if isinstance(content, list):
+                # Mistral structured content — extract thinking + text
+                text_part, thinking_part = _normalize_mistral_content(content)
+                if thinking_part:
+                    response = thinking_part + "\n\n" + (text_part or "")
+                else:
+                    response = text_part or msg.get("reasoning_content") or ""
+            else:
+                response = content or msg.get("reasoning_content") or ""
         _set_cached_response(cache_key, response)
         return response
     except Exception:
@@ -1531,14 +1736,14 @@ async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
 async def llm_call_async(
     url: str,
     model: str,
-    messages: List[Dict],
+    messages: list[dict],
     temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
     max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS,
-    headers: Optional[Dict] = None,
+    headers: dict | None = None,
     timeout: int = LLMConfig.STREAM_TIMEOUT,
     max_retries: int = LLMConfig.MAX_RETRIES,
-    prompt_type: Optional[str] = None,
-    session_id: Optional[str] = None,
+    prompt_type: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
@@ -1549,7 +1754,7 @@ async def llm_call_async(
     non_sys = []
     for m in messages_copy:
         if m.get("role") == "system":
-            sys_parts.append(m.get('content') or '')
+            sys_parts.append(m.get("content") or "")
         else:
             non_sys.append(m)
     if sys_parts:
@@ -1567,7 +1772,7 @@ async def llm_call_async(
         # ChatGPT/Codex requires streamed Responses requests even for callers
         # that want a plain string (auto-title, memory extraction, etc.).
         # Reuse stream_llm's validated Codex SSE path and collect deltas.
-        parts: List[str] = []
+        parts: list[str] = []
         async for chunk in stream_llm(
             url,
             model,
@@ -1616,14 +1821,19 @@ async def llm_call_async(
         if headers:
             h.update(headers)
         payload = _build_ollama_payload(
-            model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            model,
+            messages_copy,
+            temperature,
+            max_tokens,
+            stream=False,
+            num_ctx=get_context_length(url, model),
         )
     else:
         target_url = url
         h = _provider_headers(provider, headers)
         if provider == "copilot":
             from src.copilot import apply_request_headers
+
             apply_request_headers(h, messages_copy)
         payload = {
             "model": model,
@@ -1638,6 +1848,8 @@ async def llm_call_async(
         # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
+        if provider == "mistral" and _supports_thinking(model):
+            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
         _apply_local_cache_affinity(payload, url, session_id)
 
     if _is_host_dead(target_url):
@@ -1693,10 +1905,20 @@ async def llm_call_async(
                 raise HTTPException(502, f"POST {target_url} failed after {max_retries} attempts: {e}")
             await asyncio.sleep(LLMConfig.RETRY_DELAY)
 
-async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-                     max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
-                     timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None):
+
+@observe()
+async def stream_llm(
+    url: str,
+    model: str,
+    messages: list[dict],
+    temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+    max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS,
+    headers: dict | None = None,
+    timeout: int = LLMConfig.STREAM_TIMEOUT,
+    prompt_type: str | None = None,
+    tools: list[dict] | None = None,
+    session_id: str | None = None,
+):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -1714,7 +1936,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     non_sys = []
     for m in messages_copy:
         if m.get("role") == "system":
-            sys_parts.append(m.get('content') or '')
+            sys_parts.append(m.get("content") or "")
         else:
             non_sys.append(m)
     if sys_parts:
@@ -1732,8 +1954,13 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         if headers:
             h.update(headers)
         payload = _build_ollama_payload(
-            model, messages_copy, temperature, max_tokens,
-            stream=True, tools=tools, num_ctx=get_context_length(url, model),
+            model,
+            messages_copy,
+            temperature,
+            max_tokens,
+            stream=True,
+            tools=tools,
+            num_ctx=get_context_length(url, model),
         )
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
@@ -1756,6 +1983,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             payload[tok_key] = max_tokens
         if tools:
             payload["tools"] = tools
+        # Mistral thinking-capable models — send reasoning_effort so Mistral
+        # activates thinking mode and returns structured reasoning_content.
+        # Effort level is configurable via ODYSSEUS_MISTRAL_REASONING_EFFORT
+        # (high / medium / low / none); default "high".
+        if provider == "mistral" and _supports_thinking(model):
+            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
         # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
         # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
         # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
@@ -1765,6 +1998,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         h = _provider_headers(provider, headers)
         if provider == "copilot":
             from src.copilot import apply_request_headers
+
             apply_request_headers(h, messages_copy)
 
     # Connect budget from LLMConfig.CONNECT_TIMEOUT (env LLM_CONNECT_TIMEOUT).
@@ -1775,7 +2009,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     stream_timeout = _stream_timeout(timeout)
 
     if _is_host_dead(target_url):
-        yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
+        yield f"event: error\ndata: {json.dumps({'error': f'Upstream {_host_key(target_url)} unreachable (cooldown active)', 'status': 503})}\n\n"
         return
     note_model_activity(target_url, model)
 
@@ -1786,12 +2020,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         output_tokens = 0
         try:
             client = _get_http_client()
-            async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+            async with client.stream("POST", target_url, json=payload, headers=h, timeout=stream_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_chatgpt_subscription_error(r.status_code, raw)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f"event: error\ndata: {json.dumps({'status': r.status_code, 'text': friendly, 'raw': raw[:500]})}\n\n"
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -1812,47 +2046,51 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     if evt == "response.output_text.delta":
                         delta = data.get("delta") or ""
                         if delta:
-                            yield f'data: {json.dumps({"delta": delta})}\n\n'
+                            yield f"data: {json.dumps({'delta': delta})}\n\n"
                     elif evt == "response.completed":
                         usage = (data.get("response") or {}).get("usage") or data.get("usage") or {}
                         input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
                         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
                         if input_tokens or output_tokens:
-                            yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": input_tokens, "output_tokens": output_tokens}})}\n\n'
+                            yield f"data: {json.dumps({'type': 'usage', 'data': {'input_tokens': input_tokens, 'output_tokens': output_tokens}})}\n\n"
                         yield "data: [DONE]\n\n"
                         return
                     elif evt in ("response.failed", "error"):
                         err = data.get("error") or (data.get("response") or {}).get("error") or {}
-                        text = err.get("message") if isinstance(err, dict) else str(err or "ChatGPT Subscription request failed")
-                        yield f'event: error\ndata: {json.dumps({"status": 502, "text": text})}\n\n'
+                        text = (
+                            err.get("message")
+                            if isinstance(err, dict)
+                            else str(err or "ChatGPT Subscription request failed")
+                        )
+                        yield f"event: error\ndata: {json.dumps({'status': 502, 'text': text})}\n\n"
                         return
                 yield "data: [DONE]\n\n"
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"ChatGPT Subscription stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': f'Cannot reach {_host_key(target_url)}', 'status': 503})}\n\n"
         except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': 'Read timeout', 'status': 504})}\n\n"
         except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': 'Network error', 'status': 502})}\n\n"
         except Exception as e:
             logger.error(f"ChatGPT Subscription stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': str(e), 'status': 502})}\n\n"
         return
 
     # ── Native Ollama streaming ──
     if provider == "ollama":
-        _ollama_tool_calls: List[Dict] = []
+        _ollama_tool_calls: list[dict] = []
         _harmony_router = _HarmonyStreamRouter()
         try:
             client = _get_http_client()
-            async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+            async with client.stream("POST", target_url, json=payload, headers=h, timeout=stream_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f"event: error\ndata: {json.dumps({'status': r.status_code, 'text': friendly, 'raw': raw[:500]})}\n\n"
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -1872,18 +2110,20 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     for tc in message.get("tool_calls") or []:
                         fn = tc.get("function") or {}
                         if fn.get("name"):
-                            _ollama_tool_calls.append({
-                                "id": tc.get("id") or f"call_{len(_ollama_tool_calls)}",
-                                "name": fn.get("name") or "",
-                                "arguments": json.dumps(fn.get("arguments") or {}),
-                            })
+                            _ollama_tool_calls.append(
+                                {
+                                    "id": tc.get("id") or f"call_{len(_ollama_tool_calls)}",
+                                    "name": fn.get("name") or "",
+                                    "arguments": json.dumps(fn.get("arguments") or {}),
+                                }
+                            )
                     if j.get("done"):
                         for part, is_thinking in _harmony_router.flush():
                             yield _stream_delta_event(part, thinking=is_thinking)
                         if _ollama_tool_calls:
-                            yield f'data: {json.dumps({"type": "tool_calls", "calls": _ollama_tool_calls})}\n\n'
+                            yield f"data: {json.dumps({'type': 'tool_calls', 'calls': _ollama_tool_calls})}\n\n"
                         if j.get("prompt_eval_count") is not None or j.get("eval_count") is not None:
-                            yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": j.get("prompt_eval_count", 0), "output_tokens": j.get("eval_count", 0)}})}\n\n'
+                            yield f"data: {json.dumps({'type': 'usage', 'data': {'input_tokens': j.get('prompt_eval_count', 0), 'output_tokens': j.get('eval_count', 0)}})}\n\n"
                         yield "data: [DONE]\n\n"
                         return
                 for part, is_thinking in _harmony_router.flush():
@@ -1893,14 +2133,14 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"Ollama stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': f'Cannot reach {_host_key(target_url)}', 'status': 503})}\n\n"
         except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': 'Read timeout', 'status': 504})}\n\n"
         except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': 'Network error', 'status': 502})}\n\n"
         except Exception as e:
             logger.error(f"Ollama stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': str(e), 'status': 502})}\n\n"
         return
 
     # ── Anthropic streaming ──
@@ -1908,17 +2148,17 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         _anth_input_tokens = 0
         _anth_output_tokens = 0
         # Track tool_use blocks: {index: {id, name, arguments_json}}
-        _anth_tool_blocks: Dict[int, Dict] = {}
+        _anth_tool_blocks: dict[int, dict] = {}
         _anth_block_idx = -1
         _anth_block_type = ""
         try:
             client = _get_http_client()
-            async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+            async with client.stream("POST", target_url, json=payload, headers=h, timeout=stream_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f"event: error\ndata: {json.dumps({'status': r.status_code, 'text': friendly, 'raw': raw[:500]})}\n\n"
                     return
                 async for line in r.aiter_lines():
                     # SSE allows "data:value" with no space after the colon
@@ -1949,7 +2189,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                             if delta_type == "text_delta":
                                 text = delta.get("text") or ""
                                 if text:
-                                    yield f'data: {json.dumps({"delta": text})}\n\n'
+                                    yield f"data: {json.dumps({'delta': text})}\n\n"
                             elif delta_type == "input_json_delta":
                                 # Accumulate tool arguments JSON
                                 idx = j.get("index", _anth_block_idx)
@@ -1957,8 +2197,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                     partial = delta.get("partial_json") or ""
                                     _anth_tool_blocks[idx]["arguments"] += partial
                                     # Stream tool arg deltas for doc tools
-                                    if partial and _anth_tool_blocks[idx].get("name") in ("create_document", "update_document", "edit_document"):
-                                        yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _anth_tool_blocks[idx]["name"], "arg_delta": partial})}\n\n'
+                                    if partial and _anth_tool_blocks[idx].get("name") in (
+                                        "create_document",
+                                        "update_document",
+                                        "edit_document",
+                                    ):
+                                        yield f"data: {json.dumps({'type': 'tool_call_delta', 'index': idx, 'name': _anth_tool_blocks[idx]['name'], 'arg_delta': partial})}\n\n"
                         elif evt == "message_start":
                             _u = j.get("message", {}).get("usage", {})
                             _anth_input_tokens = _u.get("input_tokens", 0)
@@ -1969,7 +2213,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                             if _c_read or _c_write:
                                 logger.info(
                                     "[anthropic-cache] read=%s write=%s fresh_input=%s",
-                                    _c_read, _c_write, _anth_input_tokens,
+                                    _c_read,
+                                    _c_write,
+                                    _anth_input_tokens,
                                 )
                         elif evt == "message_delta":
                             _anth_output_tokens = j.get("usage", {}).get("output_tokens", 0)
@@ -1979,19 +2225,21 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                 calls = []
                                 for idx in sorted(_anth_tool_blocks):
                                     tb = _anth_tool_blocks[idx]
-                                    calls.append({
-                                        "id": tb["id"],
-                                        "name": tb["name"],
-                                        "arguments": tb["arguments"],
-                                    })
-                                yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
+                                    calls.append(
+                                        {
+                                            "id": tb["id"],
+                                            "name": tb["name"],
+                                            "arguments": tb["arguments"],
+                                        }
+                                    )
+                                yield f"data: {json.dumps({'type': 'tool_calls', 'calls': calls})}\n\n"
                             if _anth_input_tokens or _anth_output_tokens:
-                                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens}})}\n\n'
+                                yield f"data: {json.dumps({'type': 'usage', 'data': {'input_tokens': _anth_input_tokens, 'output_tokens': _anth_output_tokens}})}\n\n"
                             yield "data: [DONE]\n\n"
                             return
                         elif evt == "error":
                             err_msg = j.get("error", {}).get("message", "Unknown error")
-                            yield f'event: error\ndata: {json.dumps({"error": err_msg, "status": 400})}\n\n'
+                            yield f"event: error\ndata: {json.dumps({'error': err_msg, 'status': 400})}\n\n"
                             return
                     except json.JSONDecodeError:
                         continue
@@ -2000,28 +2248,28 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"Anthropic stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': f'Cannot reach {_host_key(target_url)}', 'status': 503})}\n\n"
         except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': 'Read timeout', 'status': 504})}\n\n"
         except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': 'Network error', 'status': 502})}\n\n"
         except Exception as e:
             logger.error(f"Anthropic stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+            yield f"event: error\ndata: {json.dumps({'error': str(e), 'status': 502})}\n\n"
         return
 
     # ── OpenAI-compatible streaming ──
     # Accumulate native tool_calls across streaming chunks
-    _tc_acc: Dict[int, Dict] = {}  # index -> {id, name, arguments}
+    _tc_acc: dict[int, dict] = {}  # index -> {id, name, arguments}
     _tc_last_idx = [-1]  # most-recently-touched slot, for providers that omit `index`
     # For thinking models: prepend <think> to first content delta so frontend
     # can detect thinking-in-progress (some models output </think> but no <think>)
     _thinking_model = _supports_thinking(model)
     _first_content_sent = False
-    _in_think_tag = False        # True while consuming <think>…</think> content
+    _in_think_tag = False  # True while consuming <think>…</think> content
     _think_open_stripped = False  # opening <think> tag already removed
     _harmony_router = _HarmonyStreamRouter()
-    _harmony_active = False       # sticky: gpt-oss harmony <|channel|> stream detected
+    _harmony_active = False  # sticky: gpt-oss harmony <|channel|> stream detected
     _actual_model = ""
     _actual_model_announced = False
 
@@ -2030,9 +2278,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         if not _tc_acc:
             return None
         calls = [_tc_acc[i] for i in sorted(_tc_acc)]
-        return f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
+        return f"data: {json.dumps({'type': 'tool_calls', 'calls': calls})}\n\n"
 
-    def _format_routed_content(parts: List[Tuple[str, bool]]) -> List[str]:
+    def _format_routed_content(parts: list[tuple[str, bool]]) -> list[str]:
         nonlocal _first_content_sent
         events = []
         for part, is_thinking in parts:
@@ -2051,12 +2299,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     h = apply_kimi_code_headers(h, target_url)
     try:
         client = _get_http_client()
-        async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+        async with client.stream("POST", target_url, json=payload, headers=h, timeout=stream_timeout) as r:
             _clear_host_dead(target_url)
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
                 friendly = _format_upstream_error(r.status_code, raw, target_url)
-                yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                yield f"event: error\ndata: {json.dumps({'status': r.status_code, 'text': friendly, 'raw': raw[:500]})}\n\n"
                 return
 
             async for line in r.aiter_lines():
@@ -2084,12 +2332,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                 chunk_model = j.get("model")
                                 if isinstance(chunk_model, str) and chunk_model.strip():
                                     _actual_model = chunk_model.strip()
-                                    if (
-                                        not _actual_model_announced
-                                        and not _same_model_identity(_actual_model, model)
-                                    ):
+                                    if not _actual_model_announced and not _same_model_identity(_actual_model, model):
                                         _actual_model_announced = True
-                                        yield f'data: {json.dumps({"type": "model_actual", "requested_model": model, "model": _actual_model})}\n\n'
+                                        yield f"data: {json.dumps({'type': 'model_actual', 'requested_model': model, 'model': _actual_model})}\n\n"
                                 # Usage chunk (from stream_options)
                                 _choices = j.get("choices") or []
                                 _delta0 = _choices[0].get("delta") if (_choices and _choices[0] is not None) else None
@@ -2108,7 +2353,10 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                 )
                                 if "usage" in j and not _delta_has_output:
                                     u = j["usage"] or {}
-                                    _usage_data = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
+                                    _usage_data = {
+                                        "input_tokens": u.get("prompt_tokens", 0),
+                                        "output_tokens": u.get("completion_tokens", 0),
+                                    }
                                     # llama.cpp puts a `timings` block alongside `usage` with the
                                     # TRUE generation speed (predicted_per_second) — pure decode,
                                     # excluding prefill/network. Pass it through so the UI shows the
@@ -2124,7 +2372,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                         _usage_data["model"] = _actual_model
                                         if not _same_model_identity(_actual_model, model):
                                             _usage_data["requested_model"] = model
-                                    yield f'data: {json.dumps({"type": "usage", "data": _usage_data})}\n\n'
+                                    yield f"data: {json.dumps({'type': 'usage', 'data': _usage_data})}\n\n"
                                 elif "choices" in j:
                                     _c0 = (j["choices"] or [None])[0]
                                     if _c0 is None:
@@ -2133,12 +2381,27 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                     if isinstance(delta, dict):
                                         # Text content
                                         # Reasoning tokens (VLLM --reasoning-parser, e.g. Qwen3/DeepSeek-R1, Nemotron). vLLM 0.20.2 / NIM emit the field as `reasoning`; older builds use `reasoning_content`. Some OpenAI-compatible Ollama builds use `thinking`.
-                                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking") or ""
+                                        reasoning = (
+                                            delta.get("reasoning_content")
+                                            or delta.get("reasoning")
+                                            or delta.get("thinking")
+                                            or ""
+                                        )
+                                        content = delta.get("content") or ""
+                                        # Mistral structured content: content is a list of typed blocks
+                                        # ({"type": "thinking", ...}, {"type": "text", ...}). Split into
+                                        # reasoning + text so thinking streams into the thinking panel.
+                                        if isinstance(content, list):
+                                            text_part, thinking_part = _normalize_mistral_content(content)
+                                            if thinking_part:
+                                                reasoning = (reasoning + thinking_part) if reasoning else thinking_part
+                                            content = text_part
                                         if reasoning:
                                             yield _stream_delta_event(reasoning, thinking=True)
-                                        content = delta.get("content") or ""
                                         if content:
-                                            content = re.sub(r"<mm:think(\s+[^>]*)?>", r"<think\1>", content, flags=re.IGNORECASE)
+                                            content = re.sub(
+                                                r"<mm:think(\s+[^>]*)?>", r"<think\1>", content, flags=re.IGNORECASE
+                                            )
                                             content = re.sub(r"</mm:think>", "</think>", content, flags=re.IGNORECASE)
                                             stripped = content.lstrip()
                                             # gpt-oss harmony format (<|channel|>analysis/final): route via the harmony
@@ -2153,7 +2416,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                                 # Covers Qwen3-derived models (Qwopus, QwQ forks) whose
                                                 # names don't match _THINKING_MODEL_PATTERNS but still
                                                 # emit literal <think> markup via llama.cpp --jinja.
-                                                if not _first_content_sent and not _thinking_model and not _in_think_tag and stripped.lower().startswith("<think"):
+                                                if (
+                                                    not _first_content_sent
+                                                    and not _thinking_model
+                                                    and not _in_think_tag
+                                                    and stripped.lower().startswith("<think")
+                                                ):
                                                     _thinking_model = True
                                                     _in_think_tag = True
                                                 if _in_think_tag:
@@ -2167,34 +2435,38 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                                             # throughout the think block, so it must not be reused.
                                                             tag_end = think_part.lower().find(">")
                                                             if tag_end != -1:
-                                                                think_part = think_part[tag_end + 1:]
+                                                                think_part = think_part[tag_end + 1 :]
                                                             _think_open_stripped = True
-                                                        regular_part = content[close_idx + len("</think>"):]
+                                                        regular_part = content[close_idx + len("</think>") :]
                                                         _in_think_tag = False
                                                         if think_part:
-                                                            yield f'data: {json.dumps({"delta": think_part, "thinking": True})}\n\n'
+                                                            yield f"data: {json.dumps({'delta': think_part, 'thinking': True})}\n\n"
                                                         if regular_part:
                                                             _first_content_sent = True
-                                                            yield f'data: {json.dumps({"delta": regular_part})}\n\n'
+                                                            yield f"data: {json.dumps({'delta': regular_part})}\n\n"
                                                     else:
                                                         # Still inside <think>: route to thinking channel
                                                         if not _think_open_stripped:
                                                             # Strip the opening <think[...] > tag (first chunk only)
                                                             tag_end = stripped.lower().find(">")
                                                             if tag_end != -1:
-                                                                content = stripped[tag_end + 1:]
+                                                                content = stripped[tag_end + 1 :]
                                                             _think_open_stripped = True
                                                         if content:
-                                                            yield f'data: {json.dumps({"delta": content, "thinking": True})}\n\n'
+                                                            yield f"data: {json.dumps({'delta': content, 'thinking': True})}\n\n"
                                                 else:
                                                     # Some thinking backends start normal content with a
                                                     # stray closing tag. Repair only that shape; do not
                                                     # wrap every first token for model families like
                                                     # MiniMax, which often stream ordinary answers.
-                                                    if _thinking_model and not _first_content_sent and stripped.lower().startswith("</think"):
+                                                    if (
+                                                        _thinking_model
+                                                        and not _first_content_sent
+                                                        and stripped.lower().startswith("</think")
+                                                    ):
                                                         content = "<think>" + content
                                                     _first_content_sent = True
-                                                    yield f'data: {json.dumps({"delta": content})}\n\n'
+                                                    yield f"data: {json.dumps({'delta': content})}\n\n"
                                         # Native tool calls — accumulate across chunks
                                         for tc in delta.get("tool_calls") or []:
                                             if tc is None:
@@ -2244,16 +2516,19 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                                 # Anthropic accumulator (`partial = ... or ""`) above.
                                                 _tc_acc[idx]["arguments"] += func["arguments"] or ""
                                                 # Stream tool arg deltas for doc tools
-                                                if func["arguments"] and _tc_acc[idx].get("name") in ("create_document", "update_document", "edit_document"):
-                                                    yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
+                                                if func["arguments"] and _tc_acc[idx].get("name") in (
+                                                    "create_document",
+                                                    "update_document",
+                                                    "edit_document",
+                                                ):
+                                                    yield f"data: {json.dumps({'type': 'tool_call_delta', 'index': idx, 'name': _tc_acc[idx]['name'], 'arg_delta': func['arguments']})}\n\n"
                                 elif "text" in j:
                                     if j["text"]:
                                         for event in _format_routed_content(_harmony_router.feed(j["text"])):
                                             yield event
-                            else:
-                                if data.strip():
-                                    for event in _format_routed_content(_harmony_router.feed(data)):
-                                        yield event
+                            elif data.strip():
+                                for event in _format_routed_content(_harmony_router.feed(data)):
+                                    yield event
                     except Exception as e:
                         logger.error(f"Error parsing stream data: {e}")
                         continue
@@ -2270,17 +2545,17 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         _cooled = _mark_host_dead(target_url)
         _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
         logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
-        yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+        yield f"event: error\ndata: {json.dumps({'error': f'Cannot reach {_host_key(target_url)}', 'status': 503})}\n\n"
     except httpx.ReadTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+        yield f"event: error\ndata: {json.dumps({'error': 'Read timeout', 'status': 504})}\n\n"
     except httpx.NetworkError:
-        yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502})}\n\n'
+        yield f"event: error\ndata: {json.dumps({'error': 'Network error', 'status': 502})}\n\n"
     except Exception as e:
         logger.error(f"Stream error: {e}")
-        yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+        yield f"event: error\ndata: {json.dumps({'error': str(e), 'status': 502})}\n\n"
 
 
-def _summarize_stream_error(err_chunk: Optional[str]) -> str:
+def _summarize_stream_error(err_chunk: str | None) -> str:
     """Pull a short human reason out of an `event: error` SSE chunk for the
     fallback notice. Returns a generic message if it can't be parsed."""
     if not err_chunk:
@@ -2298,6 +2573,7 @@ def _summarize_stream_error(err_chunk: Optional[str]) -> str:
     return "primary model failed"
 
 
+@observe()
 async def stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
@@ -2309,17 +2585,31 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
     through unchanged. The dead-host cooldown in stream_llm makes repeat
     attempts at an offline primary effectively instant.
 
+    AgentOS ZenRouter: if OPENCODE_API_KEY is set, OpenCode Zen candidates are
+    prepended as the highest-priority provider before the user-configured chain.
     Yields the same SSE chunk protocol as stream_llm.
     """
-    cands = _dedupe_candidates(candidates)
+    # ── AgentOS: inject Zen candidates at the front ────────────────────────────
+    zen_cands: list = []
+    try:
+        from src.zen_router import build_zen_candidates, zen_injection_enabled
+
+        if zen_injection_enabled():
+            stage = kwargs.pop("_agentos_stage", "chat")
+            zen_cands = build_zen_candidates(messages, stage=stage)
+    except Exception as _ze:
+        logger.debug(f"[ZenRouter] inject skipped: {_ze}")
+    # ──────────────────────────────────────────────────────────────────────────
+
+    cands = _dedupe_candidates(zen_cands + list(candidates))
     if not cands:
-        yield f'event: error\ndata: {json.dumps({"error": "No model endpoint configured", "status": 503})}\n\n'
+        yield f"event: error\ndata: {json.dumps({'error': 'No model endpoint configured', 'status': 503})}\n\n"
         return
 
     primary_model = cands[0][1]
     last_error = None
     for i, (url, model, headers) in enumerate(cands):
-        is_last = (i == len(cands) - 1)
+        is_last = i == len(cands) - 1
         emitted = False
         retried = False
         async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
@@ -2352,12 +2642,18 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                 # model's name (e.g. a Bedrock/Claude endpoint that 400s every
                 # request but appears fine because another model silently answered).
                 if not emitted and i > 0:
-                    yield ('data: ' + json.dumps({
-                        "type": "fallback",
-                        "selected_model": primary_model,
-                        "answered_by": model,
-                        "reason": _summarize_stream_error(last_error),
-                    }) + '\n\n')
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "fallback",
+                                "selected_model": primary_model,
+                                "answered_by": model,
+                                "reason": _summarize_stream_error(last_error),
+                            }
+                        )
+                        + "\n\n"
+                    )
                 emitted = True
             yield chunk
         if not retried:

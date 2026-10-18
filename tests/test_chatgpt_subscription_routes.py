@@ -6,8 +6,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, ModelEndpoint, ProviderAuthSession
 import routes.chatgpt_subscription_routes as csr
+from core.database import Base, ModelEndpoint, ProviderAuthSession
 
 
 def _mem_db(monkeypatch):
@@ -89,17 +89,26 @@ def test_provision_rejects_accounts_without_usable_models(monkeypatch):
 
 
 def _add_auth_and_endpoints(db, *, auth_id="auth1", ep_ids=("ep1",)):
-    db.add(ProviderAuthSession(
-        id=auth_id, provider=csr.chatgpt_subscription.CHATGPT_SUBSCRIPTION_PROVIDER,
-        owner="alice", base_url="https://chatgpt.com/backend-api/codex",
-        refresh_token="RT", auth_mode="chatgpt",
-    ))
-    for ep_id in ep_ids:
-        db.add(ModelEndpoint(
-            id=ep_id, name="ChatGPT Subscription",
+    db.add(
+        ProviderAuthSession(
+            id=auth_id,
+            provider=csr.chatgpt_subscription.CHATGPT_SUBSCRIPTION_PROVIDER,
+            owner="alice",
             base_url="https://chatgpt.com/backend-api/codex",
-            provider_auth_id=auth_id, owner="alice",
-        ))
+            refresh_token="RT",
+            auth_mode="chatgpt",
+        )
+    )
+    for ep_id in ep_ids:
+        db.add(
+            ModelEndpoint(
+                id=ep_id,
+                name="ChatGPT Subscription",
+                base_url="https://chatgpt.com/backend-api/codex",
+                provider_auth_id=auth_id,
+                owner="alice",
+            )
+        )
     db.commit()
 
 
@@ -172,11 +181,15 @@ def test_delete_orphaned_provider_auth_noop_when_auth_row_missing(monkeypatch):
     db = TestSessionLocal()
     try:
         # Endpoint points at an auth_id whose ProviderAuthSession is already gone.
-        db.add(ModelEndpoint(
-            id="ep1", name="ChatGPT Subscription",
-            base_url="https://chatgpt.com/backend-api/codex",
-            provider_auth_id="ghost", owner="alice",
-        ))
+        db.add(
+            ModelEndpoint(
+                id="ep1",
+                name="ChatGPT Subscription",
+                base_url="https://chatgpt.com/backend-api/codex",
+                provider_auth_id="ghost",
+                owner="alice",
+            )
+        )
         db.commit()
         ep1 = db.query(ModelEndpoint).filter(ModelEndpoint.id == "ep1").first()
         db.delete(ep1)
@@ -194,8 +207,8 @@ def _delete_route(monkeypatch, TestSessionLocal):
     provider-auth revocation wiring.
     """
     import routes.model_routes as mr
-    import routes.prefs_routes as prefs_routes
-    import src.ai_interaction as ai_interaction
+    from routes import prefs_routes
+    from src import ai_interaction
 
     monkeypatch.setattr(mr, "SessionLocal", TestSessionLocal)
     monkeypatch.setattr(mr, "require_admin", lambda request: None)
@@ -207,7 +220,9 @@ def _delete_route(monkeypatch, TestSessionLocal):
 
     router = mr.setup_model_routes(model_discovery=None)
     for route in router.routes:
-        if getattr(route, "path", "") == "/api/model-endpoints/{ep_id}" and "DELETE" in getattr(route, "methods", set()):
+        if getattr(route, "path", "") == "/api/model-endpoints/{ep_id}" and "DELETE" in getattr(
+            route, "methods", set()
+        ):
             return route.endpoint
     raise AssertionError("DELETE /api/model-endpoints/{ep_id} not found")
 

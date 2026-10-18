@@ -7,6 +7,7 @@ real mobile race — the finger is already lifted when the handler runs)
 made `e.touches[0].clientX` throw \"Cannot read properties of undefined\".
 The guard falls back to the event's own clientX/clientY in that case.
 """
+
 import json
 import shutil
 import subprocess
@@ -23,13 +24,19 @@ _CANVAS = "{width:800,height:600,getBoundingClientRect:()=>({width:400,height:30
 
 def _coords(event_js):
     js = f"""
-    import {{ canvasCoords }} from '{_MOD.as_posix()}';
+    import {{ canvasCoords }} from '{_MOD.as_uri()}';
     const canvas = {_CANVAS};
     console.log(JSON.stringify(canvasCoords({event_js}, canvas)));
     """
     proc = subprocess.run(
         ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
+        input=js,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=str(_REPO),
+        timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())

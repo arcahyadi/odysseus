@@ -6,6 +6,7 @@ caller-supplied session id, so without an ownership gate a user could target
 another tenant's session and leak their chat history, session-scoped LLM
 credentials, or session title.
 """
+
 import asyncio
 import io
 import sys
@@ -33,7 +34,10 @@ def _router(monkeypatch, caller):
     sm = MagicMock()
     sm.sessions = {}
     sm.get_session = lambda sid: SimpleNamespace(
-        owner="alice", name="Secret project", endpoint_url="http://x", model="m",
+        owner="alice",
+        name="Secret project",
+        endpoint_url="http://x",
+        model="m",
         headers={"Authorization": "Bearer victim-secret"},
         get_context_messages=lambda: [],
     )
@@ -84,7 +88,7 @@ def test_owner_can_access_own_session(monkeypatch):
 
 
 def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch):
-    import src.task_endpoint as task_endpoint
+    from src import task_endpoint
 
     memory_manager = MagicMock()
     memory_vector = MagicMock()
@@ -137,20 +141,24 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
 
     out = asyncio.run(audit_route(request=_request("alice"), session="session-1"))
 
-    assert resolver_calls == [(
-        "http://session.example/v1/chat/completions",
-        "session-model",
-        session_headers,
-        "alice",
-    )]
-    assert audit_calls == [(
-        memory_manager,
-        memory_vector,
-        "http://session.example/v1/chat/completions",
-        "session-model",
-        session_headers,
-        "alice",
-    )]
+    assert resolver_calls == [
+        (
+            "http://session.example/v1/chat/completions",
+            "session-model",
+            session_headers,
+            "alice",
+        )
+    ]
+    assert audit_calls == [
+        (
+            memory_manager,
+            memory_vector,
+            "http://session.example/v1/chat/completions",
+            "session-model",
+            session_headers,
+            "alice",
+        )
+    ]
     assert out["ok"] is True
     assert out["removed"] == 1
 

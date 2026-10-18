@@ -1,12 +1,13 @@
 """Tests for model route helper functions — pure logic, no server needed."""
+
 import asyncio
 import json
 import sys
 import threading
 import time
 import types
-from unittest.mock import MagicMock
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -22,45 +23,57 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
     if "core.database" not in sys.modules:
         _core_db = types.ModuleType("core.database")
         for _name in [
-            "SessionLocal", "ModelEndpoint", "Session", "ChatMessage", "Document",
-            "DocumentVersion", "GalleryImage", "GalleryAlbum", "Note",
-            "CalendarCal", "CalendarEvent", "ScheduledTask", "TaskRun",
-            "McpServer", "ProviderAuthSession", "Base",
+            "SessionLocal",
+            "ModelEndpoint",
+            "Session",
+            "ChatMessage",
+            "Document",
+            "DocumentVersion",
+            "GalleryImage",
+            "GalleryAlbum",
+            "Note",
+            "CalendarCal",
+            "CalendarEvent",
+            "ScheduledTask",
+            "TaskRun",
+            "McpServer",
+            "ProviderAuthSession",
+            "Base",
         ]:
             setattr(_core_db, _name, MagicMock())
         _core_db.utcnow_naive = MagicMock()
         sys.modules["core.database"] = _core_db
 
-    import routes.model_routes as model_routes
     import src.database as src_database
-    import src.endpoint_resolver as endpoint_resolver
-    import src.llm_core as llm_core
+    from routes import model_routes
     from routes.model_routes import (
-        _match_provider_curated,
-        _curate_models,
-        _visible_models,
-        _normalize_model_ids,
-        _api_key_fingerprint,
-        _is_chat_model,
-        _classify_endpoint,
-        _effective_endpoint_kind,
-        _probe_endpoint,
-        _ping_endpoint,
-        _parse_model_list,
-        _normalize_refresh_mode,
-        _truthy,
-        _speech_settings_using_endpoint,
-        _clear_speech_settings_for_endpoint,
-        _endpoint_settings_using_endpoint,
-        _clear_endpoint_settings_for_endpoint,
-        _clear_user_pref_endpoint_refs,
-        _default_endpoint_needs_assignment,
         _PROVIDER_CURATED,
+        _api_key_fingerprint,
+        _classify_endpoint,
+        _clear_endpoint_settings_for_endpoint,
+        _clear_speech_settings_for_endpoint,
+        _clear_user_pref_endpoint_refs,
+        _curate_models,
+        _default_endpoint_needs_assignment,
+        _effective_endpoint_kind,
+        _endpoint_settings_using_endpoint,
+        _is_chat_model,
+        _match_provider_curated,
+        _normalize_model_ids,
+        _normalize_refresh_mode,
+        _parse_model_list,
+        _ping_endpoint,
+        _probe_endpoint,
+        _speech_settings_using_endpoint,
+        _truthy,
+        _visible_models,
     )
+    from src import endpoint_resolver, llm_core
     from src.llm_core import ANTHROPIC_MODELS
 
 
 # ── speech endpoint settings ──
+
 
 def test_speech_endpoint_dependents_include_stt():
     settings = {"stt_provider": "endpoint:voice"}
@@ -157,6 +170,7 @@ def test_endpoint_cleanup_updates_scoped_and_legacy_user_prefs():
 
 # ── _default_endpoint_needs_assignment (add-endpoint auto-default) ──
 
+
 def test_default_assignment_when_none_configured():
     # Nothing configured yet → first added endpoint should become the default.
     assert _default_endpoint_needs_assignment("", {"a", "b"}) is True
@@ -176,6 +190,7 @@ def test_default_preserved_when_current_default_enabled():
 
 
 # ── _match_provider_curated ──
+
 
 class TestMatchProviderCurated:
     def test_url_match_overrides_provider(self):
@@ -245,6 +260,7 @@ class TestMatchProviderCurated:
 
 # ── _probe_endpoint: Z.AI coding plan (#2230) ──
 
+
 class TestProbeZaiCoding:
     """Regression coverage for the Z.AI coding endpoint probing path."""
 
@@ -258,8 +274,7 @@ class TestProbeZaiCoding:
         server_models = [{"id": "glm-5.1"}, {"id": "custom-finetune"}]
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
-            return httpx.Response(200, json={"data": server_models},
-                                 request=httpx.Request("GET", url))
+            return httpx.Response(200, json={"data": server_models}, request=httpx.Request("GET", url))
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
         result = _probe_endpoint("https://z.ai/api/coding", "key")
@@ -273,8 +288,7 @@ class TestProbeZaiCoding:
         server_models = [{"id": "glm-5.1"}]
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
-            return httpx.Response(200, json={"data": server_models},
-                                 request=httpx.Request("GET", url))
+            return httpx.Response(200, json={"data": server_models}, request=httpx.Request("GET", url))
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
         result = _probe_endpoint("https://z.ai/api/coding", "key")
@@ -289,8 +303,7 @@ class TestProbeZaiCoding:
         self._patch(monkeypatch)
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
-            return httpx.Response(200, json={"data": [{"id": "glm-5.1"}]},
-                                 request=httpx.Request("GET", url))
+            return httpx.Response(200, json={"data": [{"id": "glm-5.1"}]}, request=httpx.Request("GET", url))
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
         result = _probe_endpoint("https://z.ai/api/coding", "key")
@@ -300,6 +313,7 @@ class TestProbeZaiCoding:
 
 
 # ── _curate_models ──
+
 
 class TestCurateModels:
     def test_known_provider_partitions(self):
@@ -372,21 +386,38 @@ class TestCurateModels:
 
 # ── _is_chat_model ──
 
+
 class TestIsChatModel:
-    @pytest.mark.parametrize("model_id", [
-        "gpt-4o", "gpt-4o-mini", "claude-sonnet-4", "llama-3.3-70b",
-        "deepseek-chat", "gemini-2.0-flash", "o3",
-        "llama-4-scout-17b-16e-instruct",
-        "gemma-2b-it", "google/gemma-2b-it",
-        "bigcode/starcoder2-15b-instruct",
-    ])
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "claude-sonnet-4",
+            "llama-3.3-70b",
+            "deepseek-chat",
+            "gemini-2.0-flash",
+            "o3",
+            "llama-4-scout-17b-16e-instruct",
+            "gemma-2b-it",
+            "google/gemma-2b-it",
+            "bigcode/starcoder2-15b-instruct",
+        ],
+    )
     def test_chat_models(self, model_id):
         assert _is_chat_model(model_id) is True
 
-    @pytest.mark.parametrize("model_id", [
-        "dall-e-3", "tts-1", "whisper-1", "text-embedding-3-small",
-        "gpt-image-1", "sora-1",
-    ])
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            "dall-e-3",
+            "tts-1",
+            "whisper-1",
+            "text-embedding-3-small",
+            "gpt-image-1",
+            "sora-1",
+        ],
+    )
     def test_non_chat_models(self, model_id):
         assert _is_chat_model(model_id) is False
 
@@ -403,8 +434,15 @@ class TestIsChatModel:
     def test_legacy_openai_instruct_is_not_chat(self):
         assert _is_chat_model("gpt-3.5-turbo-instruct") is False
 
+    @pytest.mark.parametrize("bad", [None, 123, 4.5, ["x"], {"a": 1}])
+    def test_non_string_id_is_treated_as_chat(self, bad):
+        # Defensive boundary: a non-compliant upstream can yield a non-string
+        # model id; it must not crash on .lower() (treated as chat-capable).
+        assert _is_chat_model(bad) is True
+
 
 # ── _classify_endpoint ──
+
 
 class TestClassifyEndpoint:
     def test_localhost(self):
@@ -419,11 +457,14 @@ class TestClassifyEndpoint:
     def test_private_10(self):
         assert _classify_endpoint("http://10.0.0.5:8000") == "local"
 
-    @pytest.mark.parametrize("host", [
-        "10.example-cloud.com",
-        "172.16.example-cloud.com",
-        "192.168.example-cloud.com",
-    ])
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "10.example-cloud.com",
+            "172.16.example-cloud.com",
+            "192.168.example-cloud.com",
+        ],
+    )
     def test_private_prefix_dns_names_are_api(self, host):
         assert _classify_endpoint(f"https://{host}/v1") == "api"
 
@@ -529,6 +570,7 @@ class TestClassifyEndpoint:
 
 # ── setup probing ──
 
+
 class TestSetupProbeSafety:
     @pytest.mark.parametrize("value", ["true", "1", "yes", "on", " TRUE "])
     def test_truthy_true_values(self, value):
@@ -624,6 +666,7 @@ class TestSetupProbeSafety:
 
         assert _probe_endpoint("https://api.anthropic.com/v1") == ANTHROPIC_MODELS
 
+
 def test_ollama_endpoint_error_message_includes_troubleshooting():
     msg = model_routes._model_endpoint_error_message(
         "http://localhost:11434/v1",
@@ -679,26 +722,28 @@ def test_lmstudio_error_for_bare_host_port_probes_v1_models(monkeypatch):
 
 # ── _rewrite_loopback_for_docker (issue #25: LM Studio on host loopback) ──
 
+
 class TestDockerLoopbackRewrite:
     def test_rewrites_loopback_when_in_docker(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
-        assert (model_routes._rewrite_loopback_for_docker("http://localhost:1234/v1")
-                == "http://host.docker.internal:1234/v1")
-        assert (model_routes._rewrite_loopback_for_docker("http://127.0.0.1:1234/v1")
-                == "http://host.docker.internal:1234/v1")
+        assert (
+            model_routes._rewrite_loopback_for_docker("http://localhost:1234/v1")
+            == "http://host.docker.internal:1234/v1"
+        )
+        assert (
+            model_routes._rewrite_loopback_for_docker("http://127.0.0.1:1234/v1")
+            == "http://host.docker.internal:1234/v1"
+        )
 
     def test_no_rewrite_when_not_in_docker(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: False)
-        assert (model_routes._rewrite_loopback_for_docker("http://localhost:1234/v1")
-                == "http://localhost:1234/v1")
+        assert model_routes._rewrite_loopback_for_docker("http://localhost:1234/v1") == "http://localhost:1234/v1"
 
     def test_non_loopback_untouched_even_in_docker(self, monkeypatch):
         # Cloud and LAN hosts must never be rewritten or they would break.
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
-        assert (model_routes._rewrite_loopback_for_docker("https://api.openai.com/v1")
-                == "https://api.openai.com/v1")
-        assert (model_routes._rewrite_loopback_for_docker("http://192.168.1.50:1234/v1")
-                == "http://192.168.1.50:1234/v1")
+        assert model_routes._rewrite_loopback_for_docker("https://api.openai.com/v1") == "https://api.openai.com/v1"
+        assert model_routes._rewrite_loopback_for_docker("http://192.168.1.50:1234/v1") == "http://192.168.1.50:1234/v1"
 
 
 class TestDockerHostGatewayReachable:
@@ -924,9 +969,7 @@ def test_reprobe_preserves_pinned_models(monkeypatch):
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
     monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: ["m1"])
     monkeypatch.setattr(model_routes, "_is_chat_model", lambda m: True)
-    monkeypatch.setattr(
-        model_routes, "_probe_single_model", lambda *a, **k: {"status": "ok"}
-    )
+    monkeypatch.setattr(model_routes, "_probe_single_model", lambda *a, **k: {"status": "ok"})
     endpoint = _get_route("/api/model-endpoints/{ep_id}/probe", "GET")
 
     response = endpoint("ep1", _PinnedFakeRequest())
@@ -960,7 +1003,8 @@ def test_reprobe_chatgpt_subscription_does_not_hide_models(monkeypatch):
     monkeypatch.setattr(model_routes, "_is_chat_model", lambda m: True)
     # Any completion probe would be a bug for this provider.
     monkeypatch.setattr(
-        model_routes.httpx, "post",
+        model_routes.httpx,
+        "post",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not probe chatgpt-subscription")),
     )
     endpoint = _get_route("/api/model-endpoints/{ep_id}/probe", "GET")
@@ -978,7 +1022,7 @@ def test_reprobe_chatgpt_subscription_does_not_hide_models(monkeypatch):
     for chunk in chunks:
         for line in chunk.splitlines():
             if line.startswith("data: "):
-                events.append(json.loads(line[len("data: "):]))
+                events.append(json.loads(line[len("data: ") :]))
 
     done = next(e for e in events if e.get("type") == "probe_done")
     results = [e for e in events if e.get("type") == "probe_result"]
@@ -1037,7 +1081,8 @@ def _create_form_kwargs(**overrides):
 
 
 def _patch_create_deps(monkeypatch, db, settings=None):
-    import src.auth_helpers as auth_helpers
+    from src import auth_helpers
+
     # Shared, in-memory settings so the auto-default write path stays hermetic
     # (no real settings.json). Returned so tests can assert what was persisted.
     settings = {"default_endpoint_id": "exists"} if settings is None else settings
@@ -1172,9 +1217,7 @@ def test_post_reassigns_default_when_current_default_disabled(monkeypatch):
     # (Memory → Tidy) keep failing with "No default model configured".
     disabled = _make_endpoint(id="dead", base_url="http://old-host/v1", is_enabled=False)
     db = _PinnedFakeDb([disabled])
-    settings = _patch_create_deps(
-        monkeypatch, db, settings={"default_endpoint_id": "dead", "default_model": "stale"}
-    )
+    settings = _patch_create_deps(monkeypatch, db, settings={"default_endpoint_id": "dead", "default_model": "stale"})
     create = _get_route("/api/model-endpoints", "POST")
 
     create(
@@ -1473,7 +1516,11 @@ async def test_probe_local_skips_tailscale_proxy_endpoint(monkeypatch):
     monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
     monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: (_ for _ in ()).throw(AssertionError("full probe should not run")))
+    monkeypatch.setattr(
+        model_routes,
+        "_probe_endpoint",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("full probe should not run")),
+    )
 
     pinged = []
 
@@ -1579,7 +1626,9 @@ def test_llm_core_list_model_ids_uses_cached_configured_proxy(monkeypatch):
 
     monkeypatch.setattr(src_database, "ModelEndpoint", _RouteModelEndpoint)
     monkeypatch.setattr(src_database, "SessionLocal", lambda: db)
-    monkeypatch.setattr(llm_core.httpx, "get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("/models should not be fetched")))
+    monkeypatch.setattr(
+        llm_core.httpx, "get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("/models should not be fetched"))
+    )
 
     assert llm_core.list_model_ids("http://100.117.136.97:34521/v1/chat/completions", timeout=1) == ["cached-model"]
 
@@ -1588,7 +1637,11 @@ def test_explicit_proxy_test_fetches_models_with_long_timeout(monkeypatch):
     router = model_routes.setup_model_routes(model_discovery=None)
 
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    monkeypatch.setattr(model_routes, "_ping_endpoint", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ping should not run when model listing succeeds")))
+    monkeypatch.setattr(
+        model_routes,
+        "_ping_endpoint",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ping should not run when model listing succeeds")),
+    )
 
     calls = []
     returned = ["NVIDIA NIM/openai/gpt-oss-120b", "mistral/mistral-small-2603"]
@@ -1609,11 +1662,13 @@ def test_explicit_proxy_test_fetches_models_with_long_timeout(monkeypatch):
     assert result["online"] is True
     assert result["status"] == "online"
     assert result["models"] == returned
-    assert calls == [{
-        "base_url": "http://100.117.136.97:34521/v1",
-        "api_key": "fake-key",
-        "timeout": 30.0,
-    }]
+    assert calls == [
+        {
+            "base_url": "http://100.117.136.97:34521/v1",
+            "api_key": "fake-key",
+            "timeout": 30.0,
+        }
+    ]
 
 
 def test_explicit_proxy_add_fetches_and_caches_models_with_long_timeout(monkeypatch):
@@ -1626,7 +1681,11 @@ def test_explicit_proxy_add_fetches_and_caches_models_with_long_timeout(monkeypa
     monkeypatch.setattr(model_routes, "_load_settings", lambda: {})
     monkeypatch.setattr(model_routes, "_save_settings", lambda settings: None)
     monkeypatch.setattr("src.auth_helpers.get_current_user", lambda request: None)
-    monkeypatch.setattr(model_routes, "_ping_endpoint", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ping should not run when model listing succeeds")))
+    monkeypatch.setattr(
+        model_routes,
+        "_ping_endpoint",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ping should not run when model listing succeeds")),
+    )
 
     calls = []
     returned = ["NVIDIA NIM/openai/gpt-oss-120b", "mistral/mistral-small-2603"]
@@ -1657,11 +1716,13 @@ def test_explicit_proxy_add_fetches_and_caches_models_with_long_timeout(monkeypa
     assert result["online"] is True
     assert result["status"] == "online"
     assert result["models"] == returned
-    assert calls == [{
-        "base_url": "http://100.117.136.97:34521/v1",
-        "api_key": "fake-key",
-        "timeout": 30.0,
-    }]
+    assert calls == [
+        {
+            "base_url": "http://100.117.136.97:34521/v1",
+            "api_key": "fake-key",
+            "timeout": 30.0,
+        }
+    ]
     assert len(db.rows) == 1
     assert json.loads(db.rows[0].cached_models) == returned
     assert db.rows[0].endpoint_kind == "proxy"
@@ -1703,11 +1764,13 @@ def test_manual_refresh_uses_long_timeout_and_saves_full_model_list(monkeypatch)
     )
 
     assert [m["id"] for m in result] == refreshed
-    assert calls == [{
-        "base_url": "http://100.117.136.97:34521/v1",
-        "api_key": "fake-key",
-        "timeout": 60.0,
-    }]
+    assert calls == [
+        {
+            "base_url": "http://100.117.136.97:34521/v1",
+            "api_key": "fake-key",
+            "timeout": 60.0,
+        }
+    ]
     assert json.loads(ep.cached_models) == refreshed
     assert db.commits == 1
     assert response.headers["X-Model-Refresh-Status"] == "refreshed"

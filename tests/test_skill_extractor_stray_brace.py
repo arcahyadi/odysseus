@@ -29,7 +29,7 @@ class _FakeSkillsManager:
 # the bug this fix addresses: slicing from the FIRST '{' to the LAST '}'
 # produced invalid JSON and the whole extraction was silently dropped.
 _STRAY_BRACE_RESPONSE = (
-    'Sure thing — note this uses {a} as a placeholder, then the actual skill is:\n'
+    "Sure thing — note this uses {a} as a placeholder, then the actual skill is:\n"
     '{"title": "Deploy runbook", "problem": "manual deploys are error-prone", '
     '"solution": "use the deploy script", "steps": ["build", "push", "restart"], '
     '"tags": ["deploy"], "confidence": 0.9}'
@@ -65,7 +65,7 @@ async def test_maybe_extract_skill_recovers_json_past_stray_braces(monkeypatch, 
 # first attempt even though `text[0] == "{"`, so the candidate walk must run
 # regardless of whether the response starts with '{'.
 _LEADING_INVALID_BRACE_RESPONSE = (
-    '{not json}\n'
+    "{not json}\n"
     '{"title": "Valid later", "problem": "p", "solution": "s", '
     '"steps": ["one", "two", "three"], "tags": ["test"], "confidence": 0.9}'
 )
@@ -97,7 +97,7 @@ async def test_maybe_extract_skill_recovers_json_after_leading_invalid_brace(mon
 
 async def test_maybe_extract_skill_drops_when_no_candidate_parses(monkeypatch):
     async def fake_llm_call_async(*args, **kwargs):
-        return 'Some commentary with {unbalanced and { nested } braces } but no real JSON object'
+        return "Some commentary with {unbalanced and { nested } braces } but no real JSON object"
 
     monkeypatch.setattr("src.llm_core.llm_call_async", fake_llm_call_async)
 
@@ -125,6 +125,7 @@ async def test_maybe_extract_skill_drops_on_multiple_json_objects(monkeypatch):
         '{"title": "Unrelated skill", "problem": "manual", "solution": "script", '
         '"steps": ["build"], "tags": ["deploy"], "confidence": 0.9}'
     )
+
     async def fake_llm_call_async(*args, **kwargs):
         return resp
 
@@ -144,4 +145,3 @@ async def test_maybe_extract_skill_drops_on_multiple_json_objects(monkeypatch):
 
     assert entry is None
     assert not skills_manager.added
-

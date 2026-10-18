@@ -10,11 +10,7 @@ from fastapi import HTTPException
 def _compare_request(user="alice", is_admin=False):
     return SimpleNamespace(
         state=SimpleNamespace(current_user=user),
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                auth_manager=SimpleNamespace(is_admin=lambda u: is_admin)
-            )
-        ),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=SimpleNamespace(is_admin=lambda u: is_admin))),
     )
 
 
@@ -25,10 +21,7 @@ def _compare_start_route(session_manager):
     # setup_compare_routes registers on a module-global router, so each call
     # appends another /start route; take the most recently registered one so we
     # get the handler bound to *this* session_manager.
-    return [
-        r.endpoint for r in router.routes
-        if getattr(r, "path", "") == "/api/compare/start"
-    ][-1]
+    return [r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/compare/start"][-1]
 
 
 class _FakeDB:
@@ -60,9 +53,7 @@ def test_compare_start_rejects_unregistered_endpoint_for_non_admin(monkeypatch):
     # Nothing visible to the caller matches the supplied URL → raw, unregistered.
     monkeypatch.setattr(cr, "_owned_endpoint_by_url", lambda *a, **k: None)
 
-    start = _compare_start_route(
-        SimpleNamespace(create_session=lambda **_: None, sessions={})
-    )
+    start = _compare_start_route(SimpleNamespace(create_session=lambda **_: None, sessions={}))
     with pytest.raises(HTTPException) as exc:
         start(
             _compare_request(),
@@ -92,9 +83,7 @@ def test_compare_start_allows_owned_registered_endpoint_for_non_admin(monkeypatc
     def _create_session(session_id, **_):
         created[session_id] = SimpleNamespace(headers={})
 
-    start = _compare_start_route(
-        SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
-    )
+    start = _compare_start_route(SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created)))
     # Must complete without raising 403.
     start(
         _compare_request(),
@@ -133,9 +122,7 @@ def test_compare_start_rejects_another_users_private_endpoint(monkeypatch):
     def _create_session(session_id, **_):
         created[session_id] = SimpleNamespace(headers={})
 
-    start = _compare_start_route(
-        SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
-    )
+    start = _compare_start_route(SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created)))
     with pytest.raises(HTTPException) as exc:
         start(
             _compare_request(user="alice"),
@@ -176,17 +163,15 @@ def test_compare_start_rejects_before_creating_any_session_on_mixed_endpoints(mo
     def _create_session(session_id, **kw):
         created[session_id] = SimpleNamespace(headers={})
 
-    start = _compare_start_route(
-        SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
-    )
+    start = _compare_start_route(SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created)))
     with pytest.raises(HTTPException) as exc:
         start(
             _compare_request(),
             prompt="p",
             model_a="a",
             model_b="b",
-            endpoint_a="http://127.0.0.1:8000/v1",     # owned, registered
-            endpoint_b="http://203.0.113.9:9999/v1",   # raw, unregistered
+            endpoint_a="http://127.0.0.1:8000/v1",  # owned, registered
+            endpoint_b="http://203.0.113.9:9999/v1",  # raw, unregistered
         )
 
     assert exc.value.status_code == 403
@@ -213,9 +198,7 @@ def test_compare_start_binds_session_to_registered_endpoint_url(monkeypatch):
         created[session_id] = SimpleNamespace(headers={})
         captured[session_id] = kw
 
-    start = _compare_start_route(
-        SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
-    )
+    start = _compare_start_route(SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created)))
     raw_url = "http://127.0.0.1:8000/v1/"  # trailing slash → not byte-identical
     start(
         _compare_request(),
@@ -250,9 +233,7 @@ def test_compare_start_admin_raw_endpoint_carries_no_borrowed_key(monkeypatch):
         created[session_id] = SimpleNamespace(headers={})
         captured[session_id] = kw
 
-    start = _compare_start_route(
-        SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
-    )
+    start = _compare_start_route(SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created)))
     raw_url = "http://198.51.100.7:1234/v1"
     start(
         _compare_request(user="root", is_admin=True),
@@ -281,14 +262,12 @@ def test_compare_start_prefers_endpoint_id_over_url(monkeypatch):
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
 
     url = "http://127.0.0.1:8000/v1"
-    by_url = SimpleNamespace(id=1, api_key="sk-first", base_url=url)   # URL match
-    by_id = SimpleNamespace(id=2, api_key="sk-second", base_url=url)   # id match
+    by_url = SimpleNamespace(id=1, api_key="sk-first", base_url=url)  # URL match
+    by_id = SimpleNamespace(id=2, api_key="sk-second", base_url=url)  # id match
 
     # URL resolution would return the WRONG row; the id resolves the intended one.
     monkeypatch.setattr(cr, "_owned_endpoint_by_url", lambda *a, **k: by_url)
-    monkeypatch.setattr(
-        cr, "_owned_endpoint_by_id", lambda db, eid, owner: by_id if eid == "2" else None
-    )
+    monkeypatch.setattr(cr, "_owned_endpoint_by_id", lambda db, eid, owner: by_id if eid == "2" else None)
 
     created = {}
     captured = {}
@@ -297,9 +276,7 @@ def test_compare_start_prefers_endpoint_id_over_url(monkeypatch):
         created[session_id] = SimpleNamespace(headers={})
         captured[session_id] = kw
 
-    start = _compare_start_route(
-        SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
-    )
+    start = _compare_start_route(SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created)))
     start(
         _compare_request(),
         prompt="p",
@@ -338,9 +315,7 @@ def test_compare_start_rejects_unowned_endpoint_id(monkeypatch):
     def _create_session(session_id, **_):
         created[session_id] = SimpleNamespace(headers={})
 
-    start = _compare_start_route(
-        SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
-    )
+    start = _compare_start_route(SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created)))
     with pytest.raises(HTTPException) as exc:
         start(
             _compare_request(),
@@ -378,9 +353,7 @@ def test_compare_endpoint_key_lookup_is_owner_scoped():
 
 def test_gallery_image_endpoint_lookups_are_owner_scoped():
     body = Path("routes/gallery_routes.py").read_text(encoding="utf-8")
-    helper_body = body.split("def _visible_image_endpoint_query", 1)[1].split(
-        "def _first_visible_image_endpoint", 1
-    )[0]
+    helper_body = body.split("def _visible_image_endpoint_query", 1)[1].split("def _first_visible_image_endpoint", 1)[0]
 
     assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
     assert body.count("_first_visible_image_endpoint(db, user)") >= 4
@@ -394,11 +367,8 @@ def test_gallery_image_endpoint_lookups_are_owner_scoped():
         "async def harmonize_image",
     ):
         section = body.split(marker, 1)[1].split("@router.", 1)[0]
-        assert "user = require_privilege(request, \"can_generate_images\")" in section
-        assert (
-            "_first_visible_image_endpoint(db, user)" in section
-            or "_visible_image_endpoint_for_base(db," in section
-        )
+        assert 'user = require_privilege(request, "can_generate_images")' in section
+        assert "_first_visible_image_endpoint(db, user)" in section or "_visible_image_endpoint_for_base(db," in section
 
 
 def test_research_endpoint_resolution_passes_owner():

@@ -2,8 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -13,7 +12,8 @@ from core.database import Base, GalleryImage
 
 
 def _gallery_module():
-    import routes.gallery_routes as gallery_routes
+    from routes import gallery_routes
+
     return gallery_routes
 
 

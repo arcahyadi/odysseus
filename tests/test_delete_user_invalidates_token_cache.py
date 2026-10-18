@@ -9,10 +9,11 @@ cache. The DELETE /api/auth/users handler now calls the invalidator on a
 successful delete (and only then), so the next bearer request rebuilds the
 cache from the DB, where the rows are already gone, and the token is rejected.
 """
+
 import asyncio
 import types
 
-from routes.auth_routes import setup_auth_routes, DeleteUserRequest
+from routes.auth_routes import DeleteUserRequest, setup_auth_routes
 
 
 def _handler(router):

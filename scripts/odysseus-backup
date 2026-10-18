@@ -18,13 +18,23 @@ Restore is destructive: it overwrites `data/` in place. Always pass
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, shutil, sqlite3, subprocess, sys, tarfile, tempfile
+import argparse
+import os
+import shutil
+import sqlite3
+import sys
+import tarfile
+import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
@@ -34,9 +44,9 @@ _BACKUP_DIR = _REPO_ROOT / "backups"
 # Stuff inside data/ that we explicitly skip — anything we can re-derive
 # from the SQLite DB + JSON state. Keeps the tarball small.
 _SKIP_PATTERNS = {
-    "mail-attachments",     # cached IMAP attachment extractions
-    "deep_research",        # research runs are large; back up explicitly via --include-research
-    "personal_uploads",     # uploaded files; usually wanted, included by default actually
+    "mail-attachments",  # cached IMAP attachment extractions
+    "deep_research",  # research runs are large; back up explicitly via --include-research
+    "personal_uploads",  # uploaded files; usually wanted, included by default actually
 }
 
 
@@ -75,8 +85,10 @@ def cmd_snapshot(args):
     if not _DATA_DIR.is_dir():
         fail(f"no data dir at {_DATA_DIR}")
     _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = Path(args.out) if args.out else (
-        _BACKUP_DIR / f"odysseus-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
+    out_path = (
+        Path(args.out)
+        if args.out
+        else (_BACKUP_DIR / f"odysseus-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz")
     )
     _reject_output_inside_data(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,16 +127,19 @@ def cmd_snapshot(args):
                 except Exception:
                     pass
 
-    emit({
-        "ok": True,
-        "path": str(out_path),
-        "files": files_added,
-        "uncompressed_bytes": total_bytes,
-        "compressed_bytes": out_path.stat().st_size,
-        "ratio": round(out_path.stat().st_size / max(total_bytes, 1), 4),
-        "included_research": bool(args.include_research),
-        "included_attachments": bool(args.include_attachments),
-    }, args)
+    emit(
+        {
+            "ok": True,
+            "path": str(out_path),
+            "files": files_added,
+            "uncompressed_bytes": total_bytes,
+            "compressed_bytes": out_path.stat().st_size,
+            "ratio": round(out_path.stat().st_size / max(total_bytes, 1), 4),
+            "included_research": bool(args.include_research),
+            "included_attachments": bool(args.include_attachments),
+        },
+        args,
+    )
 
 
 def cmd_list(args):
@@ -136,12 +151,14 @@ def cmd_list(args):
     for p in sorted(_BACKUP_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
         if not p.is_file():
             continue
-        entries.append({
-            "path": str(p),
-            "name": p.name,
-            "bytes": p.stat().st_size,
-            "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
-        })
+        entries.append(
+            {
+                "path": str(p),
+                "name": p.name,
+                "bytes": p.stat().st_size,
+                "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
+            }
+        )
     emit(entries, args)
 
 
@@ -157,13 +174,16 @@ def cmd_verify(args):
             _validate_restore_members(members)
     except (tarfile.TarError, OSError) as e:
         fail(f"tarball is corrupt: {e}")
-    emit({
-        "ok": True,
-        "path": str(path),
-        "members": len(members),
-        "first": members[0].name if members else None,
-        "last": members[-1].name if members else None,
-    }, args)
+    emit(
+        {
+            "ok": True,
+            "path": str(path),
+            "members": len(members),
+            "first": members[0].name if members else None,
+            "last": members[-1].name if members else None,
+        },
+        args,
+    )
 
 
 def _validate_restore_members(members):
@@ -217,11 +237,14 @@ def cmd_restore(args):
             _extract_restore_members(tar, members, _REPO_ROOT)
         except Exception as e:
             fail(f"extract failed: {e}")
-    emit({
-        "ok": True,
-        "restored_from": str(path),
-        "previous_data_stashed_at": str(stash) if stash else None,
-    }, args)
+    emit(
+        {
+            "ok": True,
+            "restored_from": str(path),
+            "previous_data_stashed_at": str(stash) if stash else None,
+        },
+        args,
+    )
 
 
 def _build_parser():
@@ -232,10 +255,14 @@ def _build_parser():
 
     ps = sub.add_parser("snapshot", parents=[common])
     ps.add_argument("--out", help="output path (default: backups/<timestamp>.tar.gz)")
-    ps.add_argument("--include-research", action="store_true",
-                    help="include data/deep_research/ (skipped by default; large)")
-    ps.add_argument("--include-attachments", action="store_true",
-                    help="include data/mail-attachments/ (skipped by default; re-derivable)")
+    ps.add_argument(
+        "--include-research", action="store_true", help="include data/deep_research/ (skipped by default; large)"
+    )
+    ps.add_argument(
+        "--include-attachments",
+        action="store_true",
+        help="include data/mail-attachments/ (skipped by default; re-derivable)",
+    )
     ps.set_defaults(func=cmd_snapshot)
 
     pl = sub.add_parser("list", parents=[common])
@@ -247,8 +274,7 @@ def _build_parser():
 
     pr = sub.add_parser("restore", parents=[common])
     pr.add_argument("path")
-    pr.add_argument("--yes", action="store_true",
-                    help="confirm overwriting current data/")
+    pr.add_argument("--yes", action="store_true", help="confirm overwriting current data/")
     pr.set_defaults(func=cmd_restore)
 
     return p

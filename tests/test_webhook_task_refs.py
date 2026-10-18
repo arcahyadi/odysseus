@@ -5,6 +5,7 @@ delivery task could be garbage-collected before it ran and the webhook silently
 dropped. WebhookManager now holds a strong reference for the task's lifetime and
 releases it on completion.
 """
+
 import asyncio
 import sys
 import types

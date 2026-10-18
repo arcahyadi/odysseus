@@ -1,4 +1,5 @@
 """Shared database stub helpers for CLI and unit tests."""
+
 import sys
 import types
 from unittest.mock import MagicMock

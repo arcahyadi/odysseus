@@ -14,13 +14,20 @@ streaming endpoint, so it's not exposed here.
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, sys
+import argparse
+import json
+import os
+import sys
 from pathlib import Path
 
 _DATA_DIR = _REPO_ROOT / "data" / "deep_research"
@@ -37,7 +44,7 @@ _STATUS_CLI_TO_STORED = {"complete": "done"}
 
 
 def _status_matches(stored, requested: str) -> bool:
-    stored = (stored or "")
+    stored = stored or ""
     if not isinstance(stored, str):
         stored = ""
     target = _STATUS_CLI_TO_STORED.get(requested, requested)
@@ -114,12 +121,15 @@ def cmd_report(args):
         if not report.endswith("\n"):
             sys.stdout.write("\n")
         return
-    emit({
-        "id": args.id,
-        "query": data.get("query") or "",
-        "report": report,
-        "sources": data.get("sources") or [],
-    }, args)
+    emit(
+        {
+            "id": args.id,
+            "query": data.get("query") or "",
+            "report": report,
+            "sources": data.get("sources") or [],
+        },
+        args,
+    )
 
 
 def cmd_search(args):
@@ -133,11 +143,13 @@ def cmd_search(args):
         data = _load_path(path)
         if data is None:
             continue
-        haystack = " ".join([
-            (data.get("query") or "").lower(),
-            (data.get("result") or "").lower(),
-            (data.get("category") or "").lower(),
-        ])
+        haystack = " ".join(
+            [
+                (data.get("query") or "").lower(),
+                (data.get("result") or "").lower(),
+                (data.get("category") or "").lower(),
+            ]
+        )
         if q in haystack:
             out.append(_summarize(rp_id, data))
     out.sort(key=lambda r: r.get("started_at") or "", reverse=True)

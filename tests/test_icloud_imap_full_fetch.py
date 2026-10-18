@@ -13,6 +13,7 @@ the three full-message fetches must use BODY.PEEK[], and no bare (RFC822) full
 fetch may remain. The header/uid fetches must be left untouched so listing keeps
 working.
 """
+
 import re
 from pathlib import Path
 

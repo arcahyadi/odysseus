@@ -1,33 +1,41 @@
 # routes/model_routes.py
 """Routes for model and provider management."""
-import os
-import re
-import uuid
-import json
+
 import hashlib
 import ipaddress
+import json
+import logging
+import os
+import re
 import socket
 import time as _time
-import logging
-import httpx
+import uuid
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any
 from urllib.parse import urlparse, urlunparse
-from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
-from pydantic import BaseModel
+
+import httpx
+from fastapi import APIRouter, Body, Form, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from core.database import SessionLocal, ModelEndpoint, Session as DbSession
+from pydantic import BaseModel
+
+from core.database import ModelEndpoint, SessionLocal
+from core.database import Session as DbSession
+from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
-from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS
-from src.tls_overrides import llm_verify
-from src.settings import load_settings as _load_settings, save_settings as _save_settings
+from src.auth_helpers import _auth_disabled, effective_user, owner_filter
+from src.endpoint_resolver import (
+    build_chat_url,
+    build_headers,
+    build_models_url,
+)
 from src.endpoint_resolver import (
     normalize_base as _normalize_base,
-    build_chat_url,
-    build_models_url,
-    build_headers,
 )
-from src.auth_helpers import _auth_disabled, effective_user, owner_filter
+from src.llm_core import ANTHROPIC_MODELS, _detect_provider, _host_match
+from src.settings import load_settings as _load_settings
+from src.settings import save_settings as _save_settings
+from src.tls_overrides import llm_verify
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +45,16 @@ _SPEECH_ENDPOINT_SETTINGS = (
 )
 
 _ENDPOINT_SETTING_FIELDS = {
-    "default_endpoint_id":  ("default_model",  "Default Model"),
-    "utility_endpoint_id":  ("utility_model",   "Utility Model"),
-    "research_endpoint_id": ("research_model",  "Deep Research"),
-    "task_endpoint_id":     ("task_model",       "Background Tasks"),
+    "default_endpoint_id": ("default_model", "Default Model"),
+    "utility_endpoint_id": ("utility_model", "Utility Model"),
+    "research_endpoint_id": ("research_model", "Deep Research"),
+    "task_endpoint_id": ("task_model", "Background Tasks"),
 }
 
 _ENDPOINT_FALLBACK_FIELDS = {
     "default_model_fallbacks": "Default Model Fallbacks",
     "utility_model_fallbacks": "Utility Model Fallbacks",
-    "vision_model_fallbacks":  "Vision Model Fallbacks",
+    "vision_model_fallbacks": "Vision Model Fallbacks",
 }
 
 
@@ -99,10 +107,7 @@ def _clear_endpoint_settings_for_endpoint(settings: dict, ep_id: str, *, include
         chain = settings.get(fallback_key)
         if not isinstance(chain, list):
             continue
-        kept = [
-            entry for entry in chain
-            if not (isinstance(entry, dict) and (entry.get("endpoint_id") or "") == ep_id)
-        ]
+        kept = [entry for entry in chain if not (isinstance(entry, dict) and (entry.get("endpoint_id") or "") == ep_id)]
         if len(kept) != len(chain):
             settings[fallback_key] = kept
             cleared.append(label)
@@ -165,6 +170,7 @@ def _docker_host_gateway_reachable() -> bool:
         return True
     except OSError:
         return False
+
 
 def _container_loopback_reachable(base_url: str, timeout: float = 0.2) -> bool:
     """True when the requested loopback host:port is already reachable from
@@ -233,38 +239,73 @@ def _rewrite_loopback_for_docker(base_url: str, *, container_local: bool = False
 # A model ID matches if it starts with or equals a curated entry.
 _PROVIDER_CURATED = {
     "openai": [
-        "gpt-5.2", "gpt-5.2-pro", "gpt-5", "gpt-5-pro", "gpt-5-mini", "gpt-5-nano",
-        "gpt-4o", "gpt-4o-mini", "o3", "o4-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
-        "gpt-image-1.5", "gpt-image-1", "dall-e-3", "tts-1", "whisper-1",
+        "gpt-5.2",
+        "gpt-5.2-pro",
+        "gpt-5",
+        "gpt-5-pro",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "o3",
+        "o4-mini",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "gpt-image-1.5",
+        "gpt-image-1",
+        "dall-e-3",
+        "tts-1",
+        "whisper-1",
     ],
     "anthropic": [
-        "claude-sonnet-4", "claude-opus-4", "claude-haiku-4",
-        "claude-sonnet-4-5", "claude-haiku-3-5",
+        "claude-sonnet-4",
+        "claude-opus-4",
+        "claude-haiku-4",
+        "claude-sonnet-4-5",
+        "claude-haiku-3-5",
     ],
     "zai": [
-        "glm-5", "glm-5.1", "glm-5v-turbo", "glm-4.7", "glm-4.7-flash",
-        "glm-4.6", "glm-4.6v",
-        "glm-4.5", "glm-4.5v", "glm-4.5-air", "glm-4.5-flash",
+        "glm-5",
+        "glm-5.1",
+        "glm-5v-turbo",
+        "glm-4.7",
+        "glm-4.7-flash",
+        "glm-4.6",
+        "glm-4.6v",
+        "glm-4.5",
+        "glm-4.5v",
+        "glm-4.5-air",
+        "glm-4.5-flash",
     ],
     "zai-coding": [
-        "glm-5.1", "glm-5v-turbo", "glm-5-turbo", "glm-4.7", "glm-4.5-air",
+        "glm-5.1",
+        "glm-5v-turbo",
+        "glm-5-turbo",
+        "glm-4.7",
+        "glm-4.5-air",
     ],
     "kimi-code": [
         "kimi-for-coding",
     ],
     "deepseek": [
-        "deepseek-chat", "deepseek-reasoner",
+        "deepseek-chat",
+        "deepseek-reasoner",
     ],
     "groq": [
-        "openai/gpt-oss-120b", "openai/gpt-oss-20b",
-        "groq/compound", "groq/compound-mini",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "groq/compound",
+        "groq/compound-mini",
         "llama-3.1-8b-instant",
         "llama-3.3-70b-versatile",
         "llama-4-scout-17b-16e-instruct",
         "llama-4-maverick-17b-128e-instruct",
     ],
     "mistral": [
-        "mistral-large-latest", "mistral-medium-latest", "mistral-small-latest",
+        "mistral-large-latest",
+        "mistral-medium-latest",
+        "mistral-small-latest",
     ],
     "together": [
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
@@ -278,11 +319,19 @@ _PROVIDER_CURATED = {
         "accounts/fireworks/models/deepseek-r1",
     ],
     "google": [
-        "gemini-3.5", "gemini-3.1", "gemini-3",
-        "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash",
+        "gemini-3.5",
+        "gemini-3.1",
+        "gemini-3",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
     ],
     "xai": [
-        "grok-4.3", "grok-4", "grok-4-fast", "grok-3", "grok-3-fast",
+        "grok-4.3",
+        "grok-4",
+        "grok-4-fast",
+        "grok-3",
+        "grok-3-fast",
     ],
 }
 
@@ -337,6 +386,7 @@ def _curate_models(model_ids, provider):
         return model_ids, []
     curated = []
     extra = []
+
     def _best_match_idx(mid):
         """Return index of the longest matching curated entry, or -1."""
         best_i, best_len = -1, 0
@@ -428,7 +478,7 @@ def _manual_refresh_timeout(ep: Any, category: str, requested: Any = None) -> fl
     return float(max(stored or 30, 30))
 
 
-def _parse_model_list(raw: Any) -> List[str]:
+def _parse_model_list(raw: Any) -> list[str]:
     """Return a sanitized list of model ids from JSON/list/comma text."""
     if raw is None:
         return []
@@ -458,7 +508,7 @@ def _parse_model_list(raw: Any) -> List[str]:
     return out
 
 
-def _parse_positive_int(raw: Any, *, minimum: int = 1, maximum: int = 86400) -> Optional[int]:
+def _parse_positive_int(raw: Any, *, minimum: int = 1, maximum: int = 86400) -> int | None:
     try:
         val = int(str(raw).strip())
     except Exception:
@@ -480,7 +530,7 @@ def _explicit_model_list_timeout(base_url: str, endpoint_kind: str = "auto", req
     return 15.0 if category == "local" else (3.0 if _is_ollama_base(base_url) else 2.0)
 
 
-def _cached_model_ids(ep: Any) -> List[str]:
+def _cached_model_ids(ep: Any) -> list[str]:
     return _parse_model_list(getattr(ep, "cached_models", None))
 
 
@@ -499,20 +549,49 @@ def _is_ollama_base(base_url: str) -> bool:
 
 # Prefixes/substrings for models that are NOT chat-completions-capable
 _NON_CHAT_PREFIXES = (
-    "dall-e", "tts-", "whisper", "text-embedding", "embedding",
-    "davinci", "babbage", "moderation", "omni-moderation",
-    "sora", "gpt-image", "chatgpt-image",
+    "dall-e",
+    "tts-",
+    "whisper",
+    "text-embedding",
+    "embedding",
+    "davinci",
+    "babbage",
+    "moderation",
+    "omni-moderation",
+    "sora",
+    "gpt-image",
+    "chatgpt-image",
     # embedding / retrieval / non-chat models (common across providers)
-    "snowflake/arctic-embed", "nvidia/nv-embed", "embed",
+    "snowflake/arctic-embed",
+    "nvidia/nv-embed",
+    "embed",
 )
 _NON_CHAT_CONTAINS = (
-    "-realtime", "-transcribe", "-tts", "-codex",
-    "codex-", "content-safety", "-safety", "-reward", "nvclip",
-    "kosmos", "fuyu", "deplot", "vila", "neva",
-    "gliner", "riva", "-parse", "-embedqa", "-nemoretriever",
-    "topic-control", "calibration",
-    "ai-synthetic-video", "cosmos-reason2",
-    "bge", "llama-guard",
+    "-realtime",
+    "-transcribe",
+    "-tts",
+    "-codex",
+    "codex-",
+    "content-safety",
+    "-safety",
+    "-reward",
+    "nvclip",
+    "kosmos",
+    "fuyu",
+    "deplot",
+    "vila",
+    "neva",
+    "gliner",
+    "riva",
+    "-parse",
+    "-embedqa",
+    "-nemoretriever",
+    "topic-control",
+    "calibration",
+    "ai-synthetic-video",
+    "cosmos-reason2",
+    "bge",
+    "llama-guard",
 )
 _NON_CHAT_EXACT_PREFIXES = (
     "gpt-audio",  # gpt-audio, gpt-audio-mini etc. (not gpt-4o-audio-preview which is chat)
@@ -522,6 +601,10 @@ _NON_CHAT_EXACT_PREFIXES = (
 
 def _is_chat_model(model_id: str) -> bool:
     """Return True if the model ID looks like a chat/completions-capable model."""
+    if not isinstance(model_id, str):
+        # Non-compliant upstreams can return non-string IDs (e.g. int/None);
+        # treat them as chat-capable rather than crashing on .lower().
+        return True
     mid = model_id.lower()
     for prefix in _NON_CHAT_PREFIXES:
         if mid.startswith(prefix):
@@ -535,15 +618,20 @@ def _is_chat_model(model_id: str) -> bool:
     return True
 
 
-def _delete_orphaned_provider_auth(db, auth_id: Optional[str], exclude_ep_id: Optional[str] = None) -> bool:
+def _delete_orphaned_provider_auth(db, auth_id: str | None, exclude_ep_id: str | None = None) -> bool:
     """Delete a ProviderAuthSession once no endpoint still references it."""
     if not auth_id:
         return False
     from core.database import ProviderAuthSession
-    still_referenced = db.query(ModelEndpoint.id).filter(
-        ModelEndpoint.provider_auth_id == auth_id,
-        ModelEndpoint.id != exclude_ep_id,
-    ).first()
+
+    still_referenced = (
+        db.query(ModelEndpoint.id)
+        .filter(
+            ModelEndpoint.provider_auth_id == auth_id,
+            ModelEndpoint.id != exclude_ep_id,
+        )
+        .first()
+    )
     if still_referenced is not None:
         return False
     auth_row = db.query(ProviderAuthSession).filter(ProviderAuthSession.id == auth_id).first()
@@ -573,7 +661,7 @@ def _safe_build_models_url(base_url: str) -> str:
         return f"{(base_url or '').rstrip('/')}/models"
 
 
-def _safe_build_headers(api_key: Optional[str], base_url: str) -> dict:
+def _safe_build_headers(api_key: str | None, base_url: str) -> dict:
     """Build auth headers without letting optional provider imports break probes."""
     try:
         return build_headers(api_key, base_url)
@@ -582,26 +670,15 @@ def _safe_build_headers(api_key: Optional[str], base_url: str) -> dict:
         return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
-def _redact_url_for_log(url: str) -> str:
-    """Return a URL safe for logs by removing userinfo and query/fragment."""
-    try:
-        parsed = urlparse(url or "")
-        host = parsed.hostname or ""
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
-        return urlunparse((parsed.scheme, host, parsed.path, "", "", ""))
-    except Exception:
-        return "<endpoint>"
-
-
 def _is_discovery_only_provider(provider: str) -> bool:
     return provider == "chatgpt-subscription"
 
 
-def _resolve_probe_key(ep) -> Optional[str]:
+def _resolve_probe_key(ep) -> str | None:
     """API key/bearer to probe an endpoint with."""
     try:
         from src.endpoint_resolver import resolve_endpoint_runtime
+
         _base, key = resolve_endpoint_runtime(ep, owner=getattr(ep, "owner", None))
         return key
     except Exception as exc:
@@ -619,18 +696,35 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
         {"role": "user", "content": "Say OK"},
     ]
     # Simple tool definition to test tool support
-    _test_tools = [{"type": "function", "function": {"name": "test", "description": "Test tool", "parameters": {"type": "object", "properties": {}}}}] if with_tools else None
+    _test_tools = (
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "test",
+                    "description": "Test tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        if with_tools
+        else None
+    )
 
     if provider == "anthropic":
-        from src.llm_core import _normalize_anthropic_url, _build_anthropic_headers, _build_anthropic_payload
+        from src.llm_core import _build_anthropic_headers, _build_anthropic_payload, _normalize_anthropic_url
+
         target_url = _normalize_anthropic_url(base)
         auth_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         h = _build_anthropic_headers(auth_headers)
         payload = _build_anthropic_payload(model_id, messages, 0.0, 5)
         if _test_tools:
-            payload["tools"] = [{"name": "test", "description": "Test tool", "input_schema": {"type": "object", "properties": {}}}]
+            payload["tools"] = [
+                {"name": "test", "description": "Test tool", "input_schema": {"type": "object", "properties": {}}}
+            ]
     elif provider == "ollama":
         from src.llm_core import _build_ollama_payload
+
         target_url = build_chat_url(base)
         h = _safe_build_headers(api_key, base)
         h["Content-Type"] = "application/json"
@@ -639,7 +733,8 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
         target_url = build_chat_url(base)
         h = _safe_build_headers(api_key, base)
         h["Content-Type"] = "application/json"
-        from src.llm_core import _uses_max_completion_tokens, _restricts_temperature
+        from src.llm_core import _restricts_temperature, _uses_max_completion_tokens
+
         _max_key = "max_completion_tokens" if _uses_max_completion_tokens(model_id) else "max_tokens"
         payload = {"model": model_id, "messages": messages, _max_key: 5}
         # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature, so a
@@ -736,16 +831,44 @@ def _is_loading_model_response(resp: Any) -> bool:
     return "loading model" in body.lower()
 
 
+def _openai_model_ids(data: Any) -> list[str]:
+    """Extract OpenAI-style model IDs (``{"data": [{"id": ...}]}``).
 
-def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
+    Tolerates a non-dict body and non-string IDs from non-compliant upstreams,
+    returning only non-empty string IDs.
+    """
+    items = data.get("data") if isinstance(data, dict) else None
+    return [m["id"] for m in (items or []) if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
+
+
+def _ollama_model_names(data: Any) -> list[str]:
+    """Extract native-Ollama model names (``{"models": [{"name"|"model": ...}]}``).
+
+    Same tolerance as :func:`_openai_model_ids`: a non-dict body or non-string
+    value is skipped rather than crashing, preserving name-then-model precedence.
+    """
+    items = data.get("models") if isinstance(data, dict) else None
+    out: list[str] = []
+    for m in items or []:
+        if not isinstance(m, dict):
+            continue
+        v = m.get("name") or m.get("model")
+        if isinstance(v, str) and v:
+            out.append(v)
+    return out
+
+
+def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> list[str]:
     """Probe a base URL's /models endpoint and return list of model IDs.
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
     from src.endpoint_resolver import resolve_url
     from src.llm_core import httpx_get_kimi_aware
+
     base = resolve_url(_normalize_base(base_url))
     provider = _safe_detect_provider(base)
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import fetch_available_models
+
         if api_key:
             return fetch_available_models(api_key, timeout=timeout)
         return []
@@ -759,7 +882,7 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             r = httpx.get(url, headers=headers, timeout=timeout, verify=llm_verify())
             r.raise_for_status()
             data = r.json()
-            models = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+            models = _openai_model_ids(data)
             if models:
                 return models
         except httpx.HTTPStatusError as e:
@@ -781,10 +904,10 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
         r.raise_for_status()
         data = r.json()
         # OpenAI format: {"data": [{"id": "model-name"}]}
-        models = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+        models = _openai_model_ids(data)
         # Ollama format: {"models": [{"name": "model-name"}]}
         if not models:
-            models = [m.get("name") or m.get("model") for m in (data.get("models") or []) if m.get("name") or m.get("model")]
+            models = _ollama_model_names(data)
         if models:
             # Z.AI coding plan omits some working models from /models;
             # append curated-only entries for that endpoint only.
@@ -810,9 +933,9 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
         logger.warning("Failed to probe %s: %s", _redact_url_for_log(url), e)
     except Exception as e:
         if api_key:
-            logger.warning(f"Failed to probe {url} with API key: {e}")
+            logger.warning("Failed to probe %s with API key: %s", _redact_url_for_log(url), e)
             return []
-        logger.warning(f"Failed to probe {url}: {e}")
+        logger.warning("Failed to probe %s: %s", _redact_url_for_log(url), e)
 
     # Older Ollama builds and some proxies expose native /api/tags even when
     # the OpenAI-compatible /v1/models path is unavailable.
@@ -823,7 +946,7 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             r = httpx.get(root + "/api/tags", timeout=timeout, verify=llm_verify())
             r.raise_for_status()
             data = r.json()
-            models = [m.get("name") or m.get("model") for m in (data.get("models") or []) if m.get("name") or m.get("model")]
+            models = _ollama_model_names(data)
             if models:
                 return [m for m in models if _is_chat_model(m)]
     except Exception as e:
@@ -837,9 +960,10 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     return []
 
 
-def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> Dict[str, Any]:
+def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> dict[str, Any]:
     """Reachability probe that does not require installed/listed models."""
     from src.endpoint_resolver import resolve_url
+
     base = resolve_url(_normalize_base(base_url))
     headers = _safe_build_headers(api_key, base)
 
@@ -847,10 +971,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
     # /api/tags. Probe native paths for Ollama-style endpoints, but avoid using
     # /models as a generic health check because large proxy catalogs can be slow.
     parsed_base = urlparse(base)
-    looks_like_ollama = (
-        parsed_base.port == 11434
-        or "ollama" in (parsed_base.hostname or "").lower()
-    )
+    looks_like_ollama = parsed_base.port == 11434 or "ollama" in (parsed_base.hostname or "").lower()
 
     def _is_loading_model_response(r) -> bool:
         if getattr(r, "status_code", None) != 503:
@@ -861,7 +982,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
             body = ""
         return "loading model" in body.lower()
 
-    def _result_from_response(r) -> Dict[str, Any]:
+    def _result_from_response(r) -> dict[str, Any]:
         if 300 <= r.status_code < 400:
             loc = r.headers.get("location", "")
             if loc.startswith("/login") or "/login" in loc:
@@ -886,7 +1007,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
             }
         return {"reachable": False, "status_code": r.status_code, "error": f"HTTP {r.status_code}"}
 
-    last_error: Optional[str] = None
+    last_error: str | None = None
 
     try:
         if looks_like_ollama:
@@ -916,7 +1037,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
         if 400 <= sc < 500 and sc not in (401, 403):
             models_url = _safe_build_models_url(base)
             try:
-                r2 = httpx.get(models_url, headers=headers,timeout=timeout, verify=llm_verify())
+                r2 = httpx.get(models_url, headers=headers, timeout=timeout, verify=llm_verify())
                 result2 = _result_from_response(r2)
                 if result2["reachable"]:
                     return result2
@@ -931,8 +1052,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
     return {"reachable": False, "status_code": None, "error": last_error}
 
 
-
-def _model_endpoint_error_message(base_url: str, ping: Dict[str, Any] = None) -> str:
+def _model_endpoint_error_message(base_url: str, ping: dict[str, Any] = None) -> str:
     """Return a provider-aware error message for failed endpoint probes.
 
     Surfaces the URL we actually probed and, when the endpoint looks like
@@ -945,6 +1065,7 @@ def _model_endpoint_error_message(base_url: str, ping: Dict[str, Any] = None) ->
     ping = ping or {}
     error = ping.get("error")
     from src.endpoint_resolver import build_models_url
+
     try:
         probed = build_models_url(base_url) or base_url
     except Exception:
@@ -952,12 +1073,7 @@ def _model_endpoint_error_message(base_url: str, ping: Dict[str, Any] = None) ->
     parsed = urlparse(base_url)
     host = (parsed.hostname or "").lower()
     is_ollama = parsed.port == 11434 or "ollama" in host or "ollama" in base_url.lower()
-    is_lmstudio = (
-        parsed.port == 1234
-        or "lmstudio" in host
-        or "lm-studio" in host
-        or "lm_studio" in host
-    )
+    is_lmstudio = parsed.port == 1234 or "lmstudio" in host or "lm-studio" in host or "lm_studio" in host
 
     if is_lmstudio:
         parts = [
@@ -967,12 +1083,10 @@ def _model_endpoint_error_message(base_url: str, ping: Dict[str, Any] = None) ->
         if error:
             parts.append(f"Last probe error: {error}.")
         parts.append(
-            "Open LM Studio, load at least one model, and confirm the "
-            "Developer Server is running on port 1234."
+            "Open LM Studio, load at least one model, and confirm the Developer Server is running on port 1234."
         )
         parts.append(
-            "Base URL should be http://localhost:1234/v1 (native) or "
-            "http://host.docker.internal:1234/v1 (Docker)."
+            "Base URL should be http://localhost:1234/v1 (native) or http://host.docker.internal:1234/v1 (Docker)."
         )
         return " ".join(parts)
 
@@ -1030,7 +1144,7 @@ def _merge_model_ids(*lists):
     """Concatenate model-ID lists, de-duplicating and preserving order."""
     out, seen = [], set()
     for ids in lists:
-        for m in (ids or []):
+        for m in ids or []:
             if not isinstance(m, str) or m in seen:
                 continue
             seen.add(m)
@@ -1057,7 +1171,7 @@ def _visible_models(cached_models, hidden_models, pinned_models=None):
     return [m for m in merged if m not in hidden]
 
 
-def _api_key_fingerprint(api_key: Optional[str]) -> str:
+def _api_key_fingerprint(api_key: str | None) -> str:
     """Stable, non-secret label for distinguishing same-URL credentials."""
     key = (api_key or "").strip()
     if not key:
@@ -1070,6 +1184,7 @@ def setup_model_routes(model_discovery):
 
     # ---- Model list cache ----
     import time as _time
+
     # Per-user cache: { owner_key: {"data": ..., "time": ...} }. owner_key is
     # the username (or "" for the unconfigured / single-user case). Without
     # this every user shared the same cached result and the picker showed
@@ -1086,12 +1201,12 @@ def setup_model_routes(model_discovery):
     # Track model-list refreshes by URL+key. This prevents repeated picker/API
     # opens from starting duplicate /models probes, and gives slow/offline
     # providers a cooldown after failures.
-    _refresh_state: Dict[str, Dict[str, Any]] = {}
+    _refresh_state: dict[str, dict[str, Any]] = {}
     _refresh_inflight = {"v": False}  # coarse single-flight guard
     _REFRESH_FAILURE_BASE = 300.0
     _REFRESH_FAILURE_MAX = 3600.0
 
-    def _refresh_key(base: str, api_key: Optional[str]) -> str:
+    def _refresh_key(base: str, api_key: str | None) -> str:
         return f"{base.rstrip('/')}\x00{api_key or ''}"
 
     def _ts(value: Any) -> float:
@@ -1107,7 +1222,7 @@ def setup_model_routes(model_discovery):
             return min(5.0 * (2 ** max(0, fails - 1)), 30.0)
         return min(_REFRESH_FAILURE_BASE * (2 ** max(0, fails - 1)), _REFRESH_FAILURE_MAX)
 
-    def _should_refresh_endpoint(ep: Any, now: float, force: bool = False) -> tuple[bool, Dict[str, Any]]:
+    def _should_refresh_endpoint(ep: Any, now: float, force: bool = False) -> tuple[bool, dict[str, Any]]:
         base = _normalize_base(getattr(ep, "base_url", "") or "")
         kind = _effective_endpoint_kind(ep, base)
         category = _classify_endpoint(base, kind)
@@ -1135,16 +1250,16 @@ def setup_model_routes(model_discovery):
         fails = int(state.get("fail_count") or 0)
         if fails and not force:
             last_failure = float(state.get("last_failure") or 0.0)
-            empty_local = (
-                not cached
-                and category == "local"
-                and str(getattr(ep, "id", "") or "").startswith("local-")
-            )
+            empty_local = not cached and category == "local" and str(getattr(ep, "id", "") or "").startswith("local-")
             if now - last_failure < _failure_delay(fails, empty_local=empty_local):
                 return False, info
         if cached and not force:
             interval = _endpoint_refresh_interval(ep, category)
-            last_good = float(state.get("last_success") or 0.0) or _ts(getattr(ep, "updated_at", None)) or _ts(getattr(ep, "created_at", None))
+            last_good = (
+                float(state.get("last_success") or 0.0)
+                or _ts(getattr(ep, "updated_at", None))
+                or _ts(getattr(ep, "created_at", None))
+            )
             if last_good and now - last_good < interval:
                 return False, info
         return True, info
@@ -1156,6 +1271,7 @@ def setup_model_routes(model_discovery):
         a non-empty cached model list on timeout/failure, and proxy/manual
         endpoints are skipped unless explicitly forced."""
         import threading
+
         if _refresh_inflight["v"]:
             return  # already running
         _refresh_inflight["v"] = True
@@ -1163,29 +1279,33 @@ def setup_model_routes(model_discovery):
         def _do():
             try:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
+
                 db = SessionLocal()
                 changed = False
                 try:
                     endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
                     now = _time.time()
-                    groups: Dict[str, Dict[str, Any]] = {}
+                    groups: dict[str, dict[str, Any]] = {}
                     for ep in endpoints:
                         ok, info = _should_refresh_endpoint(ep, now, force=force)
                         if not ok:
                             continue
-                        groups.setdefault(info["key"], {
-                            "base": info["base"],
-                            "api_key": info["api_key"],
-                            "timeout": info["timeout"],
-                            "endpoint_ids": [],
-                        })["endpoint_ids"].append(info["id"])
+                        groups.setdefault(
+                            info["key"],
+                            {
+                                "base": info["base"],
+                                "api_key": info["api_key"],
+                                "timeout": info["timeout"],
+                                "endpoint_ids": [],
+                            },
+                        )["endpoint_ids"].append(info["id"])
 
                     for key in groups:
                         st = _refresh_state.setdefault(key, {})
                         st["inflight"] = True
                         st["last_attempt"] = now
 
-                    def _probe_one(key: str, data: Dict[str, Any]):
+                    def _probe_one(key: str, data: dict[str, Any]):
                         try:
                             ids = _probe_endpoint(data["base"], data.get("api_key"), timeout=data.get("timeout") or 2)
                             return key, data["endpoint_ids"], ids, None
@@ -1217,11 +1337,12 @@ def setup_model_routes(model_discovery):
                 if changed:
                     _invalidate_models_cache()
             except Exception as e:
-                logger.warning('Background endpoint refresh failed: %s', e)
+                logger.warning("Background endpoint refresh failed: %s", e)
             finally:
                 for st in _refresh_state.values():
                     st["inflight"] = False
                 _refresh_inflight["v"] = False
+
         threading.Thread(target=_do, daemon=True).start()
 
     def _fetch_models(owner: str = "", is_admin: bool = False):
@@ -1273,37 +1394,41 @@ def setup_model_routes(model_discovery):
                     if m not in curated:
                         curated.append(m)
                 extra = [m for m in extra if m not in pinned]
-                items.append({
-                    "host": "custom",
-                    "port": 0,
-                    "url": chat_url,
-                    "models": curated,
-                    "models_display": [mid.split("/")[-1] for mid in curated],
-                    "models_extra": extra,
-                    "models_extra_display": [mid.split("/")[-1] for mid in extra],
-                    "endpoint_id": ep.id,
-                    "endpoint_name": ep.name,
-                    "category": category,
-                    "endpoint_kind": kind,
-                    "model_type": ep_model_type,
-                })
+                items.append(
+                    {
+                        "host": "custom",
+                        "port": 0,
+                        "url": chat_url,
+                        "models": curated,
+                        "models_display": [mid.split("/")[-1] for mid in curated],
+                        "models_extra": extra,
+                        "models_extra_display": [mid.split("/")[-1] for mid in extra],
+                        "endpoint_id": ep.id,
+                        "endpoint_name": ep.name,
+                        "category": category,
+                        "endpoint_kind": kind,
+                        "model_type": ep_model_type,
+                    }
+                )
             else:
                 # Endpoint unreachable but still show it greyed out
-                items.append({
-                    "host": "custom",
-                    "port": 0,
-                    "url": chat_url,
-                    "models": [],
-                    "models_display": [],
-                    "models_extra": [],
-                    "models_extra_display": [],
-                    "endpoint_id": ep.id,
-                    "endpoint_name": ep.name,
-                    "category": category,
-                    "endpoint_kind": kind,
-                    "model_type": ep_model_type,
-                    "offline": True,
-                })
+                items.append(
+                    {
+                        "host": "custom",
+                        "port": 0,
+                        "url": chat_url,
+                        "models": [],
+                        "models_display": [],
+                        "models_extra": [],
+                        "models_extra_display": [],
+                        "endpoint_id": ep.id,
+                        "endpoint_name": ep.name,
+                        "category": category,
+                        "endpoint_kind": kind,
+                        "model_type": ep_model_type,
+                        "offline": True,
+                    }
+                )
 
         return {"hosts": [], "items": items}
 
@@ -1325,7 +1450,12 @@ def setup_model_routes(model_discovery):
             # Reject anonymous in configured deployments — no leaking the model
             # list to unauthenticated callers.
             auth_mgr = getattr(request.app.state, "auth_manager", None)
-            if not owner and not _auth_disabled() and auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
+            if (
+                not owner
+                and not _auth_disabled()
+                and auth_mgr is not None
+                and getattr(auth_mgr, "is_configured", False)
+            ):
                 raise HTTPException(401, "Not authenticated")
         except HTTPException:
             raise
@@ -1359,7 +1489,7 @@ def setup_model_routes(model_discovery):
     # short enough that a freshly-killed local server shows as offline
     # within ~8s of the user noticing.
     _LOCAL_PROBE_TTL = 8.0
-    _local_probe_cache: Dict[str, Any] = {"data": None, "time": 0.0}
+    _local_probe_cache: dict[str, Any] = {"data": None, "time": 0.0}
 
     @router.get("/model-endpoints/probe-local")
     async def probe_local_endpoints(request: Request):
@@ -1370,8 +1500,7 @@ def setup_model_routes(model_discovery):
         {ep_id: {alive, latency_ms, error}}."""
         require_admin(request)
         now = _time.time()
-        if (_local_probe_cache["data"] is not None and
-                (now - _local_probe_cache["time"]) < _LOCAL_PROBE_TTL):
+        if _local_probe_cache["data"] is not None and (now - _local_probe_cache["time"]) < _LOCAL_PROBE_TTL:
             return _local_probe_cache["data"]
 
         db = SessionLocal()
@@ -1386,15 +1515,18 @@ def setup_model_routes(model_discovery):
         finally:
             db.close()
 
-        grouped: Dict[str, Dict[str, Any]] = {}
+        grouped: dict[str, dict[str, Any]] = {}
         for ep_id, base, api_key in local_eps:
             key = _refresh_key(base, api_key)
-            grouped.setdefault(key, {"base": base, "api_key": api_key, "endpoint_ids": []})["endpoint_ids"].append(ep_id)
+            grouped.setdefault(key, {"base": base, "api_key": api_key, "endpoint_ids": []})["endpoint_ids"].append(
+                ep_id
+            )
 
-        async def _probe_one(data: Dict[str, Any]) -> Dict[str, Any]:
+        async def _probe_one(data: dict[str, Any]) -> dict[str, Any]:
             t0 = _time.time()
             try:
                 import asyncio as _asyncio
+
                 # Bumped 1.5s → 3.5s. The previous 1.5s budget was clipping
                 # local vLLM endpoints on Tailscale links where the model
                 # server is still loading (Qwen3.5-122B takes 2–3 min to
@@ -1414,12 +1546,13 @@ def setup_model_routes(model_discovery):
                 return {"alive": False, "latency_ms": None, "status_code": None, "error": str(e)[:120]}
 
         import asyncio as _asyncio
+
         results_list = await _asyncio.gather(
             *[_probe_one(data) for data in grouped.values()],
             return_exceptions=False,
         )
-        results: Dict[str, Any] = {}
-        for data, r in zip(grouped.values(), results_list):
+        results: dict[str, Any] = {}
+        for data, r in zip(grouped.values(), results_list, strict=False):
             for eid in data["endpoint_ids"]:
                 results[eid] = r
 
@@ -1455,7 +1588,11 @@ def setup_model_routes(model_discovery):
                 t0 = _time.time()
                 ping = _ping_endpoint(base, ep.api_key, timeout=1.5)
                 entry["latency_ms"] = round((_time.time() - t0) * 1000)
-                entry["status"] = "loading" if ping.get("loading") else ("online" if ping.get("reachable") or cached_count else "offline")
+                entry["status"] = (
+                    "loading"
+                    if ping.get("loading")
+                    else ("online" if ping.get("reachable") or cached_count else "offline")
+                )
                 entry["error"] = ping.get("error")
                 entry["model_count"] = cached_count or (len(ANTHROPIC_MODELS) if provider == "anthropic" else 0)
             except Exception as e:
@@ -1513,7 +1650,7 @@ def setup_model_routes(model_discovery):
             db.close()
 
     @router.get("/probe")
-    def probe_models(request: Request, endpoint_id: Optional[str] = Query(None)):
+    def probe_models(request: Request, endpoint_id: str | None = Query(None)):
         """Probe individual models with a tiny completion request. Streams SSE results."""
         require_admin(request)
         db = SessionLocal()
@@ -1525,18 +1662,22 @@ def setup_model_routes(model_discovery):
             # Detach from session
             ep_data = []
             for ep in endpoints:
-                ep_data.append({
-                    "id": ep.id,
-                    "name": ep.name,
-                    "base_url": ep.base_url,
-                    "api_key": ep.api_key,
-                })
+                ep_data.append(
+                    {
+                        "id": ep.id,
+                        "name": ep.name,
+                        "base_url": ep.base_url,
+                        "api_key": ep.api_key,
+                    }
+                )
         finally:
             db.close()
 
         if not ep_data:
+
             def _empty():
                 yield f"data: {json.dumps({'type': 'probe_done', 'total': 0, 'ok': 0})}\n\n"
+
             return StreamingResponse(_empty(), media_type="text/event-stream")
 
         def _stream():
@@ -1588,7 +1729,11 @@ def setup_model_routes(model_discovery):
         """Get all available providers (cached for 30s)."""
         require_admin(request)
         now = _time.time()
-        if not refresh and _providers_cache["data"] is not None and (now - _providers_cache["time"]) < _PROVIDERS_CACHE_TTL:
+        if (
+            not refresh
+            and _providers_cache["data"] is not None
+            and (now - _providers_cache["time"]) < _PROVIDERS_CACHE_TTL
+        ):
             return _providers_cache["data"]
         result = model_discovery.get_providers()
         _providers_cache["data"] = result
@@ -1604,7 +1749,7 @@ def setup_model_routes(model_discovery):
     # ---- Admin: model endpoints CRUD ----
 
     @router.get("/model-endpoints")
-    def list_model_endpoints(request: Request) -> List[Dict[str, Any]]:
+    def list_model_endpoints(request: Request) -> list[dict[str, Any]]:
         require_admin(request)
         db = SessionLocal()
         try:
@@ -1638,27 +1783,29 @@ def setup_model_routes(model_discovery):
                         if ping.get("loading"):
                             base = _normalize_base(r.base_url)
                             kind = _effective_endpoint_kind(r, base)
-                            results.append({
-                                "id": r.id,
-                                "name": r.name,
-                                "base_url": r.base_url,
-                                "has_key": bool(r.api_key),
-                                "api_key_fingerprint": _api_key_fingerprint(r.api_key),
-                                "is_enabled": r.is_enabled,
-                                "models": visible,
-                                "pinned_models": pinned,
-                                "hidden_count": len(hidden),
-                                "online": True,
-                                "status": status,
-                                "ping_error": (ping or {}).get("error") if ping else None,
-                                "model_type": getattr(r, "model_type", None) or "llm",
-                                "supports_tools": getattr(r, "supports_tools", None),
-                                "endpoint_kind": kind,
-                                "category": _classify_endpoint(base, kind),
-                                "model_refresh_mode": _endpoint_refresh_mode(r, kind),
-                                "model_refresh_interval": getattr(r, "model_refresh_interval", None),
-                                "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
-                            })
+                            results.append(
+                                {
+                                    "id": r.id,
+                                    "name": r.name,
+                                    "base_url": r.base_url,
+                                    "has_key": bool(r.api_key),
+                                    "api_key_fingerprint": _api_key_fingerprint(r.api_key),
+                                    "is_enabled": r.is_enabled,
+                                    "models": visible,
+                                    "pinned_models": pinned,
+                                    "hidden_count": len(hidden),
+                                    "online": True,
+                                    "status": status,
+                                    "ping_error": (ping or {}).get("error") if ping else None,
+                                    "model_type": getattr(r, "model_type", None) or "llm",
+                                    "supports_tools": getattr(r, "supports_tools", None),
+                                    "endpoint_kind": kind,
+                                    "category": _classify_endpoint(base, kind),
+                                    "model_refresh_mode": _endpoint_refresh_mode(r, kind),
+                                    "model_refresh_interval": getattr(r, "model_refresh_interval", None),
+                                    "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
+                                }
+                            )
                             continue
                         # Best-effort: if the probe came back reachable, try
                         # to populate cached_models in the background so the
@@ -1678,27 +1825,29 @@ def setup_model_routes(model_discovery):
                             logger.debug(f"opportunistic cached_models refill failed for {r.id}: {_refill_err!r}")
                 base = _normalize_base(r.base_url)
                 kind = _effective_endpoint_kind(r, base)
-                results.append({
-                    "id": r.id,
-                    "name": r.name,
-                    "base_url": r.base_url,
-                    "has_key": bool(r.api_key),
-                    "api_key_fingerprint": _api_key_fingerprint(r.api_key),
-                    "is_enabled": r.is_enabled,
-                    "models": visible,
-                    "pinned_models": pinned,
-                    "hidden_count": len(hidden),
-                    "online": status != "offline",
-                    "status": status,
-                    "ping_error": (ping or {}).get("error") if ping else None,
-                    "model_type": getattr(r, "model_type", None) or "llm",
-                    "supports_tools": getattr(r, "supports_tools", None),
-                    "endpoint_kind": kind,
-                    "category": _classify_endpoint(base, kind),
-                    "model_refresh_mode": _endpoint_refresh_mode(r, kind),
-                    "model_refresh_interval": getattr(r, "model_refresh_interval", None),
-                    "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
-                })
+                results.append(
+                    {
+                        "id": r.id,
+                        "name": r.name,
+                        "base_url": r.base_url,
+                        "has_key": bool(r.api_key),
+                        "api_key_fingerprint": _api_key_fingerprint(r.api_key),
+                        "is_enabled": r.is_enabled,
+                        "models": visible,
+                        "pinned_models": pinned,
+                        "hidden_count": len(hidden),
+                        "online": status != "offline",
+                        "status": status,
+                        "ping_error": (ping or {}).get("error") if ping else None,
+                        "model_type": getattr(r, "model_type", None) or "llm",
+                        "supports_tools": getattr(r, "supports_tools", None),
+                        "endpoint_kind": kind,
+                        "category": _classify_endpoint(base, kind),
+                        "model_refresh_mode": _endpoint_refresh_mode(r, kind),
+                        "model_refresh_interval": getattr(r, "model_refresh_interval", None),
+                        "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
+                    }
+                )
             return results
         finally:
             db.close()
@@ -1730,6 +1879,7 @@ def setup_model_routes(model_discovery):
             raise HTTPException(400, "Base URL is required")
         # Resolve hostname via Tailscale if DNS fails
         from src.endpoint_resolver import resolve_url
+
         base_url = resolve_url(base_url)
         # In Docker, manually added loopback URLs usually point at a host-local
         # server. Cookbook local serves are launched inside Odysseus itself, so
@@ -1745,9 +1895,7 @@ def setup_model_routes(model_discovery):
         refresh_interval = _parse_positive_int(model_refresh_interval, minimum=30, maximum=86400)
         refresh_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         require_model_list = _truthy(require_models)
-        should_probe = (
-            require_model_list or requested_kind in ("api", "proxy") or not _truthy(skip_probe)
-        )
+        should_probe = require_model_list or requested_kind in ("api", "proxy") or not _truthy(skip_probe)
         explicit_timeout = _explicit_model_list_timeout(base_url, requested_kind, refresh_timeout)
 
         # Dedupe: if an endpoint with the same base_url already exists and
@@ -1755,6 +1903,7 @@ def setup_model_routes(model_discovery):
         # instead of creating a duplicate row. Fixes "Scan for Servers"
         # re-adding manually-added endpoints under their host:port name.
         from src.auth_helpers import get_current_user as _gcu_dedup
+
         _caller = _gcu_dedup(request) or None
         _incoming_api_key = api_key.strip()
         _db_dedup = SessionLocal()
@@ -1789,11 +1938,15 @@ def setup_model_routes(model_discovery):
                     )
                     existing.pinned_models = json.dumps(_merged_pinned) if _merged_pinned else None
                     changed = True
-                existing_kind_for_probe = requested_kind if requested_kind != "auto" else _effective_endpoint_kind(existing, base_url)
+                existing_kind_for_probe = (
+                    requested_kind if requested_kind != "auto" else _effective_endpoint_kind(existing, base_url)
+                )
                 if requested_kind != "auto" and _endpoint_kind(existing) == "auto":
                     existing.endpoint_kind = requested_kind
                     changed = True
-                if model_refresh_mode or (requested_kind == "proxy" and _endpoint_refresh_mode(existing, requested_kind) != refresh_mode):
+                if model_refresh_mode or (
+                    requested_kind == "proxy" and _endpoint_refresh_mode(existing, requested_kind) != refresh_mode
+                ):
                     existing.model_refresh_mode = refresh_mode
                     changed = True
                 if refresh_interval is not None:
@@ -1860,6 +2013,7 @@ def setup_model_routes(model_discovery):
             # to all users), preserving the pre-fix "everyone sees everything"
             # behaviour for endpoints the admin explicitly intends to share.
             from src.auth_helpers import get_current_user as _gcu
+
             _shared_flag = (shared or "").strip().lower() in ("true", "1", "yes")
             _owner_val = None if _shared_flag else (_gcu(request) or None)
             ep = ModelEndpoint(
@@ -1888,12 +2042,15 @@ def setup_model_routes(model_discovery):
             settings = _load_settings()
             enabled_ids = {
                 e.id
-                for e in db.query(ModelEndpoint).filter(
+                for e in db.query(ModelEndpoint)
+                .filter(
                     ModelEndpoint.is_enabled == True  # noqa: E712
-                ).all()
+                )
+                .all()
             }
             if _default_endpoint_needs_assignment(settings.get("default_endpoint_id") or "", enabled_ids):
                 from src.endpoint_resolver import _first_chat_model
+
                 settings["default_endpoint_id"] = ep.id
                 settings["default_model"] = _first_chat_model(model_ids) or ""
                 _save_settings(settings)
@@ -1912,7 +2069,9 @@ def setup_model_routes(model_discovery):
             "models": _merge_model_ids(model_ids, _pinned),
             "pinned_models": _pinned,
             "online": bool(model_ids) or bool(_pinned) or bool(ping.get("reachable")),
-            "status": "online" if (model_ids or _pinned) else ("loading" if ping.get("loading") else ("empty" if ping.get("reachable") else "offline")),
+            "status": "online"
+            if (model_ids or _pinned)
+            else ("loading" if ping.get("loading") else ("empty" if ping.get("reachable") else "offline")),
             "ping_error": ping.get("error") if ping else None,
             "endpoint_kind": requested_kind,
             "category": _classify_endpoint(base_url, requested_kind),
@@ -1931,17 +2090,24 @@ def setup_model_routes(model_discovery):
         if not base_url:
             raise HTTPException(400, "Base URL is required")
         from src.endpoint_resolver import resolve_url
+
         base_url = resolve_url(base_url)
         base_url = _rewrite_loopback_for_docker(base_url)
         requested_kind = _normalize_endpoint_kind(endpoint_kind)
         configured_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         probe_timeout = _explicit_model_list_timeout(base_url, requested_kind, configured_timeout)
         models = _probe_endpoint(base_url, api_key.strip() or None, timeout=probe_timeout)
-        ping = {"reachable": True, "error": None} if models else _ping_endpoint(base_url, api_key.strip() or None, timeout=min(probe_timeout, 10.0))
+        ping = (
+            {"reachable": True, "error": None}
+            if models
+            else _ping_endpoint(base_url, api_key.strip() or None, timeout=min(probe_timeout, 10.0))
+        )
         return {
             "base_url": base_url,
             "online": bool(models) or bool(ping.get("reachable")),
-            "status": "online" if models else ("loading" if ping.get("loading") else ("empty" if ping.get("reachable") else "offline")),
+            "status": "online"
+            if models
+            else ("loading" if ping.get("loading") else ("empty" if ping.get("reachable") else "offline")),
             "ping_error": ping.get("error") if ping else None,
             "models": models,
             "count": len(models),
@@ -2005,7 +2171,7 @@ def setup_model_routes(model_discovery):
         request: Request,
         response: Response,
         refresh: bool = False,
-        refresh_timeout: Optional[int] = Query(None, ge=1, le=60),
+        refresh_timeout: int | None = Query(None, ge=1, le=60),
     ):
         """List all discovered models for an endpoint with hidden/visible state."""
         require_admin(request)
@@ -2035,7 +2201,9 @@ def setup_model_routes(model_discovery):
                     response.headers["X-Model-Refresh-Count"] = str(len(probed))
                 else:
                     response.headers["X-Model-Refresh-Status"] = "failed"
-                    response.headers["X-Model-Refresh-Warning"] = "Model refresh failed or returned no models; kept cached models."
+                    response.headers["X-Model-Refresh-Warning"] = (
+                        "Model refresh failed or returned no models; kept cached models."
+                    )
             pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
             pinned_set = set(pinned)
             return [
@@ -2096,6 +2264,7 @@ def setup_model_routes(model_discovery):
         # lookup below (last-resort: first enabled endpoint THIS user owns).
         # Unauthenticated single-user mode keeps the old behavior.
         from src.auth_helpers import get_current_user as _gcu
+
         try:
             _user = _gcu(request) or ""
         except Exception:
@@ -2115,10 +2284,21 @@ def setup_model_routes(model_discovery):
             _is_admin = False
         if _user and not _is_admin:
             from routes.prefs_routes import _load_for_user
+
             _user_prefs = _load_for_user(_user) or {}
             ep_id = (_user_prefs.get("default_endpoint_id") or "").strip()
             model = (_user_prefs.get("default_model") or "").strip()
             _fallbacks = _user_prefs.get("default_model_fallbacks") or []
+            # If user has no personal default, fall back to global default
+            # But only based on the "share_defaults_with_users" flag
+            # (only if share_defaults_with_users is enabled)
+            if settings.get("share_defaults_with_users", False):
+                if not ep_id:
+                    ep_id = settings.get("default_endpoint_id", "")
+                if not model:
+                    model = settings.get("default_model", "")
+                if not _fallbacks:
+                    _fallbacks = settings.get("default_model_fallbacks") or []
         else:
             ep_id = settings.get("default_endpoint_id", "")
             model = settings.get("default_model", "")
@@ -2127,9 +2307,7 @@ def setup_model_routes(model_discovery):
         try:
             ep = None
             if ep_id:
-                ep_q = db.query(ModelEndpoint).filter(
-                    ModelEndpoint.id == ep_id, ModelEndpoint.is_enabled == True
-                )
+                ep_q = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id, ModelEndpoint.is_enabled == True)
                 # Honor the same owner-scope rule as /api/models — a per-user
                 # default that points at an endpoint owned by a different user
                 # mustn't silently resolve. Admins are exempt (they manage the
@@ -2150,9 +2328,7 @@ def setup_model_routes(model_discovery):
                     fid = (entry.get("endpoint_id") or "").strip()
                     if not fid:
                         continue
-                    cand_q = db.query(ModelEndpoint).filter(
-                        ModelEndpoint.id == fid, ModelEndpoint.is_enabled == True
-                    )
+                    cand_q = db.query(ModelEndpoint).filter(ModelEndpoint.id == fid, ModelEndpoint.is_enabled == True)
                     if _user and not _is_admin:
                         cand_q = owner_filter(cand_q, ModelEndpoint, _user)
                     cand = cand_q.first()
@@ -2180,7 +2356,9 @@ def setup_model_routes(model_discovery):
             chat_url = build_chat_url(base)
             if not model and (getattr(ep, "cached_models", None) or getattr(ep, "pinned_models", None)):
                 try:
-                    visible = _visible_models(ep.cached_models, getattr(ep, "hidden_models", None), getattr(ep, "pinned_models", None))
+                    visible = _visible_models(
+                        ep.cached_models, getattr(ep, "hidden_models", None), getattr(ep, "pinned_models", None)
+                    )
                     if visible:
                         model = visible[0]
                 except Exception:
@@ -2193,7 +2371,7 @@ def setup_model_routes(model_discovery):
     async def toggle_model_endpoint(ep_id: str, request: Request):
         require_admin(request)
         # Optional JSON body for field-targeted updates. No body → toggle is_enabled (legacy behaviour).
-        body: Dict[str, Any] = {}
+        body: dict[str, Any] = {}
         try:
             if int(request.headers.get("content-length") or 0) > 0:
                 body = await request.json()
@@ -2209,10 +2387,12 @@ def setup_model_routes(model_discovery):
             if body:
                 if "supports_tools" in body:
                     v = body["supports_tools"]
-                    ep.supports_tools = {True: True, False: False, 'true': True, 'false': False, 1: True, 0: False}.get(v)
+                    ep.supports_tools = {True: True, False: False, "true": True, "false": False, 1: True, 0: False}.get(
+                        v
+                    )
                 if "is_enabled" in body:
-                    v_ie = body['is_enabled']
-                    ep.is_enabled = v_ie.lower() in ('true', '1', 'yes') if isinstance(v_ie, str) else bool(v_ie)
+                    v_ie = body["is_enabled"]
+                    ep.is_enabled = v_ie.lower() in ("true", "1", "yes") if isinstance(v_ie, str) else bool(v_ie)
                 if "name" in body and isinstance(body["name"], str):
                     ep.name = body["name"].strip() or ep.name
                 if "model_type" in body and isinstance(body["model_type"], str):
@@ -2282,7 +2462,9 @@ def setup_model_routes(model_discovery):
     def _clear_user_prefs_for_endpoint(ep_id: str) -> int:
         """Clear per-user endpoint selections and fallback chains."""
         try:
-            from routes.prefs_routes import _load as _load_prefs, _save as _save_prefs
+            from routes.prefs_routes import _load as _load_prefs
+            from routes.prefs_routes import _save as _save_prefs
+
             all_prefs = _load_prefs()
             cleared_users = _clear_user_pref_endpoint_refs(all_prefs, ep_id)
             if cleared_users:
@@ -2325,6 +2507,7 @@ def setup_model_routes(model_discovery):
     def _clear_loaded_sessions_for_endpoint(base_url: str) -> int:
         try:
             from src.ai_interaction import get_session_manager
+
             manager = get_session_manager()
         except Exception:
             manager = None
@@ -2382,6 +2565,7 @@ def setup_model_routes(model_discovery):
     def list_tools():
         """List all available tools with their enabled/disabled status."""
         from src.agent_tools import TOOL_TAGS
+
         settings = _load_settings()
         disabled = set(settings.get("disabled_tools", []))
         tools = []
@@ -2402,3 +2586,19 @@ def setup_model_routes(model_discovery):
         return {"ok": True, "disabled": body.disabled}
 
     return router
+
+# ─── Registre central (MOD-2) ─────────────────────────────────────────────
+
+def register_model_routes():
+    """Enregistre les fonctions de model_routes dans le registre central."""
+    from src.route_registry import register_action
+    
+    register_action("_probe_endpoint", _probe_endpoint)
+
+
+# Auto-enregistrement à l'import
+try:
+    register_model_routes()
+except Exception as e:
+    import logging
+    logging.getLogger(__name__).warning(f"Auto-enregistrement model_routes échoué: {e}")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -102,25 +101,56 @@ PLAN_MODE_READONLY_TOOLS = {
 # here — read-only tools are covered by the allowlist. Keep in sync when adding
 # new mutating tools.
 _PLAN_MODE_KNOWN_MUTATORS = {
-    "write_file", "create_document", "edit_document", "update_document",
-    "suggest_document", "manage_documents", "create_session", "manage_session",
-    "send_to_session", "pipeline", "manage_memory", "manage_skills",
-    "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",
-    "manage_webhooks", "manage_tokens", "manage_settings", "manage_contact",
-    "manage_calendar", "api_call", "app_api", "ui_control",
-    "send_email", "reply_to_email", "bulk_email", "delete_email",
-    "archive_email", "mark_email_read", "download_model", "serve_model",
-    "stop_served_model", "cancel_download", "adopt_served_model", "serve_preset",
-    "generate_image", "edit_image", "trigger_research", "manage_research",
+    "write_file",
+    "create_document",
+    "edit_document",
+    "update_document",
+    "suggest_document",
+    "manage_documents",
+    "create_session",
+    "manage_session",
+    "send_to_session",
+    "pipeline",
+    "manage_memory",
+    "manage_skills",
+    "manage_tasks",
+    "manage_notes",
+    "manage_endpoints",
+    "manage_mcp",
+    "manage_webhooks",
+    "manage_tokens",
+    "manage_settings",
+    "manage_contact",
+    "manage_calendar",
+    "api_call",
+    "app_api",
+    "ui_control",
+    "send_email",
+    "reply_to_email",
+    "bulk_email",
+    "delete_email",
+    "archive_email",
+    "mark_email_read",
+    "download_model",
+    "serve_model",
+    "stop_served_model",
+    "cancel_download",
+    "adopt_served_model",
+    "serve_preset",
+    "generate_image",
+    "edit_image",
+    "trigger_research",
+    "manage_research",
     # Shell is never read-only-safe; block it explicitly so it stays out of plan
     # mode even if the schema list fails to load.
-    "bash", "python",
+    "bash",
+    "python",
     # Controls shell processes (kill); plan mode can't run bash anyway.
     "manage_bg_jobs",
 }
 
 
-def plan_mode_disabled_tools() -> Set[str]:
+def plan_mode_disabled_tools() -> set[str]:
     """Tool names to add to the denylist in plan mode.
 
     Plan mode allows only PLAN_MODE_READONLY_TOOLS. The gate is a denylist, so
@@ -137,10 +167,7 @@ def plan_mode_disabled_tools() -> Set[str]:
         import src.agent_tools  # noqa: F401
         from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
 
-        all_names = {
-            (t.get("function") or {}).get("name")
-            for t in FUNCTION_TOOL_SCHEMAS
-        }
+        all_names = {(t.get("function") or {}).get("name") for t in FUNCTION_TOOL_SCHEMAS}
         all_names.discard(None)
     except Exception as exc:
         logger.warning("Unable to load tool schemas for plan-mode gating: %s", exc)
@@ -151,7 +178,7 @@ def plan_mode_disabled_tools() -> Set[str]:
     return (all_names | _PLAN_MODE_KNOWN_MUTATORS) - PLAN_MODE_READONLY_TOOLS
 
 
-def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
+def is_public_blocked_tool(tool_name: str | None) -> bool:
     """Return True when a non-admin/public user must not execute this tool.
 
     This is a security gate, so it fails CLOSED: a malformed non-string tool
@@ -166,7 +193,7 @@ def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
     return tool_name in NON_ADMIN_BLOCKED_TOOLS or tool_name.startswith("mcp__")
 
 
-def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
+def owner_is_admin_or_single_user(owner: str | None) -> bool:
     """Return True for admins, or in intentional single-user mode.
 
     Single-user mode means the operator explicitly disabled auth
@@ -196,7 +223,7 @@ def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
         return False
 
 
-def blocked_tools_for_owner(owner: Optional[str]) -> Set[str]:
+def blocked_tools_for_owner(owner: str | None) -> set[str]:
     """Tools to hide/disable for this owner under public-user policy."""
     if owner_is_admin_or_single_user(owner):
         return set()

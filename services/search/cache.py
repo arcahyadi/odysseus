@@ -4,7 +4,6 @@ import hashlib
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict
 
 from core.constants import DATA_DIR
 
@@ -25,8 +24,8 @@ except OSError as _e:
     logger.warning("Search cache directory unavailable (%s); disk cache disabled", _e)
 
 # Track cache size for LRU eviction
-search_cache_index: Dict[str, datetime] = {}
-content_cache_index: Dict[str, datetime] = {}
+search_cache_index: dict[str, datetime] = {}
+content_cache_index: dict[str, datetime] = {}
 
 # Cache metrics (shared across modules)
 cache_metrics = {"hits": 0, "misses": 0, "evictions": 0}
@@ -37,7 +36,7 @@ def generate_cache_key(data: str) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def cleanup_cache(cache_dir: Path, cache_index: Dict[str, datetime], max_age: timedelta):
+def cleanup_cache(cache_dir: Path, cache_index: dict[str, datetime], max_age: timedelta):
     """Remove expired cache entries and enforce LRU policy."""
     current_time = datetime.now()
     files_in_dir = {f.name.split(".")[0]: f for f in cache_dir.glob("*.cache")}

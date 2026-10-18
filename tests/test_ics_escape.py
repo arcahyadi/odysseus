@@ -1,4 +1,5 @@
 """Tests for iCalendar TEXT escaping in calendar export (RFC 5545 §3.3.11)."""
+
 from tests.test_null_owner_gates import _import_calendar_helpers
 
 
@@ -28,10 +29,7 @@ def test_empty_and_none_safe():
 def test_safe_ics_filename_strips_header_metacharacters():
     safe_filename = _import_calendar_helpers()._safe_ics_filename
 
-    assert (
-        safe_filename('Work\r\nX-Injected: yes";/..\\evil')
-        == "Work__X-Injected__yes___.._evil.ics"
-    )
+    assert safe_filename('Work\r\nX-Injected: yes";/..\\evil') == "Work__X-Injected__yes___.._evil.ics"
 
 
 def test_safe_ics_filename_falls_back_for_empty_names():

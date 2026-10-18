@@ -12,7 +12,6 @@ import chatRenderer from './chatRenderer.js';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
-import { svgifyEmoji } from './markdown.js';
 import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
 import fileHandlerModule from './fileHandler.js';
@@ -282,9 +281,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // Get current session
     const sessionId = sessionModule.getCurrentSessionId();
     const session = sessionModule.getSessions().find(s => s.id === sessionId);
-    
+
     const submitBtn = document.querySelector('.send-btn');
-    
+
     // If compare is active, stop all compare streams
     if (window.compareModule && window.compareModule.isActive()) {
       window.compareModule.handleCompareSubmit();
@@ -347,21 +346,21 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (currentHolder && currentAccumulated) {
         // Store accumulated in a closure variable before it gets cleared
         const stoppedContent = currentAccumulated;
-        
+
         // Store raw content in dataset for consistency with other messages
         currentHolder.dataset.raw = stoppedContent;
-        
+
         currentHolder.querySelector('.body').innerHTML = markdownModule.processWithThinking(
           markdownModule.squashOutsideCode(stoppedContent)
         );
-        
+
         // Highlight code blocks
         if (window.hljs) {
           currentHolder.querySelectorAll('pre code').forEach((block) => {
             window.hljs.highlightElement(block);
           });
         }
-        
+
         // Add the stopped indicator with continue button
         const stoppedIndicator = document.createElement('div');
         stoppedIndicator.className = 'stopped-indicator';
@@ -400,14 +399,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
         uiModule.scrollHistory();
       }
-      
+
       // Reset button state
       updateSubmitButton('idle', submitBtn);
-      
+
       // Re-enable message input
       const messageInput = uiModule.el('message');
       if (messageInput) messageInput.disabled = false;
-      
+
       // Clear tracking variables
       currentAccumulated = '';
       currentHolder = null;
@@ -603,7 +602,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // Reset tracking variables at start
     currentAccumulated = '';
     currentHolder = null;
-    
+
     try {
       // Re-enable auto-scroll when user sends a message
       uiModule.setAutoScroll(true);
@@ -888,7 +887,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         responseTimeoutCleared = true;
         clearTimeout(timeoutId);
       };
-      
+
       const box = el('chat-history');
       holder = document.createElement('div');
       holder.className = 'msg msg-ai streaming';
@@ -896,7 +895,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // Track holder globally so stop button can access it
       currentHolder = holder;
       holder._researchQuery = msg; // Store query for notification text
-      
+
       const modelName = sessionModule.getCurrentModel() || null;
 
       let loadingText = 'Initializing...';
@@ -922,14 +921,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       holder._actualModel = modelName;
       _applyModelColor(holder.querySelector('.role'), modelName);
       holder.style.position = 'relative';
-      
+
       // Create spinner
       spinner = spinnerModule.create('Initializing', 'right', 'wave');
       currentSpinner = spinner;
       const bodyDiv = holder.querySelector('.body');
       bodyDiv.appendChild(spinner.createElement());
       spinner.start();
-      
+
       // Update spinner message based on mode
       if (el('web-toggle').checked && !_isAgent) {
         spinner.updateMessage('Searching web with ' + (searchModule ? searchModule.getProviderLabel() : 'SearXNG'));
@@ -941,7 +940,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         spinner.updateMessage('Processing request');
         scheduleFirstTokenWaitMessages();
       }
-      
+
       const researchBtn = el('research-toggle-btn');
       if (el('research-toggle').checked && researchBtn) {
         researchBtn.disabled = true;
@@ -976,7 +975,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         headers: { 'X-Tz-Offset': String(_tzOffsetMin), 'X-Tz-Name': _tzName },
         signal: abortCtrl.signal
       });
-      
+
       if (!res.ok) {
         clearResponseTimeout();
         if (res.status === 404) {
@@ -1394,7 +1393,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'agent_dispatch' || json.type === 'run_status' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress' || json.type === 'workflow_start' || json.type === 'phase_start' || json.type === 'agent_result' || json.type === 'phase_complete' || json.type === 'workflow_complete' || json.type === 'phase_skip' || json.type === 'phase_enter' || json.type === 'phase_exit' || json.type === 'thought_bus') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -1403,6 +1402,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (!_isBg) {
                   _cancelThinkingTimer();
                   _replaceThinkingSpinner('Preparing agent');
+                }
+                continue;
+              }
+              // ── AgentOS SFD v3.0: Thought Bus phase events → cockpit ──
+              if (json.type === 'phase_enter' || json.type === 'phase_exit' || json.type === 'thought_bus') {
+                if (window.cockpit && window.cockpit.onThoughtBusEvent) {
+                  window.cockpit.onThoughtBusEvent(json);
                 }
                 continue;
               }
@@ -2321,148 +2327,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               } else if (json.type === 'ask_user') {
                 if (_isBg) continue;
                 // The agent posed a multiple-choice question; the turn has ended.
-                // Render clickable options at the bottom of the history. The
-                // user's pick is sent as the next message and the agent resumes.
+                // Use the shared history renderer so the live and restored
+                // versions have identical behavior.
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
-                const _aq = json.data || {};
-                const _opts = Array.isArray(_aq.options) ? _aq.options : [];
-                if (_aq.question && _opts.length) {
-                  const chatBox = document.getElementById('chat-history');
-                  // Drop any prior unanswered card so only the latest shows.
-                  chatBox.querySelectorAll('.ask-user-card').forEach(n => n.remove());
-                  const card = document.createElement('div');
-                  card.className = 'ask-user-card';
-                  const multi = !!_aq.multi;
-                  // Group the choices for assistive tech and label the group with
-                  // the question (set below); make the card focusable so it can be
-                  // moved to when it appears.
-                  card.setAttribute('role', 'group');
-                  card.tabIndex = -1;
-                  // Render any emoji in agent-supplied text through the app's
-                  // pipeline: escape, then svgify to monochrome theme-tinted
-                  // glyphs (project rule: never colorful emoji; respects the
-                  // "Text-only Emojis" setting like the rest of the chat).
-                  const _emo = (s) => svgifyEmoji(uiModule.esc(String(s)));
-
-                  // Header row holds the close (×) to dismiss the affordances and
-                  // just type a reply instead.
-                  const head = document.createElement('div');
-                  head.className = 'ask-user-head';
-                  const closeBtn = document.createElement('button');
-                  closeBtn.type = 'button';
-                  closeBtn.className = 'modal-close ask-user-close';
-                  closeBtn.setAttribute('aria-label', 'Dismiss question');
-                  closeBtn.textContent = '×';
-                  closeBtn.addEventListener('click', () => {
-                    card.remove();
-                    const mi = uiModule.el('message');
-                    if (mi) mi.focus();
-                  });
-                  head.appendChild(closeBtn);
-                  card.appendChild(head);
-
-                  // Render the question inside the card so it's self-contained:
-                  // some models call ask_user without first narrating the question
-                  // as assistant text, in which case the card would otherwise show
-                  // bare options with no prompt.
-                  if (_aq.question) {
-                    const q = document.createElement('div');
-                    q.className = 'ask-user-question';
-                    q.id = `ask-user-q-${Date.now()}-${Math.floor(Math.random() * 1e4)}`;
-                    q.innerHTML = _emo(_aq.question);
-                    card.appendChild(q);
-                    // Label the choice group with the question for screen readers.
-                    card.setAttribute('aria-labelledby', q.id);
-                  } else {
-                    card.setAttribute('aria-label', 'Question from the assistant');
-                  }
-
-                  const list = document.createElement('div');
-                  list.className = 'ask-user-options';
-                  card.appendChild(list);
-
-                  const _send = (text) => {
-                    if (!text) return;
-                    // Remove the card once answered — the choice is sent as a
-                    // normal user message (and the question persists as the
-                    // assistant text above), so the affordances are spent.
-                    card.remove();
-                    const mi = uiModule.el('message');
-                    if (mi) mi.value = text;
-                    const sb = document.querySelector('.send-btn');
-                    if (sb) sb.click();
-                  };
-
-                  _opts.forEach((opt, i) => {
-                    const label = (opt && opt.label) ? String(opt.label) : String(opt || '');
-                    if (!label) return;
-                    const descr = (opt && opt.description) ? String(opt.description) : '';
-                    const row = document.createElement(multi ? 'label' : 'button');
-                    row.className = 'ask-user-option';
-                    if (multi) {
-                      const cb = document.createElement('input');
-                      cb.type = 'checkbox';
-                      cb.value = label;
-                      row.appendChild(cb);
-                    }
-                    const txt = document.createElement('span');
-                    txt.className = 'ask-user-option-label';
-                    txt.innerHTML = _emo(label);
-                    row.appendChild(txt);
-                    if (descr) {
-                      const d = document.createElement('span');
-                      d.className = 'ask-user-option-desc';
-                      d.innerHTML = _emo(descr);
-                      row.appendChild(d);
-                    }
-                    if (!multi) {
-                      row.type = 'button';
-                      row.addEventListener('click', () => _send(label));
-                    }
-                    list.appendChild(row);
-                  });
-
-                  // Free-text "Other" — type a custom answer + send (Enter or →).
-                  const other = document.createElement('div');
-                  other.className = 'ask-user-other';
-                  const otherInput = document.createElement('input');
-                  otherInput.type = 'text';
-                  otherInput.className = 'styled-prompt-input ask-user-other-input';
-                  otherInput.placeholder = multi ? 'Other (added to selection)…' : 'Other… (type your own answer)';
-                  otherInput.setAttribute('aria-label', multi ? 'Add a custom option' : 'Type a custom answer');
-                  const otherSend = document.createElement('button');
-                  otherSend.type = 'button';
-                  otherSend.className = 'confirm-btn confirm-btn-primary ask-user-other-send';
-                  otherSend.setAttribute('aria-label', 'Send answer');
-                  otherSend.textContent = multi ? 'Send selection' : 'Send';
-                  const _submit = () => {
-                    const free = otherInput.value.trim();
-                    if (multi) {
-                      const picked = Array.from(card.querySelectorAll('.ask-user-option input:checked')).map(c => c.value);
-                      if (free) picked.push(free);
-                      if (picked.length) _send(picked.join(', '));
-                    } else if (free) {
-                      _send(free);
-                    }
-                  };
-                  otherSend.addEventListener('click', _submit);
-                  otherInput.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-                      e.preventDefault();
-                      _submit();
-                    }
-                  });
-                  other.appendChild(otherInput);
-                  other.appendChild(otherSend);
-                  card.appendChild(other);
-
-                  chatBox.appendChild(card);
-                  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                  // Move focus to the card so keyboard/screen-reader users land on
-                  // the question + choices when it appears.
-                  try { card.focus(); } catch (_) {}
-                }
+                chatRenderer.renderAskUserCard(json.data || {});
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
@@ -2470,6 +2339,154 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // the stored plan + live-refresh the docked plan window.
                 const _pu = (json.data && json.data.plan) ? json.data.plan : '';
                 if (_pu) _setStoredPlan(_pu);
+
+              } else if (json.type === 'agent_dispatch') {
+                console.log('[M4] agent_dispatch event received:', json.agent, json.status);
+                if (_isBg) continue;
+                // M4: visual indicator for background agent activity
+                const agentName = json.agent || 'agent';
+                const phaseName = json.phase || '';
+                const status = json.status || 'running';
+                const box = document.getElementById('chat-history');
+                if (!box) continue;
+                if (status === 'running') {
+                  const indicator = document.createElement('div');
+                  indicator.className = 'msg msg-system agent-indicator agent-running';
+                  indicator.dataset.agent = agentName;
+                  const safeName = String(agentName).replace(/[<>&]/g, '');
+                  const safePhase = String(phaseName).replace(/[<>&]/g, '');
+                  indicator.innerHTML = '<span class="agent-dot"></span> ' +
+                    safeName + ' <span class="agent-phase">' + safePhase + '</span> ' +
+                    '<span class="agent-spin">⏳</span>';
+                  box.appendChild(indicator);
+                  box.scrollTop = box.scrollHeight;
+                } else if (status === 'completed') {
+                  // Mark the running indicator as completed
+                  const running = box.querySelector('.agent-indicator.agent-running[data-agent="' + CSS.escape(agentName) + '"]');
+                  if (running) {
+                    running.classList.remove('agent-running');
+                    running.classList.add('agent-completed');
+                    const spin = running.querySelector('.agent-spin');
+                    if (spin) spin.textContent = '✓';
+                    // Auto-remove after 3 seconds
+                    setTimeout(() => { if (running.parentNode) running.remove(); }, 3000);
+                  }
+                }
+
+              } else if (json.type === 'workflow_start') {
+                if (_isBg) continue;
+                const box = document.getElementById('chat-history');
+                if (!box) continue;
+                const safeObj = String(json.objective || '').replace(/[<>&]/g, '');
+                const el = document.createElement('div');
+                el.className = 'msg msg-system workflow-event workflow-start';
+                el.innerHTML = '<div class="workflow-header">🚀 <b>Workflow démarré</b></div>' +
+                  '<div class="workflow-body">' + safeObj + '</div>' +
+                  '<div class="workflow-phases">' + (json.total_phases || '?') + ' phases</div>';
+                box.appendChild(el);
+                box.scrollTop = box.scrollHeight;
+
+              } else if (json.type === 'phase_start') {
+                if (_isBg) continue;
+                const box = document.getElementById('chat-history');
+                if (!box) continue;
+                const safeMsg = String(json.message || (json.phase + ' — ' + (json.agents || []).join(', '))).replace(/[<>&]/g, '');
+                const el = document.createElement('div');
+                el.className = 'msg msg-system workflow-event phase-start';
+                el.dataset.phase = json.phase;
+                el.innerHTML = '<span class="workflow-dot"></span> ' + safeMsg + ' <span class="agent-spin">⏳</span>';
+                box.appendChild(el);
+                box.scrollTop = box.scrollHeight;
+                window._wfPhaseEls = window._wfPhaseEls || {};
+                window._wfPhaseEls[json.phase] = el;
+
+              } else if (json.type === 'agent_result') {
+                if (_isBg) continue;
+                const box = document.getElementById('chat-history');
+                if (!box) continue;
+                const safeAgent = String(json.agent).replace(/[<>&]/g, '');
+                const safeModel = String(json.model || '').replace(/[<>&]/g, '');
+                const safeOut = String(json.output_preview || '').replace(/[<>&]/g, '');
+                const safeErr = String(json.error || '').replace(/[<>&]/g, '');
+                const icon = json.success ? '✅' : '❌';
+                const el = document.createElement('div');
+                el.className = 'msg msg-system workflow-event agent-result ' + (json.success ? 'wf-ok' : 'wf-fail');
+                el.innerHTML = icon + ' <b>' + safeAgent + '</b>' +
+                  (json.model ? ' <small>(' + safeModel + ')</small>' : '') +
+                  (safeOut ? '<div class="wf-preview">' + safeOut + '</div>' : '') +
+                  (safeErr ? '<div class="wf-error">' + safeErr + '</div>' : '');
+                box.appendChild(el);
+                box.scrollTop = box.scrollHeight;
+
+              } else if (json.type === 'phase_complete') {
+                if (_isBg) continue;
+                const el = window._wfPhaseEls && window._wfPhaseEls[json.phase];
+                if (el) {
+                  el.classList.add('phase-done');
+                  const spin = el.querySelector('.agent-spin');
+                  if (spin) spin.textContent = '✅';
+                }
+
+              } else if (json.type === 'phase_skip') {
+                if (_isBg) continue;
+                const box = document.getElementById('chat-history');
+                if (!box) continue;
+                const safePhase = String(json.phase).replace(/[<>&]/g, '');
+                const el = document.createElement('div');
+                el.className = 'msg msg-system workflow-event phase-skip';
+                el.innerHTML = '⏭️ Phase ' + safePhase + ' ignorée';
+                box.appendChild(el);
+                box.scrollTop = box.scrollHeight;
+
+              } else if (json.type === 'workflow_complete') {
+                if (_isBg) continue;
+                const box = document.getElementById('chat-history');
+                if (!box) continue;
+                const safeOut = String(json.final_output || '').replace(/[<>&]/g, '').substring(0, 500);
+                const el = document.createElement('div');
+                el.className = 'msg msg-system workflow-event workflow-complete';
+                el.innerHTML = '<div class="workflow-header">🎉 <b>Workflow terminé</b></div>' +
+                  '<div class="workflow-body">' + safeOut + '</div>' +
+                  '<div class="workflow-phases">' + (json.phases_completed || '?') + ' phases complétées</div>';
+                box.appendChild(el);
+                box.scrollTop = box.scrollHeight;
+                window._wfPhaseEls = {};
+
+              } else if (json.type === 'run_status') {
+                // Persistent cockpit strip (continuous state). Never blocks chat.
+                if (window.cockpit && typeof window.cockpit.update === 'function') {
+                  window.cockpit.update(json);
+                }
+
+              } else if (json.type === 'autoeval_result') {
+                if (_isBg) continue;
+                const box = document.getElementById('chat-history');
+                if (box) {
+                  const decision = json.decision === 'revert' ? 'revert' : 'keep';
+                  const reason = String(json.reason || '').replace(/[<>&]/g, '');
+                  const el = document.createElement('div');
+                  el.className = 'msg msg-system agent-indicator autoeval-' + decision;
+                  el.innerHTML = '<span class="agent-dot"></span> autoeval: ' + decision +
+                    ' <span class="agent-phase">' + reason + '</span>';
+                  box.appendChild(el);
+                  box.scrollTop = box.scrollHeight;
+                  setTimeout(() => { if (el.parentNode) el.remove(); }, 6000);
+                }
+
+              } else if (json.type === 'verifier_result') {
+                if (_isBg) continue;
+                const box = document.getElementById('chat-history');
+                if (box) {
+                  const status = json.status === 'fail' ? 'fail' : 'pass';
+                  const detail = String(json.detail || '').replace(/[<>&]/g, '');
+                  const el = document.createElement('div');
+                  el.className = 'msg msg-system agent-indicator verifier-' + status;
+                  el.innerHTML = '<span class="agent-dot"></span> verifier: ' + status +
+                    ' <span class="agent-phase">' + detail + '</span>';
+                  box.appendChild(el);
+                  box.scrollTop = box.scrollHeight;
+                  setTimeout(() => { if (el.parentNode) el.remove(); }, 6000);
+                }
 
               } else if (json.type === 'agent_step') {
                 if (_isBg) continue;
@@ -5019,7 +5036,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (!header) return;
       const node = header.closest('.agent-thread-node');
       if (!node) return;
-      node.classList.toggle('open');
+      const opened = node.classList.toggle('open');
+      if (opened) {
+        // Expanding the final tool trace can push a pending ask_user card below
+        // the viewport.  Keep that immediately-adjacent prompt visible.
+        const thread = node.closest('.agent-thread');
+        const pendingCard = thread?.nextElementSibling;
+        if (pendingCard?.classList.contains('ask-user-card')) {
+          requestAnimationFrame(() => pendingCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+        }
+      }
     });
     window.__odysseus_thread_click_bound = true;
   }

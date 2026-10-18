@@ -78,9 +78,7 @@ def test_normal_policy_preserves_existing_disabled_tools():
 
 def test_executor_policy_backstop_blocks_tools():
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
-    desc, result = asyncio.run(
-        execute_tool_block(ToolBlock("bash", "echo should-not-run"), tool_policy=policy)
-    )
+    desc, result = asyncio.run(execute_tool_block(ToolBlock("bash", "echo should-not-run"), tool_policy=policy))
     assert desc == "bash: BLOCKED"
     assert result["exit_code"] == 1
     assert "forbade" in result["error"]

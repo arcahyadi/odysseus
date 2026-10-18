@@ -12,6 +12,7 @@ the chat message with no attachments.
 The fix counts genuine recent upload *events*, independent of the current
 batch's file count. save_upload still enforces the per-minute rate limit.
 """
+
 import io
 import re
 import types
@@ -24,9 +25,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 import core.database as cdb
-from core.database import GalleryImage
-from src.upload_handler import count_recent_uploads, UploadHandler
 import routes.upload_routes as up
+from core.database import GalleryImage
+from src.upload_handler import UploadHandler, count_recent_uploads
 
 _REPO = Path(__file__).resolve().parent.parent
 
@@ -140,6 +141,7 @@ async def test_genuine_recent_volume_still_throttled():
 # save_upload() counts each file against upload_rate_limit, which was 5 while
 # the composer allows MAX_FILES=10. ──────────────────────────────────────────
 
+
 def _max_files_from_frontend() -> int:
     src = (_REPO / "static/js/fileHandler.js").read_text(encoding="utf-8")
     m = re.search(r"MAX_FILES\s*=\s*(\d+)", src)
@@ -222,10 +224,15 @@ async def test_non_image_chat_upload_is_not_added_to_gallery(tmp_path, monkeypat
     up.setup_upload_routes(h)
     endpoint = _endpoint(up.router)
 
-    result = await endpoint(_request(user="alice"), [types.SimpleNamespace(
-        filename="notes.txt",
-        file=io.BytesIO(b"plain text upload"),
-    )])
+    result = await endpoint(
+        _request(user="alice"),
+        [
+            types.SimpleNamespace(
+                filename="notes.txt",
+                file=io.BytesIO(b"plain text upload"),
+            )
+        ],
+    )
 
     assert "gallery_id" not in result["files"][0]
     db = TestingSession()

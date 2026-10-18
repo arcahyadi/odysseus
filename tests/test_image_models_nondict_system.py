@@ -1,4 +1,4 @@
-from services.hwfit.image_models import rank_image_models, IMAGE_MODEL_REGISTRY
+from services.hwfit.image_models import IMAGE_MODEL_REGISTRY, rank_image_models
 
 
 def test_rank_image_models_handles_non_dict_system():

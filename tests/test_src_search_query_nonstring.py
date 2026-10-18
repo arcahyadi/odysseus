@@ -3,6 +3,7 @@
 `src.search.query` is a compatibility shim that aliases the canonical
 `services.search.query`, so this exercises the live implementation.
 """
+
 import services.search.query as q
 
 

@@ -1,18 +1,19 @@
 # routes/compare_routes.py
 """Model A/B comparison routes."""
+
 import json
-import uuid
-import random
-from datetime import datetime
-from fastapi import APIRouter, Form, HTTPException, Request
-from typing import List
-from pydantic import BaseModel
 import logging
+import random
+import uuid
+from datetime import datetime
+
+from fastapi import APIRouter, Form, HTTPException, Request
+from pydantic import BaseModel
 
 from core.database import Comparison, SessionLocal
 from core.session_manager import SessionManager
-from src.auth_helpers import get_current_user
 from routes.session_routes import _reject_raw_endpoint_url_for_non_admin
+from src.auth_helpers import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ def _owned_endpoint_by_url(db, base_url, owner):
     """
     from core.database import ModelEndpoint
     from src.auth_helpers import owner_filter
+
     q = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base_url)
     return owner_filter(q, ModelEndpoint, owner).first()
 
@@ -53,14 +55,15 @@ def _owned_endpoint_by_id(db, endpoint_id, owner):
     """
     from core.database import ModelEndpoint
     from src.auth_helpers import owner_filter
+
     q = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id)
     return owner_filter(q, ModelEndpoint, owner).first()
 
 
 class RecordVoteRequest(BaseModel):
     prompt: str
-    models: List[str]
-    winner: str           # model name or "tie"
+    models: list[str]
+    winner: str  # model name or "tie"
     is_blind: bool = True
 
 
@@ -84,7 +87,7 @@ def setup_compare_routes(session_manager: SessionManager):
         Returns the comparison ID and the two session IDs so the client
         can fire two independent SSE streams to /api/chat_stream.
         """
-        user = getattr(request.state, 'current_user', None)
+        user = getattr(request.state, "current_user", None)
         comp_id = str(uuid.uuid4())
         sid_a = str(uuid.uuid4())
         sid_b = str(uuid.uuid4())
@@ -116,6 +119,7 @@ def setup_compare_routes(session_manager: SessionManager):
         # resolution + raw-URL rejection up front means a 403 on either endpoint
         # aborts the whole request with nothing created and no header copied.
         from src.endpoint_resolver import build_chat_url, build_headers, normalize_base
+
         resolved = []
         db = SessionLocal()
         try:
@@ -141,9 +145,7 @@ def setup_compare_routes(session_manager: SessionManager):
                     # caller also sent and dial the stored config instead.
                     endpoint = ep.base_url
                 elif not endpoint:
-                    raise HTTPException(
-                        422, "endpoint_a/endpoint_b or endpoint_a_id/endpoint_b_id is required"
-                    )
+                    raise HTTPException(422, "endpoint_a/endpoint_b or endpoint_a_id/endpoint_b_id is required")
                 else:
                     # Resolve the supplied URL to a ModelEndpoint the caller owns
                     # (their own rows + legacy null-owner shared rows), scoped so a
@@ -157,9 +159,7 @@ def setup_compare_routes(session_manager: SessionManager):
                 # compare entirely, since compare resolves endpoints by URL with
                 # no endpoint_id. Mirrors the gallery inpaint/harmonize checks.
                 # Raised here (phase 1), before any session exists.
-                _reject_raw_endpoint_url_for_non_admin(
-                    request, user, str(ep.id) if ep is not None else None, endpoint
-                )
+                _reject_raw_endpoint_url_for_non_admin(request, user, str(ep.id) if ep is not None else None, endpoint)
                 # Bind the [CMP] session to the RESOLVED endpoint, not the raw
                 # caller-supplied string. When the URL matches a registered
                 # endpoint visible to the caller, use that row's own normalized
@@ -169,9 +169,7 @@ def setup_compare_routes(session_manager: SessionManager):
                 # allowed to pass one — admins / single-user mode, where
                 # `_reject_raw_endpoint_url_for_non_admin` is a no-op and `ep`
                 # is None. Mirrors the registered-endpoint path in session_routes.
-                session_endpoint_url = (
-                    build_chat_url(normalize_base(ep.base_url)) if ep is not None else endpoint
-                )
+                session_endpoint_url = build_chat_url(normalize_base(ep.base_url)) if ep is not None else endpoint
                 # Headers come only from a matched endpoint's key; None when
                 # `ep` is None (raw admin URL or no match), so a comparison can
                 # never inherit another user's key/headers.

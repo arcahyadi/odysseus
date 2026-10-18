@@ -1,6 +1,6 @@
 import asyncio
 
-import mcp_servers.memory_server as memory_server
+from mcp_servers import memory_server
 from src.memory import MemoryManager
 
 
@@ -65,29 +65,27 @@ def test_mcp_memory_uses_configured_owner_for_all_operations(monkeypatch, tmp_pa
     assert "Alice likes green tea" in search_text
     assert "Bob likes espresso" not in search_text
 
-    add_text = _tool_text({
-        "action": "add",
-        "text": "Alice prefers concise notes",
-        "category": "preference",
-    })
-    assert "Memory added" in add_text
-    added = next(
-        entry for entry in manager.load_all()
-        if entry["text"] == "Alice prefers concise notes"
+    add_text = _tool_text(
+        {
+            "action": "add",
+            "text": "Alice prefers concise notes",
+            "category": "preference",
+        }
     )
+    assert "Memory added" in add_text
+    added = next(entry for entry in manager.load_all() if entry["text"] == "Alice prefers concise notes")
     assert added["owner"] == "alice"
     assert vector.added == [(added["id"], "Alice prefers concise notes")]
 
-    edit_text = _tool_text({
-        "action": "edit",
-        "memory_id": bob["id"][:8],
-        "text": "Bob changed",
-    })
-    assert edit_text == "Error: Memory 'bbbbbbbb' not found"
-    bob_after_edit = next(
-        entry for entry in manager.load_all()
-        if entry["id"] == bob["id"]
+    edit_text = _tool_text(
+        {
+            "action": "edit",
+            "memory_id": bob["id"][:8],
+            "text": "Bob changed",
+        }
     )
+    assert edit_text == "Error: Memory 'bbbbbbbb' not found"
+    bob_after_edit = next(entry for entry in manager.load_all() if entry["id"] == bob["id"])
     assert bob_after_edit["text"] == "Bob likes espresso"
 
     delete_text = _tool_text({"action": "delete", "memory_id": bob["id"][:8]})
@@ -132,17 +130,19 @@ def test_mcp_memory_preserves_ownerless_local_behavior(monkeypatch, tmp_path):
 
     add_text = _tool_text({"action": "add", "text": "Another local memory"})
     assert "Memory added" in add_text
-    added = next(
-        entry for entry in manager.load_all()
-        if entry["text"] == "Another local memory"
-    )
+    added = next(entry for entry in manager.load_all() if entry["text"] == "Another local memory")
     assert "owner" not in added
 
-    assert _tool_text({
-        "action": "edit",
-        "memory_id": legacy["id"][:8],
-        "text": "Updated local memory",
-    }) == "Memory updated: Updated local memory"
+    assert (
+        _tool_text(
+            {
+                "action": "edit",
+                "memory_id": legacy["id"][:8],
+                "text": "Updated local memory",
+            }
+        )
+        == "Memory updated: Updated local memory"
+    )
     assert any(entry["text"] == "Updated local memory" for entry in manager.load_all())
 
     delete_text = _tool_text({"action": "delete", "memory_id": legacy["id"][:8]})

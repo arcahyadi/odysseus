@@ -22,10 +22,9 @@ import html
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from companion import pairing as _pairing
 from core.middleware import require_admin
 from src.auth_helpers import get_current_user
-
-from companion import pairing as _pairing
 
 
 def token_owner(request: Request) -> str | None:
@@ -87,6 +86,7 @@ def setup_companion_routes() -> APIRouter:
         """Cheap, auth-validated health check. A 200 with ok=true confirms the
         host/port and credential are valid; middleware returns 401 otherwise."""
         from core.constants import APP_VERSION
+
         return {
             "ok": True,
             "name": "odysseus",
@@ -99,6 +99,7 @@ def setup_companion_routes() -> APIRouter:
         """Server identity + coarse capability flags. `owner` is the caller's own
         identity (the token's owner for bearer callers)."""
         from core.constants import APP_VERSION
+
         return {
             "name": "odysseus",
             "version": APP_VERSION,
@@ -119,7 +120,7 @@ def setup_companion_routes() -> APIRouter:
         require_models_scope(request)
         import json as _json
 
-        from core.database import SessionLocal, ModelEndpoint
+        from core.database import ModelEndpoint, SessionLocal
         from src.endpoint_resolver import build_chat_url
 
         owner = token_owner(request)
@@ -148,13 +149,15 @@ def setup_companion_routes() -> APIRouter:
                     chat_url = build_chat_url(ep.base_url)
                 except Exception:
                     chat_url = ep.base_url
-                out.append({
-                    "endpoint_id": ep.id,
-                    "name": ep.name,
-                    "endpoint_url": chat_url,
-                    "models": model_ids,
-                    "supports_tools": ep.supports_tools,
-                })
+                out.append(
+                    {
+                        "endpoint_id": ep.id,
+                        "name": ep.name,
+                        "endpoint_url": chat_url,
+                        "models": model_ids,
+                        "supports_tools": ep.supports_tools,
+                    }
+                )
         finally:
             db.close()
         return {"endpoints": out}
@@ -217,12 +220,14 @@ def setup_companion_routes() -> APIRouter:
             }
 
         import json as _json
+
         payload_json = _json.dumps(payload, separators=(",", ":"))
         # Only ever emit a known PNG data-URI into the src; every other value is
         # html.escaped.
         qr_block = (
             f'<img src="{html.escape(qr)}" alt="Pairing QR" width="260" height="260">'
-            if qr_ok else "<p><em>QR rendering unavailable -- enter the details manually.</em></p>"
+            if qr_ok
+            else "<p><em>QR rendering unavailable -- enter the details manually.</em></p>"
         )
         page = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

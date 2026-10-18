@@ -5,6 +5,7 @@ get_status() called it unconditionally on each poll, including for sessions that
 are not active (the common case while a client polls a finished report). It is
 now computed only for active sessions and memoized on the entry.
 """
+
 from src.research_handler import ResearchHandler
 
 
@@ -26,7 +27,10 @@ def test_inactive_session_does_not_compute_avg(monkeypatch):
 def test_active_session_memoizes_avg(monkeypatch):
     h = _handler()
     h._active_tasks["s1"] = {
-        "status": "running", "progress": {}, "query": "q", "started_at": 0,
+        "status": "running",
+        "progress": {},
+        "query": "q",
+        "started_at": 0,
     }
     calls = []
     monkeypatch.setattr(h, "get_avg_duration", lambda: (calls.append(1), 12.0)[1])

@@ -12,19 +12,19 @@ from types import SimpleNamespace
 import pytest
 
 from routes.shell_routes import (
+    DOCKER_IN_CONTAINER_HINT,
+    _docker_row_status,
     _find_line_break,
     _import_optional_dependency_for_status,
-    _running_in_container,
-    _docker_row_status,
     _package_installed_from_probe,
     _package_pip_update_status,
     _package_probe_script,
     _package_status_note,
     _prepend_user_install_bins_to_path,
     _reject_cross_site,
+    _running_in_container,
     _ssh_base_argv,
     _venv_activate_prefix,
-    DOCKER_IN_CONTAINER_HINT,
 )
 
 
@@ -41,9 +41,7 @@ def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
     cached_modules = {name: sys.modules.pop(name, None) for name in ("fcntl", "pty")}
 
     module_path = Path(__file__).resolve().parents[1] / "routes" / "shell_routes.py"
-    spec = importlib.util.spec_from_file_location(
-        "_shell_routes_without_pty", module_path
-    )
+    spec = importlib.util.spec_from_file_location("_shell_routes_without_pty", module_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     try:
@@ -60,12 +58,10 @@ def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
 
 async def test_generate_pty_reports_explicit_unsupported_error(monkeypatch):
     """Clients can distinguish unsupported PTY mode from process failures."""
-    import routes.shell_routes as shell_routes
+    from routes import shell_routes
 
     monkeypatch.setattr(shell_routes, "PTY_SUPPORTED", False)
-    monkeypatch.setattr(
-        shell_routes, "_PTY_IMPORT_ERROR", ImportError("No module named 'termios'")
-    )
+    monkeypatch.setattr(shell_routes, "_PTY_IMPORT_ERROR", ImportError("No module named 'termios'"))
 
     request = SimpleNamespace(is_disconnected=lambda: False)
     events = [
@@ -173,7 +169,7 @@ class TestAppleSiliconDetection:
     """APFEL should only surface as available on native Apple Silicon Macs."""
 
     def test_reports_true_on_macos_arm64(self, monkeypatch):
-        import core.platform_compat as platform_compat
+        from core import platform_compat
 
         monkeypatch.setattr(platform_compat.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(platform_compat.platform, "machine", lambda: "arm64")
@@ -183,7 +179,7 @@ class TestAppleSiliconDetection:
 
     @pytest.mark.parametrize("machine", ["x86_64", "amd64"])
     def test_reports_false_off_apple_silicon(self, monkeypatch, machine):
-        import core.platform_compat as platform_compat
+        from core import platform_compat
 
         monkeypatch.setattr(platform_compat.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(platform_compat.platform, "machine", lambda: machine)
@@ -192,7 +188,7 @@ class TestAppleSiliconDetection:
         assert platform_compat.IS_APPLE_SILICON is False
 
     def test_reports_false_on_non_macos(self, monkeypatch):
-        import core.platform_compat as platform_compat
+        from core import platform_compat
 
         monkeypatch.setattr(platform_compat.platform, "system", lambda: "Linux")
         monkeypatch.setattr(platform_compat.platform, "machine", lambda: "arm64")
@@ -294,10 +290,7 @@ class TestPackageProbeStatus:
 
         assert _package_installed_from_probe("vllm", probe) is True
         assert "python package: vllm 0.8.5" in _package_status_note("vllm", probe)
-        assert (
-            _package_pip_update_status({"name": "vllm", "pip": "vllm"}, probe).available
-            is True
-        )
+        assert _package_pip_update_status({"name": "vllm", "pip": "vllm"}, probe).available is True
 
     def test_vllm_cli_without_dist_is_external_for_update(self):
         probe = {
@@ -321,9 +314,7 @@ class TestPackageProbeStatus:
 
         assert _package_installed_from_probe("llama_cpp", probe) is True
         assert "native llama-server" in _package_status_note("llama_cpp", probe)
-        status = _package_pip_update_status(
-            {"name": "llama_cpp", "pip": "llama-cpp-python[server]"}, probe
-        )
+        status = _package_pip_update_status({"name": "llama_cpp", "pip": "llama-cpp-python[server]"}, probe)
         assert status.available is False
         assert "package manager or source checkout" in status.note
 
@@ -378,7 +369,7 @@ class TestPackageProbeStatus:
         assert "shutil.which(b)" in script
 
     def test_status_import_prepares_optional_dependency(self, monkeypatch):
-        import routes.shell_routes as shell_routes
+        from routes import shell_routes
 
         calls = []
         monkeypatch.setattr(
@@ -441,9 +432,7 @@ class TestVenvActivatePrefix:
         assert _venv_activate_prefix("~/venv") == ". ~/venv/bin/activate && "
 
     def test_already_pointing_at_activate(self):
-        assert (
-            _venv_activate_prefix("/opt/v/bin/activate") == ". /opt/v/bin/activate && "
-        )
+        assert _venv_activate_prefix("/opt/v/bin/activate") == ". /opt/v/bin/activate && "
 
     @pytest.mark.parametrize(
         "bad",

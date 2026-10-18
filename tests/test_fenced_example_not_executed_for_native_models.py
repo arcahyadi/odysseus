@@ -21,6 +21,7 @@ These tests drive the real `stream_agent_loop` (not just source-text regex
 assertions) end-to-end with a mocked LLM stream, and assert on whether
 `execute_tool_block` actually gets invoked.
 """
+
 import asyncio
 import json
 
@@ -30,6 +31,7 @@ import src.agent_loop as al
 def _collect(gen):
     async def _run():
         return [c async for c in gen]
+
     return asyncio.run(_run())
 
 
@@ -54,6 +56,7 @@ def _patch_common(monkeypatch, exec_calls):
     async def _fake_exec(block, *a, **k):
         exec_calls.append(block)
         return ("bash", {"output": "ok", "exit_code": 0})
+
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
 
@@ -70,19 +73,20 @@ def _run_loop(monkeypatch, model, deltas, native_calls=None, max_rounds=2, endpo
         call_count["n"] += 1
         if call_count["n"] == 1:
             for d in deltas:
-                yield f'data: {json.dumps({"delta": d})}\n\n'
+                yield f"data: {json.dumps({'delta': d})}\n\n"
             if native_calls:
-                yield f'data: {json.dumps({"type": "tool_calls", "calls": native_calls})}\n\n'
+                yield f"data: {json.dumps({'type': 'tool_calls', 'calls': native_calls})}\n\n"
             yield "data: [DONE]\n\n"
         else:
             # Subsequent rounds: just answer plainly so the loop terminates.
-            yield f'data: {json.dumps({"delta": "All done, here is your answer."})}\n\n'
+            yield f"data: {json.dumps({'delta': 'All done, here is your answer.'})}\n\n"
             yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
     gen = al.stream_agent_loop(
-        endpoint_url or "https://api.openai.com/v1", model,
+        endpoint_url or "https://api.openai.com/v1",
+        model,
         [{"role": "user", "content": "Do not run anything yet, just show me an example."}],
         max_rounds=max_rounds,
         relevant_tools={"bash"},
@@ -117,7 +121,8 @@ def test_native_model_real_native_tool_call_is_executed(monkeypatch):
     _patch_common(monkeypatch, exec_calls)
     native_calls = [{"name": "bash", "arguments": json.dumps({"command": "echo hi"})}]
     events = _run_loop(
-        monkeypatch, "gpt-4o",
+        monkeypatch,
+        "gpt-4o",
         ["Sure, let me check that for you."],
         native_calls=native_calls,
         max_rounds=2,
@@ -139,7 +144,8 @@ def test_non_native_model_fenced_tool_call_still_executed(monkeypatch):
     # and the model must rely on the textual fenced-block convention to
     # invoke tools at all.
     events = _run_loop(
-        monkeypatch, "llama-2-7b-chat",
+        monkeypatch,
+        "llama-2-7b-chat",
         ["```bash\necho hi\n```"],
         max_rounds=2,
         endpoint_url="http://192.168.1.50:8000/v1",
@@ -177,7 +183,7 @@ def test_issue_3222_repro_guide_only_response_resolves_no_tool_actions(monkeypat
 # lives in), complementing the end-to-end checks above.
 # ---------------------------------------------------------------------------
 def test_resolve_tool_blocks_skips_textual_fallback_for_native_models_with_no_native_calls():
-    guide_only = "```bash\nnpm run plan:articles\n```\n```json\n{\"a\": 1}\n```"
+    guide_only = '```bash\nnpm run plan:articles\n```\n```json\n{"a": 1}\n```'
     blocks, used_native = al._resolve_tool_blocks(guide_only, [], round_num=1, is_api_model=True)
     assert blocks == []
     assert used_native is False
@@ -237,11 +243,7 @@ def test_stepfun_native_tool_tokens_are_executed_even_when_fenced_fallback_is_sk
 
 
 def test_stepfun_native_tool_tokens_accept_plain_web_query():
-    leaked = (
-        "<｜tool▁call▁begin｜>web_search<｜tool▁sep｜>"
-        "Sweden news today"
-        "<｜tool▁call▁end｜>"
-    )
+    leaked = "<｜tool▁call▁begin｜>web_search<｜tool▁sep｜>Sweden news today<｜tool▁call▁end｜>"
     blocks = parse_tool_blocks(leaked, skip_fenced=True)
     assert len(blocks) == 1
     assert blocks[0].tool_type == "web_search"
@@ -249,10 +251,7 @@ def test_stepfun_native_tool_tokens_accept_plain_web_query():
 
 
 def test_skip_fenced_still_recovers_direct_xml_tool_markup():
-    leaked = (
-        "I'll search now.\n"
-        "<tool_call><web_search>News in Sweden today 2026-06-22</web_search></tool_call>"
-    )
+    leaked = "I'll search now.\n<tool_call><web_search>News in Sweden today 2026-06-22</web_search></tool_call>"
     blocks = parse_tool_blocks(leaked, skip_fenced=True)
     assert len(blocks) == 1
     assert blocks[0].tool_type == "web_search"
@@ -261,13 +260,7 @@ def test_skip_fenced_still_recovers_direct_xml_tool_markup():
 
 
 def test_skip_fenced_recovers_direct_xml_tool_markup_with_unclosed_wrapper():
-    leaked = (
-        "I'll search now.\n"
-        "<tool_call>\n"
-        "<web_search>\n"
-        "Sweden news today 2026-06-22\n"
-        "</web_search>"
-    )
+    leaked = "I'll search now.\n<tool_call>\n<web_search>\nSweden news today 2026-06-22\n</web_search>"
     blocks = parse_tool_blocks(leaked, skip_fenced=True)
     assert len(blocks) == 1
     assert blocks[0].tool_type == "web_search"
@@ -333,11 +326,7 @@ def test_strip_tool_blocks_still_strips_fence_by_default():
 
 
 def test_strip_tool_blocks_always_strips_invoke_and_dsml_regardless_of_skip_fenced():
-    leaked = (
-        "Searching now.\n"
-        '<invoke name="web_search"><parameter name="query">q</parameter></invoke>'
-        "\nDone."
-    )
+    leaked = 'Searching now.\n<invoke name="web_search"><parameter name="query">q</parameter></invoke>\nDone.'
     for skip in (True, False):
         cleaned = strip_tool_blocks(leaked, skip_fenced=skip)
         assert "<invoke" not in cleaned

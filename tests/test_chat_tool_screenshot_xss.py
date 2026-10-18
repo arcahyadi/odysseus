@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 _REPO = Path(__file__).resolve().parent.parent
 
 
@@ -10,7 +9,7 @@ def test_live_tool_screenshot_does_not_template_raw_sse_value():
     chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
 
     assert "safeToolScreenshotSrc(json.screenshot)" in chat
-    assert 'img.src = screenshotSrc' in chat
+    assert "img.src = screenshotSrc" in chat
     assert 'details.innerHTML = `<summary>Screenshot</summary><img src="${json.screenshot}"' not in chat
 
 

@@ -19,6 +19,7 @@ passed to ``pytest.main`` as an in-process plugin; no conftest or global
 plugin is involved. Reproduction requires the reported working directory,
 seed, pytest arguments, and test environment. The exit code is pytest's own.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -57,9 +58,7 @@ def seed_type(value: str) -> int:
     """argparse type: a seed in ``[0, SEED_MAX]``."""
     number = int(value)
     if not 0 <= number <= SEED_MAX:
-        raise argparse.ArgumentTypeError(
-            f"seed must be between 0 and {SEED_MAX}, got {value!r}"
-        )
+        raise argparse.ArgumentTypeError(f"seed must be between 0 and {SEED_MAX}, got {value!r}")
     return number
 
 
@@ -108,20 +107,14 @@ def print_report_header(seed: int, pytest_args: Sequence[str]) -> None:
     ]
     print(f"[order-report] working directory: {Path.cwd()}")
     print(f"[order-report] shuffling test order with seed {seed}")
-    print(
-        "[order-report] reproduce from this working directory with the same "
-        "test environment:"
-    )
+    print("[order-report] reproduce from this working directory with the same test environment:")
     print(f"[order-report] reproduce with: {shlex.join(repro)}")
 
 
 def print_report_footer(seed: int, exit_code: int) -> None:
     """Print the outcome with the seed again, after possibly long pytest output."""
     outcome = "no failures" if exit_code == 0 else f"pytest exit code {exit_code}"
-    print(
-        f"[order-report] seed {seed}: {outcome} "
-        "(report-only; fix order-sensitive failures in separate scoped PRs)"
-    )
+    print(f"[order-report] seed {seed}: {outcome} (report-only; fix order-sensitive failures in separate scoped PRs)")
 
 
 def run(

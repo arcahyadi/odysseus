@@ -1,11 +1,11 @@
 import importlib.util
 import json
-import pytest
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "pr_blocker_audit.py"
@@ -515,7 +515,7 @@ def test_score_ranking_is_deterministic():
         ]
     )
 
-    scored = audit.score_prs(prs, now=datetime(2026, 6, 3, tzinfo=timezone.utc))
+    scored = audit.score_prs(prs, now=datetime(2026, 6, 3, tzinfo=UTC))
 
     assert [item.pr.number for item in scored] == [1, 2]
     assert scored[0].score > scored[1].score
@@ -540,7 +540,7 @@ def test_direct_bearer_token_issue_ranks_above_dirty_memory_leak():
         ]
     )
 
-    scored = audit.score_prs(prs, now=datetime(2026, 6, 3, tzinfo=timezone.utc))
+    scored = audit.score_prs(prs, now=datetime(2026, 6, 3, tzinfo=UTC))
 
     assert [item.pr.number for item in scored] == [1, 2]
     assert scored[0].score > scored[1].score
@@ -569,11 +569,11 @@ def test_dirty_state_is_caution_text_not_priority_boost():
         ]
     )[0]
 
-    dirty_score = audit.score_pr(dirty_memory, audit.Counter(), datetime(2026, 6, 3, tzinfo=timezone.utc))
-    clean_auth_score = audit.score_pr(clean_auth, audit.Counter(), datetime(2026, 6, 3, tzinfo=timezone.utc))
+    dirty_score = audit.score_pr(dirty_memory, audit.Counter(), datetime(2026, 6, 3, tzinfo=UTC))
+    clean_auth_score = audit.score_pr(clean_auth, audit.Counter(), datetime(2026, 6, 3, tzinfo=UTC))
 
     assert dirty_score.score < clean_auth_score.score
-    assert any("caution: merge state DIRTY" == reason for reason in dirty_score.reasons)
+    assert any(reason == "caution: merge state DIRTY" for reason in dirty_score.reasons)
 
 
 def test_markdown_contains_expected_sections_and_no_ansi():

@@ -7,16 +7,16 @@ if needed.
 
 Includes a task registry so research survives page refreshes and can be cancelled.
 """
+
 import asyncio
 import json
 import logging
 import re
 import time
 from pathlib import Path
-from typing import Optional, Dict
 
-from src.research_utils import strip_thinking, is_low_quality
 from src.constants import DEEP_RESEARCH_DIR
+from src.research_utils import is_low_quality, strip_thinking
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def _format_probe_failure(model: str, exc: Exception) -> str:
     return f"Cannot reach model '{model}' — check that the endpoint is running and accessible."
 
 
-def _research_json_path(session_id: str) -> Optional[Path]:
+def _research_json_path(session_id: str) -> Path | None:
     if not isinstance(session_id, str) or not _RESEARCH_SESSION_ID_RE.fullmatch(session_id):
         return None
     root = RESEARCH_DATA_DIR.resolve()
@@ -67,14 +67,15 @@ class ResearchHandler:
 
     def __init__(self):
         self._legacy_engine = None
-        self._active_tasks: Dict[str, dict] = {}
+        self._active_tasks: dict[str, dict] = {}
         self._initialize_legacy_engine()
         RESEARCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     def _initialize_legacy_engine(self):
         """Initialize the legacy research engine as a fallback."""
         try:
-            from research_engine import ResearchOrchestrator, Config
+            from research_engine import Config, ResearchOrchestrator
+
             config = Config(max_searches=12, max_content_per_page=15000)
             self._legacy_engine = ResearchOrchestrator(config)
             logger.info("Legacy ResearchOrchestrator initialized (fallback)")
@@ -90,8 +91,12 @@ class ResearchHandler:
     # ------------------------------------------------------------------
 
     async def synthesize_query(
-        self, sess, latest_message: str,
-        llm_endpoint: str, llm_model: str, llm_headers: dict = None,
+        self,
+        sess,
+        latest_message: str,
+        llm_endpoint: str,
+        llm_model: str,
+        llm_headers: dict = None,
     ) -> str:
         """Synthesize the conversation into a single focused research query.
 
@@ -100,7 +105,7 @@ class ResearchHandler:
         Falls back to the latest message if synthesis fails.
         """
         # Build conversation context from history
-        history = getattr(sess, 'history', [])
+        history = getattr(sess, "history", [])
 
         # A bare affirmation ("yes", "ok", "go ahead") is the user accepting the
         # clarifying-question round, NOT a research topic — researching the word
@@ -113,10 +118,29 @@ class ResearchHandler:
         # heuristic: a short answer like "UK", "C++", or "Rust" is a real topic
         # in a clarification flow and must be left untouched.
         _AFFIRMATIONS = {
-            "yes", "y", "yeah", "yep", "yup", "sure", "sure thing", "ok", "okay",
-            "k", "kk", "go", "go ahead", "go for it", "do it", "please",
-            "yes please", "sounds good", "continue", "proceed", "lets go",
-            "let's go", "yes go ahead",
+            "yes",
+            "y",
+            "yeah",
+            "yep",
+            "yup",
+            "sure",
+            "sure thing",
+            "ok",
+            "okay",
+            "k",
+            "kk",
+            "go",
+            "go ahead",
+            "go for it",
+            "do it",
+            "please",
+            "yes please",
+            "sounds good",
+            "continue",
+            "proceed",
+            "lets go",
+            "let's go",
+            "yes go ahead",
         }
 
         def _normalize(text: str) -> str:
@@ -139,8 +163,7 @@ class ResearchHandler:
         # Take last 6 messages max for context
         recent = history[-6:]
         convo = "\n".join(
-            f"{'User' if m.role == 'user' else 'Assistant'}: {m.content[:500]}"
-            for m in recent if m.content
+            f"{'User' if m.role == 'user' else 'Assistant'}: {m.content[:500]}" for m in recent if m.content
         )
         convo += f"\nUser: {latest_message}"
 
@@ -150,19 +173,22 @@ class ResearchHandler:
             response = await llm_call_async(
                 url=llm_endpoint,
                 model=llm_model,
-                messages=[{"role": "user", "content":
-                    "Read this conversation and write a single, specific research query that captures "
-                    "what the user wants to know. Include all relevant context, constraints, and preferences "
-                    "they mentioned. Output ONLY the research query — nothing else.\n\n"
-                    f"Conversation:\n{convo}"
-                }],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Read this conversation and write a single, specific research query that captures "
+                        "what the user wants to know. Include all relevant context, constraints, and preferences "
+                        "they mentioned. Output ONLY the research query — nothing else.\n\n"
+                        f"Conversation:\n{convo}",
+                    }
+                ],
                 temperature=0.1,
                 max_tokens=200,
                 headers=llm_headers,
                 timeout=15,
                 max_retries=1,
             )
-            query = strip_thinking(response).strip().strip('"\'')
+            query = strip_thinking(response).strip().strip("\"'")
             if query and len(query) > 5:
                 return query
         except Exception as e:
@@ -171,8 +197,12 @@ class ResearchHandler:
         return _fallback()
 
     async def generate_plan(
-        self, query: str, llm_endpoint: str, llm_model: str, llm_headers: dict = None,
-    ) -> Optional[dict]:
+        self,
+        query: str,
+        llm_endpoint: str,
+        llm_model: str,
+        llm_headers: dict = None,
+    ) -> dict | None:
         """Generate a research plan for user review before starting research."""
         try:
             from src.deep_research import RESEARCH_PLAN_PROMPT, current_date_context
@@ -193,15 +223,17 @@ class ResearchHandler:
 
             # Try to parse structured plan
             import json as _json
+
             parsed = None
             try:
                 # Try to extract JSON from response
                 _clean = response.strip()
                 if _clean.startswith("```"):
-                    _clean = re.sub(r'^```(?:json)?\s*', '', _clean)
-                    _clean = re.sub(r'\s*```$', '', _clean)
+                    _clean = re.sub(r"^```(?:json)?\s*", "", _clean)
+                    _clean = re.sub(r"\s*```$", "", _clean)
                 import re as _re
-                _match = _re.search(r'\{[\s\S]*\}', _clean)
+
+                _match = _re.search(r"\{[\s\S]*\}", _clean)
                 if _match:
                     parsed = _json.loads(_match.group())
             except Exception:
@@ -273,6 +305,7 @@ class ResearchHandler:
         # explode into a multi-day hang.
         if hard_timeout is None:
             from src.settings import get_setting
+
             try:
                 raw_timeout = int(get_setting("research_run_timeout_seconds", 1800))
             except (TypeError, ValueError):
@@ -326,7 +359,9 @@ class ResearchHandler:
             try:
                 result = await asyncio.wait_for(
                     self.call_research_service(
-                        query, llm_endpoint, llm_model,
+                        query,
+                        llm_endpoint,
+                        llm_model,
                         max_time=max_time,
                         progress_callback=on_progress,
                         _task_entry=entry,
@@ -349,19 +384,23 @@ class ResearchHandler:
                 try:
                     sources = entry.get("sources", [])
                     researcher = entry.get("researcher")
-                    findings = self._extract_raw_findings(researcher.findings) if researcher and researcher.findings else []
+                    findings = (
+                        self._extract_raw_findings(researcher.findings) if researcher and researcher.findings else []
+                    )
                     _guarded_complete(session_id, result, sources, findings)
                 except Exception as cb_err:
                     logger.error(f"on_complete callback failed: {cb_err}")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(f"Research hard timeout ({hard_timeout}s) for session {session_id}")
                 entry["status"] = "error"
                 # If we have partial results, save what we have
                 researcher = entry.get("researcher")
                 if researcher and researcher.evolving_report:
                     entry["result"] = self._format_research_report(
-                        query, researcher.evolving_report,
-                        researcher.get_stats(), hard_timeout,
+                        query,
+                        researcher.evolving_report,
+                        researcher.get_stats(),
+                        hard_timeout,
                     )
                     entry["status"] = "done"
                     self._save_result(session_id, entry)
@@ -372,7 +411,9 @@ class ResearchHandler:
                     except Exception as e:
                         logger.warning(f"on_complete callback failed in timeout branch: {e}")
                 else:
-                    entry["result"] = f"Research timed out after {hard_timeout}s. The model may be too slow for deep research."
+                    entry["result"] = (
+                        f"Research timed out after {hard_timeout}s. The model may be too slow for deep research."
+                    )
                 on_progress({"phase": "error", "message": f"Research timed out after {hard_timeout}s"})
             except asyncio.CancelledError:
                 entry["status"] = "cancelled"
@@ -384,8 +425,10 @@ class ResearchHandler:
                 if researcher and researcher.evolving_report:
                     _elapsed = time.time() - entry["started_at"]
                     entry["result"] = self._format_research_report(
-                        query, researcher.evolving_report,
-                        researcher.get_stats(), _elapsed,
+                        query,
+                        researcher.evolving_report,
+                        researcher.get_stats(),
+                        _elapsed,
                     )
                     entry["status"] = "done"
                     self._save_result(session_id, entry)
@@ -395,7 +438,12 @@ class ResearchHandler:
                         _guarded_complete(session_id, entry["result"], sources, findings)
                     except Exception as cb_err:
                         logger.warning(f"on_complete callback failed in error branch: {cb_err}")
-                    on_progress({"phase": "warning", "message": f"Research finished with errors — partial results saved ({_elapsed:.0f}s elapsed)"})
+                    on_progress(
+                        {
+                            "phase": "warning",
+                            "message": f"Research finished with errors — partial results saved ({_elapsed:.0f}s elapsed)",
+                        }
+                    )
                 else:
                     entry["result"] = str(e)
                     entry["status"] = "error"
@@ -404,7 +452,7 @@ class ResearchHandler:
         entry["task"] = task
         return {"session_id": session_id, "status": "running", "query": query}
 
-    def get_status(self, session_id: str) -> Optional[dict]:
+    def get_status(self, session_id: str) -> dict | None:
         """Get current research status for a session."""
         if session_id in self._active_tasks:
             entry = self._active_tasks[session_id]
@@ -460,7 +508,7 @@ class ResearchHandler:
         entry["status"] = "cancelled"
         return True
 
-    def get_result(self, session_id: str) -> Optional[str]:
+    def get_result(self, session_id: str) -> str | None:
         """Get the completed research result."""
         if session_id in self._active_tasks:
             entry = self._active_tasks[session_id]
@@ -480,7 +528,7 @@ class ResearchHandler:
                 pass
         return None
 
-    def get_sources(self, session_id: str) -> Optional[list]:
+    def get_sources(self, session_id: str) -> list | None:
         """Get deduplicated source list from research findings."""
         # Check in-memory first
         if session_id in self._active_tasks:
@@ -502,7 +550,7 @@ class ResearchHandler:
                 pass
         return None
 
-    def get_raw_findings(self, session_id: str) -> Optional[list]:
+    def get_raw_findings(self, session_id: str) -> list | None:
         """Get raw per-source findings for display."""
         if session_id in self._active_tasks:
             entry = self._active_tasks[session_id]
@@ -561,7 +609,7 @@ class ResearchHandler:
             logger.warning(f"Failed to extract raw findings: {e}")
             return []
 
-    def get_avg_duration(self) -> Optional[float]:
+    def get_avg_duration(self) -> float | None:
         """Compute average research duration from completed results on disk."""
         durations = []
         try:
@@ -632,13 +680,14 @@ class ResearchHandler:
             logger.info(f"Research result saved to {path}")
             try:
                 from src.event_bus import fire_event
+
                 fire_event("research_completed", entry.get("owner") or None)
             except Exception:
                 logger.debug("research_completed event dispatch failed", exc_info=True)
         except Exception as e:
             logger.error(f"Failed to save research result: {e}")
 
-    def _get_session_json(self, session_id: str) -> Optional[dict]:
+    def _get_session_json(self, session_id: str) -> dict | None:
         """Load the saved research JSON for a session, if it exists."""
         path = _research_json_path(session_id)
         if path is None:
@@ -650,7 +699,7 @@ class ResearchHandler:
                 pass
         return None
 
-    def get_report_html(self, session_id: str) -> Optional[str]:
+    def get_report_html(self, session_id: str) -> str | None:
         """Generate the visual HTML report for a session (always fresh from JSON)."""
         json_path = _research_json_path(session_id)
         if json_path is None:
@@ -720,8 +769,11 @@ class ResearchHandler:
     async def _probe_endpoint(endpoint: str, model: str, headers: dict = None):
         """Quick probe to verify the LLM endpoint/model responds before research."""
         from src.llm_core import llm_call_async
+
         try:
-            logger.info(f"Probing {model} at {endpoint} (has_auth={bool(headers and 'Authorization' in (headers or {}))})")
+            logger.info(
+                f"Probing {model} at {endpoint} (has_auth={bool(headers and 'Authorization' in (headers or {}))})"
+            )
             await llm_call_async(
                 url=endpoint,
                 model=model,
@@ -786,17 +838,21 @@ class ResearchHandler:
 
         try:
             from src.deep_research import DeepResearcher
-
             from src.settings import get_setting
+
             _max_report_tokens = int(get_setting("research_max_tokens", 16384))
             _extraction_timeout = _bounded_int(
-                extraction_timeout if extraction_timeout is not None else get_setting("research_extraction_timeout_seconds", 90),
+                extraction_timeout
+                if extraction_timeout is not None
+                else get_setting("research_extraction_timeout_seconds", 90),
                 default=90,
                 minimum=15,
                 maximum=3600,
             )
             _extraction_concurrency = _bounded_int(
-                extraction_concurrency if extraction_concurrency is not None else get_setting("research_extraction_concurrency", 3),
+                extraction_concurrency
+                if extraction_concurrency is not None
+                else get_setting("research_extraction_concurrency", 3),
                 default=3,
                 minimum=1,
                 maximum=12,
@@ -859,19 +915,22 @@ class ResearchHandler:
             return await self._fallback_research(query, llm_endpoint, llm_model, max_time, str(e))
 
     async def _fallback_research(
-        self, query: str, llm_endpoint: str, llm_model: str,
-        max_time: int, primary_error: str,
+        self,
+        query: str,
+        llm_endpoint: str,
+        llm_model: str,
+        max_time: int,
+        primary_error: str,
     ) -> str:
         """Fall back to legacy engine, then to basic web search."""
         # Try legacy orchestrator
         if self._legacy_engine:
             try:
                 import asyncio
+
                 logger.info("Falling back to legacy ResearchOrchestrator...")
                 loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None, self._legacy_engine.start_research, query, max_time
-                )
+                result = await loop.run_in_executor(None, self._legacy_engine.start_research, query, max_time)
                 stats = self._get_legacy_stats()
                 elapsed = float(stats.get("Duration", "0").rstrip("s") or 0)
                 return self._format_research_report(query, result, stats, elapsed)
@@ -890,14 +949,18 @@ class ResearchHandler:
             return {
                 "Findings": len(self._legacy_engine.findings),
                 "Sources": len(self._legacy_engine.source_reports),
-                "Searches": tracker.counters['searches_executed'],
-                "URLs": tracker.counters['urls_processed'],
+                "Searches": tracker.counters["searches_executed"],
+                "URLs": tracker.counters["urls_processed"],
             }
         except Exception:
             return {}
 
     def _format_research_report(
-        self, query: str, full_report: str, stats: dict, elapsed: float,
+        self,
+        query: str,
+        full_report: str,
+        stats: dict,
+        elapsed: float,
     ) -> str:
         """Format research report (markdown only — sources/findings handled by frontend)."""
         full_report = strip_thinking(full_report)

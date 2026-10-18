@@ -39,10 +39,7 @@ def test_abs_url_pins_cross_origin_href_to_configured_carddav_origin(monkeypatch
         lambda url, *, block_private=False: (True, "ok"),
     )
 
-    assert (
-        contacts._abs_url("http://169.254.169.254/latest/meta-data")
-        == "https://dav.example.com/latest/meta-data"
-    )
+    assert contacts._abs_url("http://169.254.169.254/latest/meta-data") == "https://dav.example.com/latest/meta-data"
 
 
 def test_vcard_url_validates_base_and_quotes_uid(monkeypatch):

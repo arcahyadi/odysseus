@@ -1,16 +1,16 @@
 """Shared auth helpers used by all route files."""
 
 import os
-from typing import Optional
-from fastapi import Request, HTTPException
+
+from fastapi import HTTPException, Request
 
 
-def get_current_user(request: Request) -> Optional[str]:
+def get_current_user(request: Request) -> str | None:
     """Get current username from request state (set by auth middleware)."""
-    return getattr(request.state, 'current_user', None)
+    return getattr(request.state, "current_user", None)
 
 
-def effective_user(request: Request) -> Optional[str]:
+def effective_user(request: Request) -> str | None:
     """The real human behind the request, for ownership/attribution.
 
     Cookie sessions resolve to the logged-in username. Bearer ``ody_`` callers

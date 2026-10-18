@@ -10,12 +10,11 @@ regression where a copy-paste re-introduces a bare asyncio.create_task.
 This is the routes/chat_helpers.py-scoped sibling of the webhook-emitter
 guard added in #4336 (tests/test_webhook_emitters_use_manager.py).
 """
+
 import ast
 from pathlib import Path
 
-CHAT_HELPERS = (
-    Path(__file__).resolve().parent.parent / "routes" / "chat_helpers.py"
-)
+CHAT_HELPERS = Path(__file__).resolve().parent.parent / "routes" / "chat_helpers.py"
 
 
 def _untracked_create_task_calls(tree: ast.AST) -> list[tuple[int, str]]:

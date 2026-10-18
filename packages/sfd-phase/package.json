@@ -1,0 +1,15 @@
+{
+  "name": "@agentos/sfd-phase",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SFD Phase Manager — phase lifecycle, transitions, validation, rollback",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "latest"
+  }
+}

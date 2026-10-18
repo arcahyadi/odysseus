@@ -5,8 +5,8 @@ import types
 
 import pytest
 
-import src.model_context as model_context
-from src.model_context import is_local_endpoint, estimate_tokens, _lookup_known
+from src import model_context
+from src.model_context import _lookup_known, estimate_tokens, is_local_endpoint
 
 
 class _Column:
@@ -67,11 +67,14 @@ class TestIsLocalEndpoint:
     def test_private_10(self):
         assert is_local_endpoint("http://10.0.0.5:8000/v1/chat/completions") is True
 
-    @pytest.mark.parametrize("host", [
-        "10.example-cloud.com",
-        "172.16.example-cloud.com",
-        "192.168.example-cloud.com",
-    ])
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "10.example-cloud.com",
+            "172.16.example-cloud.com",
+            "192.168.example-cloud.com",
+        ],
+    )
     def test_private_prefix_dns_names_are_remote(self, host):
         assert is_local_endpoint(f"https://{host}/v1/chat/completions") is False
 
@@ -80,14 +83,17 @@ class TestIsLocalEndpoint:
         assert is_local_endpoint("http://100.64.0.1:5000/v1/chat/completions") is True
 
     def test_configured_tailscale_proxy_is_remote(self, monkeypatch):
-        _install_endpoint_db(monkeypatch, [
-            types.SimpleNamespace(
-                base_url="http://100.117.136.97:34521/v1",
-                endpoint_kind="proxy",
-                api_key="fake-key",
-                is_enabled=True,
-            )
-        ])
+        _install_endpoint_db(
+            monkeypatch,
+            [
+                types.SimpleNamespace(
+                    base_url="http://100.117.136.97:34521/v1",
+                    endpoint_kind="proxy",
+                    api_key="fake-key",
+                    is_enabled=True,
+                )
+            ],
+        )
 
         assert is_local_endpoint("http://100.117.136.97:34521/v1/chat/completions") is False
 
@@ -234,14 +240,17 @@ class TestGetContextLength:
         assert len(calls) == 1
 
     def test_configured_proxy_uses_default_without_model_listing(self, monkeypatch):
-        _install_endpoint_db(monkeypatch, [
-            types.SimpleNamespace(
-                base_url="http://100.117.136.97:34521/v1",
-                endpoint_kind="proxy",
-                api_key="fake-key",
-                is_enabled=True,
-            )
-        ])
+        _install_endpoint_db(
+            monkeypatch,
+            [
+                types.SimpleNamespace(
+                    base_url="http://100.117.136.97:34521/v1",
+                    endpoint_kind="proxy",
+                    api_key="fake-key",
+                    is_enabled=True,
+                )
+            ],
+        )
         calls = []
 
         def fake_get(*args, **kwargs):

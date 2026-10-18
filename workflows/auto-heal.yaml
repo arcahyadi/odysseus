@@ -1,0 +1,59 @@
+name: "Auto Heal"
+description: "Self-healing pipeline triggered by repeated service errors. Log, restart, verify, and escalate if needed."
+version: "1.0"
+enabled: true
+triggers:
+  - type: event
+    pattern: "service.error"
+    count: 3
+    window: 5m
+steps:
+  - id: "capture-logs"
+    action: docker_action
+    params:
+      command: "logs --tail 200 {{ trigger.payload.service_name }}"
+    on_error: continue
+    timeout: 30s
+  - id: "restart-service"
+    action: docker_action
+    params:
+      command: "restart {{ trigger.payload.service_name }}"
+    on_error: continue
+    timeout: 60s
+  - id: "health-check"
+    action: webhook
+    params:
+      method: GET
+      url: "http://localhost:8080/api/services/{{ trigger.payload.service_name }}/health"
+      expect_status: 200
+    on_error: retry(3, 10s)
+    timeout: 30s
+  - id: "activate-fallback"
+    action: docker_action
+    params:
+      command: "compose up -d browser-harness"
+    on_error: continue
+    timeout: 120s
+    condition: "{{ steps.health-check.status }} != 'ok'"
+  - id: "notify-critical"
+    action: send_alert
+    params:
+      channel: ntfy
+      priority: critical
+      title: "Auto-Heal Failed: {{ trigger.payload.service_name }}"
+      message: >
+        Service {{ trigger.payload.service_name }} failed 3 times in 5 minutes.
+        Restart attempted. Health check: {{ steps.health-check.status }}.
+        Fallback: {{ steps.activate-fallback.status }}.
+        Recent errors:
+        {{ steps.capture-logs.output }}
+    on_error: continue
+    timeout: 15s
+error_handling:
+  on_abort:
+    - action: send_alert
+      params:
+        channel: ntfy
+        priority: critical
+        title: "Auto-Heal Pipeline Failed"
+        message: "Step '{{ error.step }}' failed during auto-heal for {{ trigger.payload.service_name }}: {{ error.message }}"

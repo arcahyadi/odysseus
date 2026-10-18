@@ -12,14 +12,13 @@ import json
 import os
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 import httpx
 from fastapi import HTTPException
 
 DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL = (
-    os.getenv("CHATGPT_SUBSCRIPTION_BASE_URL", "").strip().rstrip("/")
-    or "https://chatgpt.com/backend-api/codex"
+    os.getenv("CHATGPT_SUBSCRIPTION_BASE_URL", "").strip().rstrip("/") or "https://chatgpt.com/backend-api/codex"
 )
 CHATGPT_SUBSCRIPTION_PROVIDER = "chatgpt-subscription"
 CHATGPT_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -33,6 +32,7 @@ _AUTH_REFRESH_LOCKS_GUARD = threading.Lock()
 
 def _database_handles():
     from core.database import ProviderAuthSession, SessionLocal, utcnow_naive
+
     return ProviderAuthSession, SessionLocal, utcnow_naive
 
 
@@ -70,12 +70,10 @@ def is_chatgpt_subscription_base(url: str) -> bool:
         path = (parsed.path or "").rstrip("/")
     except Exception:
         return False
-    return host == "chatgpt.com" and (
-        path == "/backend-api/codex" or path.startswith("/backend-api/codex/")
-    )
+    return host == "chatgpt.com" and (path == "/backend-api/codex" or path.startswith("/backend-api/codex/"))
 
 
-def chatgpt_headers(access_token: Optional[str]) -> Dict[str, str]:
+def chatgpt_headers(access_token: str | None) -> dict[str, str]:
     headers = {
         "Accept": "application/json, text/event-stream",
         "Origin": "https://chatgpt.com",
@@ -149,12 +147,17 @@ def _raise_for_oauth_response(response: httpx.Response, action: str) -> None:
         raise ChatGPTSubscriptionRateLimited(
             "ChatGPT Subscription quota or rate limit was reached. Credentials are still valid."
         )
-    if response.status_code in (401, 403) or code in {"invalid_grant", "invalid_token", "invalid_request", "refresh_token_reused"}:
+    if response.status_code in (401, 403) or code in {
+        "invalid_grant",
+        "invalid_token",
+        "invalid_request",
+        "refresh_token_reused",
+    }:
         raise ChatGPTSubscriptionReauthRequired(message)
     raise ChatGPTSubscriptionError(message)
 
 
-def _json_or_error(response: httpx.Response, action: str) -> Dict[str, Any]:
+def _json_or_error(response: httpx.Response, action: str) -> dict[str, Any]:
     _raise_for_oauth_response(response, action)
     try:
         data = response.json()
@@ -165,7 +168,7 @@ def _json_or_error(response: httpx.Response, action: str) -> Dict[str, Any]:
     return data
 
 
-def request_device_code(timeout: float = 15.0) -> Dict[str, Any]:
+def request_device_code(timeout: float = 15.0) -> dict[str, Any]:
     response = httpx.post(
         f"{CHATGPT_OAUTH_ISSUER}/api/accounts/deviceauth/usercode",
         json={"client_id": CHATGPT_OAUTH_CLIENT_ID},
@@ -181,7 +184,7 @@ def request_device_code(timeout: float = 15.0) -> Dict[str, Any]:
     return data
 
 
-def poll_device_auth(device_auth_id: str, user_code: str, timeout: float = 15.0) -> Dict[str, Any]:
+def poll_device_auth(device_auth_id: str, user_code: str, timeout: float = 15.0) -> dict[str, Any]:
     response = httpx.post(
         f"{CHATGPT_OAUTH_ISSUER}/api/accounts/deviceauth/token",
         json={"device_auth_id": device_auth_id, "user_code": user_code},
@@ -193,7 +196,7 @@ def poll_device_auth(device_auth_id: str, user_code: str, timeout: float = 15.0)
     return _json_or_error(response, "device-code poll")
 
 
-def exchange_authorization_code(authorization_code: str, code_verifier: str, timeout: float = 15.0) -> Dict[str, Any]:
+def exchange_authorization_code(authorization_code: str, code_verifier: str, timeout: float = 15.0) -> dict[str, Any]:
     response = httpx.post(
         CHATGPT_OAUTH_TOKEN_URL,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -212,10 +215,12 @@ def exchange_authorization_code(authorization_code: str, code_verifier: str, tim
     return data
 
 
-def refresh_oauth_tokens(access_token: str, refresh_token: str, timeout: float = 20.0) -> Dict[str, Any]:
+def refresh_oauth_tokens(access_token: str, refresh_token: str, timeout: float = 20.0) -> dict[str, Any]:
     del access_token
     if not refresh_token:
-        raise ChatGPTSubscriptionReauthRequired("ChatGPT Subscription is missing a refresh token. Reconnect the provider.")
+        raise ChatGPTSubscriptionReauthRequired(
+            "ChatGPT Subscription is missing a refresh token. Reconnect the provider."
+        )
     response = httpx.post(
         CHATGPT_OAUTH_TOKEN_URL,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -232,7 +237,7 @@ def refresh_oauth_tokens(access_token: str, refresh_token: str, timeout: float =
     return data
 
 
-def _decode_jwt_payload(token: str) -> Dict[str, Any]:
+def _decode_jwt_payload(token: str) -> dict[str, Any]:
     parts = (token or "").split(".")
     if len(parts) < 2:
         raise ValueError("not a JWT")
@@ -251,7 +256,9 @@ def access_token_is_expiring(access_token: str, skew_seconds: int = CHATGPT_ACCE
     return exp <= int(time.time()) + int(skew_seconds)
 
 
-def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, force_refresh: bool = False) -> Dict[str, Any]:
+def resolve_runtime_credentials(
+    auth_id: str, owner: str | None = None, *, force_refresh: bool = False
+) -> dict[str, Any]:
     ProviderAuthSession, SessionLocal, utcnow_naive = _database_handles()
     db = SessionLocal()
     try:
@@ -307,7 +314,9 @@ def build_responses_input(messages: list[dict]) -> list[dict]:
             role = "user"
         content = msg.get("content")
         if isinstance(content, list):
-            text = "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
+            text = "\n".join(
+                str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict)
+            )
         else:
             text = "" if content is None else str(content)
         input_type = "output_text" if role == "assistant" else "input_text"

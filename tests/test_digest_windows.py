@@ -1,4 +1,5 @@
 """Tests for the calendar check-in digest windows (src/task_scheduler.py)."""
+
 from datetime import datetime, timedelta
 
 from src.task_scheduler import _digest_windows
@@ -9,7 +10,7 @@ def test_windows_are_contiguous_with_no_gap():
     windows = _digest_windows(now)
     # Each window starts exactly where the previous ended — no gap between
     # buckets (the old code jumped from now+7d to now+8d, dropping events).
-    for (prev, cur) in zip(windows, windows[1:]):
+    for prev, cur in zip(windows, windows[1:], strict=False):
         assert cur[1] == prev[2]
     assert windows[0][1] == now
     assert windows[-1][2] == now + timedelta(days=30)

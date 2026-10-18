@@ -114,6 +114,10 @@ body {
 @font-face { font-family: 'Fira Code'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Regular.woff2') format('woff2'); }
 @font-face { font-family: 'Fira Code'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-SemiBold.woff2') format('woff2'); }
 
+/* Self-hosted OpenDyslexic — dyslexia-friendly accessibility font option (SIL OFL 1.1) */
+@font-face { font-family: 'OpenDyslexic'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/OpenDyslexic-Regular.woff2') format('woff2'); }
+@font-face { font-family: 'OpenDyslexic'; font-weight: 700; font-style: normal; font-display: swap; src: url('/static/fonts/OpenDyslexic-Bold.woff2') format('woff2'); }
+
 /* Code block baseline */
 pre, code, .hljs {
   font-size: 0.95em;
@@ -157,6 +161,39 @@ html {
 :root.density-spacious .msg { padding: 14px 18px; margin-bottom: 12px; }
 :root.density-spacious .list-item { padding: 8px 12px; }
 :root.density-spacious .sidebar .section { padding: 0; }
+
+/* ── UI text-size scale (accessibility) ──
+   Density only changes the root font-size, which can't move the many
+   hard-coded px sizes. `zoom` scales the whole UI uniformly (px text
+   included) while keeping layout intact, unlike `transform: scale`. */
+:root.ui-scale-125 { zoom: 1.25; }
+/* `zoom` makes the 100dvh shell render taller than the real viewport, which
+   pushes the bottom-pinned sidebar account/settings row below the fold (and
+   body's overflow:hidden then clips it). Shrink the shell by the same factor
+   so it fits the viewport exactly. */
+:root.ui-scale-125 body { height: calc(100dvh / 1.25); }
+/* Modals/panels under the 1.25x scale: zoom renders a centred, viewport-sized
+   panel ~1.25x taller, pushing its draggable header + close button off-screen
+   (a catch-22 — you can't reach the control to turn the size back down). Divide
+   each max-height by the same factor to keep the original on-screen footprint.
+   Desktop only — the mobile `!important` full-sheet rules win on small screens
+   and stay top-anchored, so their headers are already visible. */
+:root.ui-scale-125 .modal-content          { max-height: calc(85dvh / 1.25); }
+:root.ui-scale-125 .cal-modal-content      { max-height: calc(88dvh / 1.25); }
+:root.ui-scale-125 .settings-modal-content { max-height: calc(85dvh / 1.25); }
+:root.ui-scale-125 #theme-popup            { max-height: min(calc(85dvh / 1.25), 480px); }
+/* Cookbook is the one modal that set its height inline (94vh), which beat the
+   .modal-content compensation above and overflowed the viewport at 1.25x
+   (header + close button pushed off-screen). Own its height here so the same
+   zoom compensation applies. */
+#cookbook-modal .modal-content             { height: 94vh; max-height: 94vh; }
+:root.ui-scale-125 #cookbook-modal .modal-content { height: calc(94dvh / 1.25); max-height: calc(94dvh / 1.25); }
+/* PDF export modal also set its height inline (86vh) at v1.0; that inline cap
+   beat the .modal-content compensation above and shifted ~1vh at Default when
+   removed. Own its height here so Default is byte-for-byte 86vh and the same
+   1.25x compensation applies. */
+.pdf-export-overlay .modal-content { max-height: 86vh; }
+:root.ui-scale-125 .pdf-export-overlay .modal-content { max-height: calc(86dvh / 1.25); }
 
 /* ── Background Patterns ── */
 
@@ -2223,7 +2260,7 @@ body.bg-pattern-sparkles {
       min-height: 20px;
       min-width: 80px;
     }
-    
+
     /* Ensure code block headers are only slightly larger than regular text */
     pre h1, pre h2, pre h3, pre h4, pre h5, pre h6 {
       font-size: 1.1em;
@@ -3257,11 +3294,11 @@ body.bg-pattern-sparkles {
     .attach-strip:empty {
       display: none;
     }
-    .attach-strip { 
-      display: flex; 
-      gap: 6px; 
-      flex-wrap: wrap; 
-      margin: 6px 0 0; 
+    .attach-strip {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin: 6px 0 0;
       min-height: 32px;
       padding: 2px;
     }
@@ -4025,6 +4062,31 @@ body.bg-pattern-sparkles {
     @keyframes toastCheckDraw {
       to { stroke-dashoffset: 0; }
     }
+    .toast-close-btn {
+      margin-left: 8px;
+      padding: 0;
+      width: 22px;
+      height: 22px;
+      line-height: 1;
+      border: none;
+      background: none;
+      color: var(--fg);
+      opacity: 0.5;
+      cursor: pointer;
+      font-size: 16px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: auto;
+      flex-shrink: 0;
+      transition: transform 0.22s ease, opacity 0.15s ease, background 0.15s ease;
+    }
+    .toast-close-btn:hover {
+      opacity: 1;
+      transform: rotate(90deg);
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+    }
     .toast.exiting {
       opacity: 0;
       transform: translateX(-120%);
@@ -4084,10 +4146,10 @@ body.bg-pattern-sparkles {
       display:flex; align-items:center; gap:6px; border:1px solid var(--border); padding:4px; margin:4px 0; border-radius: 4px;
     }
     .models-row .grow,
-    .models-row select { 
-      flex:1; 
-      display:flex; 
-      align-items:center; 
+    .models-row select {
+      flex:1;
+      display:flex;
+      align-items:center;
       font-size: 9.75px;
     }
     .model-fav-btn {
@@ -4987,7 +5049,7 @@ body.bg-pattern-sparkles {
       padding: 4px;
       border-left: 2px solid var(--red);
       background: color-mix(in srgb, var(--red) 5%, transparent);
-    } 
+    }
     /* Loading indicator for messages */
     .loading-indicator {
       display: flex;
@@ -5547,7 +5609,7 @@ body.bg-pattern-sparkles {
       opacity: 0.6;
       cursor: not-allowed;
     }
-    
+
 /* ── Drag & Drop ── */
 
 /* ---------- Color palette (dark / light) ---------- */
@@ -5557,28 +5619,28 @@ body.bg-pattern-sparkles {
       background: color-mix(in srgb, var(--red) 10%, transparent) !important;
       border-color: var(--red) !important;
     }
-    
+
     .section[dnd-over="true"] {
       background: color-mix(in srgb, var(--red) 20%, transparent) !important;
       border-color: var(--red) !important;
       transform: scale(1.02);
     }
-    
+
     .drag-handle {
       cursor: grab;
       opacity: 0.5;
       padding: 0 6px;
       user-select: none;
     }
-    
+
     .drag-handle:hover {
       opacity: 0.8;
     }
-    
+
     .drag-handle:active {
       cursor: grabbing;
     }
-    
+
 /* ── UI Controls (Radio, Presets, Toolbar, Settings) ── */
 
 
@@ -5594,12 +5656,12 @@ body.bg-pattern-sparkles {
       cursor: pointer;
       transition: all 0.2s ease;
     }
-    
+
     .radio-option:hover {
       background: color-mix(in srgb, var(--fg) 9%, transparent);
       border-color: var(--fg);
     }
-    
+
     .radio-option input[type="radio"] {
       appearance: none;
       -webkit-appearance: none;
@@ -5614,22 +5676,22 @@ body.bg-pattern-sparkles {
       position: relative;
       flex-shrink: 0;
     }
-    
+
     .radio-option input[type="radio"]:checked {
       border-color: var(--red);
       background: var(--red);
     }
-    
+
     .radio-option input[type="radio"]:focus {
       box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 30%, transparent);
     }
-    
+
     .radio-label {
       color: var(--fg);
       font-size: 14px;
       user-select: none;
     }
-    
+
     /* Preset buttons */
     .preset-btn {
       height: 27.2px; /* 15% smaller than 32px */
@@ -5644,29 +5706,29 @@ body.bg-pattern-sparkles {
       cursor: pointer;
       transition: all 0.2s ease;
     }
-    
+
     .preset-btn:hover {
       background: var(--panel);
       border-color: var(--fg);
     }
-    
+
     .preset-btn.active {
       background: var(--panel);
       border-color: var(--fg);
       box-shadow: 0 0 0 1px var(--fg), 0 0 8px color-mix(in srgb, var(--fg) 16%, transparent);
       font-weight: 600;
     }
-    
+
     /* All preset buttons use the same blue color */
     .preset-btn {
       border-color: var(--red); /* Blue color */
     }
-    
+
     .preset-btn.active {
       border-color: var(--red); /* Blue color when active */
       box-shadow: 0 0 0 1px var(--red), 0 0 8px color-mix(in srgb, var(--red) 30%, transparent);
     }
-    
+
     /* Custom preset modal: the base .preset-modal-content sets overflow:hidden
        (for desktop rounded-corner clipping), which on the mobile sheet clipped
        the footer (Start/Cancel) off the bottom with no way to reach it. Let the
@@ -6212,7 +6274,7 @@ body.bg-pattern-sparkles {
       background: var(--border);
       margin: 4px 8px;
     }
-    
+
     /* Search toggle styles */
     .search-toggle {
       display: flex;
@@ -6222,7 +6284,7 @@ body.bg-pattern-sparkles {
       border-bottom: 1px solid var(--border);
       margin-bottom: 8px;
     }
-    
+
     .search-provider-label {
       font-size: 14px;
       color: var(--fg);
@@ -6237,24 +6299,24 @@ body.bg-pattern-sparkles {
       border-radius: 4px;
       transition: all 0.2s ease;
     }
-    
+
     #mic-btn:hover {
       background: color-mix(in srgb, var(--fg) 6%, transparent);
       border-color: var(--fg);
     }
-    
+
     #mic-btn.recording {
       background: var(--color-recording);
       border-color: var(--color-recording);
       animation: pulse 1.5s infinite;
     }
-    
+
     @keyframes pulse {
       0% { opacity: 1; }
       50% { opacity: 0.7; }
       100% { opacity: 1; }
     }
-    
+
     #recording-indicator {
       position: fixed;
       top: 10px;
@@ -6272,29 +6334,29 @@ body.bg-pattern-sparkles {
       justify-content: space-between;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     }
-    
+
     #recording-indicator.hidden {
       display: none !important;
     }
-    
+
     .recording-content {
       display: flex;
       align-items: center;
       gap: 12px;
       color: white;
     }
-    
+
     .recording-icon {
       color: var(--color-recording);
       font-size: 20px;
       animation: pulse 1.5s infinite;
     }
-    
+
     .recording-text {
       font-size: 16px;
       font-weight: 500;
     }
-    
+
     #stop-recording {
       background: var(--color-recording);
       color: white;
@@ -6306,32 +6368,32 @@ body.bg-pattern-sparkles {
       cursor: pointer;
       transition: background 0.2s ease;
     }
-    
+
     #stop-recording:hover {
       background: var(--color-recording-hover);
     }
-    
+
     /* Error state for recording */
     #recording-indicator.error {
       background: rgba(173, 26, 26, 0.9);
     }
-    
+
     .recording-error {
       color: var(--color-recording);
       font-size: 14px;
       margin-top: 4px;
     }
-    
+
     @media (max-width: 768px) {
       #recording-indicator {
         margin: 8px;
         padding: 10px;
       }
-      
+
       .recording-text {
         font-size: 14px;
       }
-      
+
       #stop-recording {
         padding: 6px 10px;
         font-size: 12px;
@@ -8627,6 +8689,12 @@ button.hamburger {
 /* Hide thinking sections globally via settings toggle */
 body.hide-thinking .thinking-section { display: none !important; }
 
+/* Widen chat area via settings toggle */
+body.fullwidth-chat .chat-history {
+  padding-left: 0 !important;
+  padding-right: 12px !important;
+}
+
 /* Thinking process styles — colors follow theme accent */
 .msg .body .stream-content {
   width: 100%;
@@ -9364,11 +9432,11 @@ body.hide-thinking .thinking-section { display: none !important; }
     margin: 8px;
     padding: 10px;
   }
-  
+
   .recording-text {
     font-size: 14px;
   }
-  
+
   .stop-recording-btn {
     padding: 6px 10px;
     font-size: 12px;
@@ -16917,7 +16985,8 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
 /* Kebab dropdown */
 .skill-kebab-menu {
   position: fixed;
-  z-index: 100002;
+  /* z-index is set inline via topPortalZ() at open time (#4720); a static
+     value here loses once the modal bring-to-front counter climbs past it. */
   min-width: 150px;
   padding: 4px;
   background: var(--panel, var(--bg));

@@ -11,18 +11,24 @@ Reads the same SQLite the web UI uses. Output JSON; pipe-friendly.
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, sys, uuid
-from datetime import datetime
-from pathlib import Path
+import argparse
+import json
+import os
+import sys
+import uuid
 
 try:
-    from core.database import SessionLocal, Note
+    from core.database import Note, SessionLocal
+
     quiet_logs()
 except ModuleNotFoundError as e:
     sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
@@ -39,7 +45,7 @@ def _load_items(raw) -> list:
     return items if isinstance(items, list) else []
 
 
-def _serialize(n: "Note") -> dict:
+def _serialize(n: Note) -> dict:
     return {
         "id": n.id,
         "title": n.title or "",
@@ -88,9 +94,13 @@ def cmd_search(args):
     db = SessionLocal()
     try:
         like = f"%{args.query}%"
-        rows = db.query(Note).filter(
-            (Note.title.ilike(like)) | (Note.content.ilike(like))
-        ).order_by(Note.updated_at.desc()).limit(args.limit).all()
+        rows = (
+            db.query(Note)
+            .filter((Note.title.ilike(like)) | (Note.content.ilike(like)))
+            .order_by(Note.updated_at.desc())
+            .limit(args.limit)
+            .all()
+        )
         emit([_serialize(n) for n in rows], args)
     finally:
         db.close()

@@ -1,0 +1,5 @@
+# LocalAI model config — Embeddings (sentence-transformers backend)
+name: text-embedding
+backend: sentencetransformers
+parameters:
+  model: all-MiniLM-L6-v2

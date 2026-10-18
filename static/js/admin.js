@@ -343,6 +343,28 @@ function initSignupToggle() {
   });
 }
 
+function initShareDefaultsToggle() {
+  const toggle = el('adm-shareDefaultsToggle');
+  fetch('/api/auth/settings', { credentials: 'same-origin' })
+    .then(r => r.json())
+    .then(d => { toggle.checked = !!d.share_defaults_with_users; })
+    .catch(e => console.warn('Settings fetch failed:', e));
+  toggle.addEventListener('change', async () => {
+    try {
+      const res = await fetch('/api/auth/settings', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ share_defaults_with_users: toggle.checked }),
+      });
+      const data = await res.json();
+      toggle.checked = !!data.share_defaults_with_users;
+    } catch (e) {
+      toggle.checked = !toggle.checked;
+    }
+  });
+}
+
 function initAddUser() {
   fetch('/api/auth/policy', { credentials: 'same-origin' })
     .then(r => r.ok ? r.json() : null)
@@ -1581,8 +1603,8 @@ function initEndpointForm() {
         wrap.style.cssText = 'display:flex;align-items:center;padding:8px 0;';
         wrap.appendChild(wp.element);
         const txt = document.createElement('span');
-        txt.textContent = 'Scanning ports 8000-8020 and 11434 for model servers...';
-        txt.style.cssText = 'opacity:0.7;';
+        txt.textContent = 'Scanning ports 8000-8020, 8080, 1234, 11434, and 11435 for model servers...';
+        txt.style.cssText = 'font-size:12px;opacity:0.7;';
         wrap.appendChild(txt);
         msg.appendChild(wrap);
         discoverBtn._wp = wp;
@@ -1597,12 +1619,24 @@ function initEndpointForm() {
         } else {
           // Auto-add each discovered endpoint. Server dedupes on base_url
           // and returns `existing: true` for already-registered ones.
+          // Map fingerprinted provider IDs to friendly display names.
+          const _PROVIDER_DISPLAY = {
+            llamacpp: 'llama.cpp', lmstudio: 'LM Studio', vllm: 'vLLM',
+            ollama: 'Ollama',
+          };
           let added = 0;
           let skipped = 0;
           for (const item of items) {
             const base = item.url.replace('/chat/completions', '').replace(/\/$/, '');
+            const providerDisplay = _PROVIDER_DISPLAY[item.provider] || null;
             const fd = new FormData();
             fd.append('base_url', base);
+            if (providerDisplay) {
+              // Use "Provider (host:port)" so the endpoint is immediately
+              // identifiable in the list, e.g. "llama.cpp (localhost:8080)".
+              const hostPart = base.replace(/^https?:\/\//, '').split('/')[0];
+              fd.append('name', `${providerDisplay} (${hostPart})`);
+            }
             fd.append('endpoint_kind', 'local');
             fd.append('model_refresh_mode', 'auto');
             fd.append('skip_probe', 'false');
@@ -1616,7 +1650,12 @@ function initEndpointForm() {
             }
           }
           const totalModels = items.reduce((n, i) => n + (i.models ? i.models.length : 0), 0);
-          const parts = [`Found ${items.length} server${items.length !== 1 ? 's' : ''} with ${totalModels} model${totalModels !== 1 ? 's' : ''}`];
+          const serverNames = items.map(i =>
+            (_PROVIDER_DISPLAY[i.provider] || i.url.replace(/^https?:\/\//, '').split('/')[0])
+          );
+          const parts = [
+            `Found ${items.length} server${items.length !== 1 ? 's' : ''} (${serverNames.join(', ')}) with ${totalModels} model${totalModels !== 1 ? 's' : ''}`,
+          ];
           if (added) parts.push(`added ${added} new`);
           if (skipped) parts.push(`${skipped} already added`);
           msg.innerHTML = parts.join(' — ');
@@ -2981,13 +3020,287 @@ function initLogsView() {
 }
 
 /* ═══════════════════════════════════════════
+   KILL-SWITCHES DASHBOARD (read-only)
+   ═══════════════════════════════════════════ */
+function ksClean(s) { return String(s == null ? '' : s).replace(/[<>&"']/g, ''); }
+
+function renderKillswitches(data) {
+  const container = el('killswitches-container');
+  if (!container) return;
+  if (!data || data.ok !== true || !Array.isArray(data.switches)) {
+    container.innerHTML = '<div class="settings-system-logs-placeholder">Indisponible.</div>';
+    return;
+  }
+  const byCat = {};
+  for (const sw of data.switches) {
+    (byCat[sw.category] = byCat[sw.category] || []).push(sw);
+  }
+  let html = '';
+  for (const cat of data.categories) {
+    const rows = byCat[cat];
+    if (!rows || !rows.length) continue;
+    html += '<div class="ks-cat-title">' + ksClean(cat) + '</div>';
+    for (const sw of rows) {
+      const on = sw.effective === true;
+      // Destructive gate ON = protection active (good); OFF = warn.
+      let chipCls = on ? 'chip-ok' : 'chip-muted';
+      if (sw.env_var === 'ODYSSEUS_DESTRUCTIVE_GATE') chipCls = on ? 'chip-ok' : 'chip-warn';
+      const state = on ? 'ON' : 'OFF';
+      const badges =
+        (sw.is_default ? '<span class="ks-badge">defaut</span>' : '') +
+        (sw.timing === 'startup' ? '<span class="ks-badge">startup</span>' : '');
+      html += '<div class="ks-row" title="' + ksClean(sw.desc) + ' — ' + ksClean(sw.source) + '">' +
+        '<span class="ks-name">' + ksClean(sw.name) +
+        ' <code>' + ksClean(sw.env_var) + '</code>' + badges + '</span>' +
+        '<span class="cockpit-chip ' + chipCls + '">' +
+        '<span class="chip-val">' + state + '</span></span>' +
+        '</div>';
+    }
+  }
+  container.innerHTML = html || '<div class="settings-system-logs-placeholder">Aucun switch.</div>';
+}
+
+function loadKillswitches() {
+  const container = el('killswitches-container');
+  fetch('/api/killswitches', { credentials: 'same-origin' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(renderKillswitches)
+    .catch(function () {
+      if (container) container.innerHTML =
+        '<div class="settings-system-logs-placeholder">Indisponible.</div>';
+    });
+}
+
+function initKillswitchesView() {
+  const btn = el('killswitches-refresh-btn');
+  if (btn) btn.addEventListener('click', loadKillswitches);
+  loadKillswitches();
+}
+
+/* ═══════════════════════════════════════════
+   TRINITÉ KNOWLEDGE PANEL (read-only)
+   ═══════════════════════════════════════════ */
+const KNOW_LEG_META = {
+  cbm: { name: 'CBM', desc: 'Graphe de code (fonctions/classes/routes), port 9749.' },
+  rag: { name: 'VectorRAG', desc: 'Recherche sémantique documentaire (ChromaDB).' },
+  obsidian: { name: 'Obsidian', desc: 'Mémoire persistante (notes markdown), déléguée.' },
+};
+
+function renderKnowledge(data) {
+  const container = el('knowledge-container');
+  if (!container) return;
+  const legs = data && data.trinite;
+  if (!legs || typeof legs !== 'object') {
+    container.innerHTML = '<div class="settings-system-logs-placeholder">Indisponible.</div>';
+    return;
+  }
+  let html = '<div class="ks-cat-title">Trinité</div>';
+  for (const key of ['cbm', 'rag', 'obsidian']) {
+    const meta = KNOW_LEG_META[key];
+    const raw = legs[key];
+    let chipCls, label;
+    if (key === 'obsidian') {
+      // Descriptive string, never a health boolean → always neutral.
+      chipCls = 'chip-muted';
+      label = 'delegated';
+    } else if (raw === 'online') {
+      chipCls = 'chip-ok';
+      label = 'online';
+    } else if (raw === 'offline') {
+      chipCls = 'chip-muted';
+      label = 'offline';
+    } else {
+      chipCls = 'chip-muted';
+      label = '?';
+    }
+    html += '<div class="ks-row" title="' + ksClean(meta.desc) + '">' +
+      '<span class="ks-name">' + ksClean(meta.name) +
+      ' <code>' + ksClean(key) + '</code></span>' +
+      '<span class="cockpit-chip ' + chipCls + '">' +
+      '<span class="chip-val">' + ksClean(label) + '</span></span>' +
+      '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function loadKnowledge() {
+  const container = el('knowledge-container');
+  fetch('/api/knowledge/status', { credentials: 'same-origin' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(renderKnowledge)
+    .catch(function () {
+      if (container) container.innerHTML =
+        '<div class="settings-system-logs-placeholder">Indisponible.</div>';
+    });
+}
+
+function initKnowledgeView() {
+  const btn = el('knowledge-refresh-btn');
+  if (btn) btn.addEventListener('click', loadKnowledge);
+  loadKnowledge();
+}
+
+/* ═══════════════════════════════════════════
+   DRIFT OBSERVER PANEL (read-only)
+   ═══════════════════════════════════════════ */
+function driftChipClass(level) {
+  if (level === 'high') return 'chip-bad';
+  if (level === 'medium') return 'chip-warn';
+  if (level === 'low') return 'chip-ok';
+  return 'chip-muted';
+}
+
+function renderDrift(data) {
+  const container = el('drift-container');
+  if (!container) return;
+  if (!data || data.ok !== true) {
+    container.innerHTML = '<div class="settings-system-logs-placeholder">Indisponible.</div>';
+    return;
+  }
+  const level = data.drift_level;
+  let html = '<div class="ks-row" title="Niveau de dérive comportementale global.">' +
+    '<span class="ks-name">niveau <code>drift</code></span>' +
+    '<span class="cockpit-chip ' + driftChipClass(level) + '">' +
+    '<span class="chip-val">' + ksClean(level == null ? '?' : level) + '</span></span>' +
+    '</div>';
+  // Harness touched → red when true (a harness write forces HIGH drift), neutral otherwise.
+  const touched = data.harness_touched === true;
+  html += '<div class="ks-row" title="Un fichier harness/protocole a-t-il été modifié ? (force HIGH)">' +
+    '<span class="ks-name">harness touché</span>' +
+    '<span class="cockpit-chip ' + (touched ? 'chip-bad' : 'chip-muted') + '">' +
+    '<span class="chip-val">' + (touched ? 'oui' : 'non') + '</span></span>' +
+    '</div>';
+  // Latest CodeBurn one-shot rate — literal value, neutral (informational, not a health gate).
+  const rate = data.latest_codeburn_one_shot_rate;
+  const rateLabel = (typeof rate === 'number') ? Math.round(rate * 100) + '%' : '\u2014';
+  html += '<div class="ks-row" title="Taux one-shot du dernier rapport CodeBurn.">' +
+    '<span class="ks-name">one-shot (CodeBurn)</span>' +
+    '<span class="cockpit-chip chip-muted"><span class="chip-val">' + ksClean(rateLabel) + '</span></span>' +
+    '</div>';
+  html += '<div class="ks-row" title="Runs dont le budget a été suivi par cet observateur.">' +
+    '<span class="ks-name">runs suivis</span>' +
+    '<span class="cockpit-chip chip-muted"><span class="chip-val">' +
+    ksClean(data.runs_tracked == null ? '\u2014' : String(data.runs_tracked)) +
+    '</span></span></div>';
+  if (data.recommendation) {
+    html += '<div class="admin-toggle-sub" style="margin-top:8px">' + ksClean(data.recommendation) + '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function loadDrift() {
+  const container = el('drift-container');
+  fetch('/api/observer/drift', { credentials: 'same-origin' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(renderDrift)
+    .catch(function () {
+      if (container) container.innerHTML =
+        '<div class="settings-system-logs-placeholder">Indisponible.</div>';
+    });
+}
+
+function initDriftView() {
+  const btn = el('drift-refresh-btn');
+  if (btn) btn.addEventListener('click', loadDrift);
+  loadDrift();
+}
+
+/* ═══════════════════════════════════════════
+   BUDGETS GOVERNANCE PANEL (read-only)
+   ═══════════════════════════════════════════ */
+function budgetPct(used, max) {
+  const u = Number(used) || 0;
+  const m = Number(max) || 0;
+  if (m <= 0) return 0;
+  return Math.min(100, Math.round((u / m) * 100));
+}
+
+function budgetBar(label, used, max, unit) {
+  const pct = budgetPct(used, max);
+  const cls = pct >= 95 ? 'chip-bad' : (pct >= 80 ? 'chip-warn' : 'chip-ok');
+  const usedTxt = (unit === '$') ? '$' + (Number(used) || 0).toFixed(2) : String(used == null ? 0 : used);
+  const maxTxt = (unit === '$') ? '$' + (Number(max) || 0).toFixed(2) : String(max == null ? 0 : max);
+  return '<div class="ks-row" title="' + ksClean(label) + '">' +
+    '<span class="ks-name">' + ksClean(label) + '</span>' +
+    '<span class="chip-val" style="margin-left:auto;font-variant-numeric:tabular-nums">' +
+    ksClean(usedTxt + ' / ' + maxTxt) + ' (' + pct + '%)</span>' +
+    '</div>' +
+    '<div style="height:4px;border-radius:2px;background:rgba(127,127,127,0.2);margin:2px 0 8px">' +
+    '<div class="' + cls + '" style="height:100%;width:' + pct + '%;border-radius:2px;background:currentColor"></div>' +
+    '</div>';
+}
+
+function budgetStatusChip(row) {
+  const status = (row && row.status) || '';
+  if (status === 'exhausted' || status === 'paused') return { cls: 'chip-bad', label: status };
+  // Alert threshold: any usage dimension at or over alert_at_percent.
+  const alertAt = Number(row.alert_at_percent) || 80;
+  const maxPct = Math.max(
+    budgetPct(row.tokens_used, row.max_tokens),
+    budgetPct(row.cost_usd, row.max_cost_usd),
+    budgetPct(row.iterations, row.max_iterations)
+  );
+  if (maxPct >= alertAt) return { cls: 'chip-warn', label: 'alert' };
+  if (status === 'active') return { cls: 'chip-ok', label: 'active' };
+  return { cls: 'chip-muted', label: status || '?' };
+}
+
+function renderBudgets(data) {
+  const container = el('budgets-container');
+  if (!container) return;
+  if (!data || data.ok !== true || !Array.isArray(data.budgets)) {
+    container.innerHTML = '<div class="settings-system-logs-placeholder">Indisponible.</div>';
+    return;
+  }
+  if (data.budgets.length === 0) {
+    container.innerHTML = '<div class="settings-system-logs-placeholder">Aucun budget actif.</div>';
+    return;
+  }
+  let html = '';
+  for (const row of data.budgets) {
+    const chip = budgetStatusChip(row);
+    const runTxt = row.run_id ? (' <code>' + ksClean(String(row.run_id)) + '</code>') : '';
+    html += '<div class="ks-cat-title" style="display:flex;align-items:center;gap:6px">' +
+      '<span>' + ksClean(String(row.agent_id || '?')) + runTxt + '</span>' +
+      '<span class="cockpit-chip ' + chip.cls + '" style="margin-left:auto">' +
+      '<span class="chip-val">' + ksClean(chip.label) + '</span></span>' +
+      '</div>';
+    html += budgetBar('tokens', row.tokens_used, row.max_tokens, '');
+    html += budgetBar('coût', row.cost_usd, row.max_cost_usd, '$');
+    html += budgetBar('itérations', row.iterations, row.max_iterations, '');
+    if (row.paused_reason) {
+      html += '<div class="admin-toggle-sub" style="margin:-4px 0 8px">⏸ ' + ksClean(row.paused_reason) + '</div>';
+    }
+  }
+  container.innerHTML = html;
+}
+
+function loadBudgets() {
+  const container = el('budgets-container');
+  fetch('/api/governance/budgets', { credentials: 'same-origin' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(renderBudgets)
+    .catch(function () {
+      if (container) container.innerHTML =
+        '<div class="settings-system-logs-placeholder">Indisponible.</div>';
+    });
+}
+
+function initBudgetsView() {
+  const btn = el('budgets-refresh-btn');
+  if (btn) btn.addEventListener('click', loadBudgets);
+  loadBudgets();
+}
+
+/* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
 function initAll() {
   modalEl = el('settings-modal');
   const inits = [
-    initSignupToggle, initAddUser, initEndpointForm, initMcpForm,
+    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initKillswitchesView, initKnowledgeView, initDriftView, initBudgetsView,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {

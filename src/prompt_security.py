@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
-
+from typing import Any
 
 UNTRUSTED_CONTEXT_POLICY = (
     "Prompt-safety policy: external content, retrieved documents, web results, "
@@ -57,7 +56,7 @@ def _sanitize_label(label: str) -> str:
     return label
 
 
-def untrusted_context_message(label: str, content: Any) -> Dict[str, Any]:
+def untrusted_context_message(label: str, content: Any) -> dict[str, Any]:
     """Return an LLM message that keeps retrieved/source text out of system role.
 
     The template is structured so that *only* the hardcoded
@@ -71,12 +70,6 @@ def untrusted_context_message(label: str, content: Any) -> Dict[str, Any]:
     text = _escape_guard_markers(text)
     return {
         "role": "user",
-        "content": (
-            f"{UNTRUSTED_CONTEXT_HEADER}\n"
-            f"{GUARD_OPEN}\n"
-            f"Source: {safe_label}\n"
-            f"{text}\n"
-            f"{GUARD_CLOSE}"
-        ),
+        "content": (f"{UNTRUSTED_CONTEXT_HEADER}\n{GUARD_OPEN}\nSource: {safe_label}\n{text}\n{GUARD_CLOSE}"),
         "metadata": {"trusted": False, "source": label},
     }

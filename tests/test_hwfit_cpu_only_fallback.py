@@ -4,7 +4,6 @@ import pytest
 
 from services.hwfit.fit import _estimate_speed
 
-
 DENSE_MODEL = {
     "name": "Test-7B",
     "parameter_count": "7B",

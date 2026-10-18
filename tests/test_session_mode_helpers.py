@@ -14,11 +14,12 @@ that a mid-operation DB error neither raises out of the helper nor leaks the
 connection. The error-path cases fail against the old close()-inside-try
 pattern.
 """
+
 import ast
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Generator
 from unittest.mock import MagicMock
 
 
@@ -27,10 +28,7 @@ def _load_db_helpers():
     db_path = Path(__file__).parents[1] / "core" / "database.py"
     tree = ast.parse(db_path.read_text(encoding="utf-8"), filename=str(db_path))
     wanted = {"get_db_session", "get_session_mode", "set_session_mode"}
-    helper_nodes = [
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in wanted
-    ]
+    helper_nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     namespace = {
         "contextmanager": contextmanager,
         "Generator": Generator,

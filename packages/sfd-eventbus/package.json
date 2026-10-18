@@ -1,0 +1,13 @@
+{
+  "name": "@agentos/sfd-eventbus",
+  "private": true,
+  "version": "1.0.0",
+  "description": "SFD Central Event Bus — 15 families, 62 events, covers all 4 master reference files",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": { "@opencode-ai/plugin": "latest" }
+}

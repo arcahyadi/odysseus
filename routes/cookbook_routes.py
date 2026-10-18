@@ -12,14 +12,10 @@ import sys
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, Depends
-
-from src.auth_helpers import require_user
-from src.constants import COOKBOOK_STATE_FILE
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from core.middleware import require_admin
-from routes._validators import validate_remote_host, validate_ssh_port
 from core.platform_compat import (
     IS_WINDOWS,
     detached_popen_kwargs,
@@ -29,38 +25,58 @@ from core.platform_compat import (
     safe_chmod,
     which_tool,
 )
-from routes.shell_routes import TMUX_LOG_DIR
+from routes._validators import validate_remote_host, validate_ssh_port
 from routes.cookbook_output import (
-    error_aware_output_tail, classify_dead_download,
-    HF_CACHE_COMPLETE_PROBE, HF_CACHE_INCOMPLETE_PROBE,
+    HF_CACHE_COMPLETE_PROBE,
+    HF_CACHE_INCOMPLETE_PROBE,
+    classify_dead_download,
+    error_aware_output_tail,
 )
+from routes.shell_routes import TMUX_LOG_DIR
+from src.auth_helpers import require_user
+from src.constants import COOKBOOK_STATE_FILE
 
 logger = logging.getLogger(__name__)
 
 from routes.cookbook_helpers import (
-    _SESSION_ID_RE, _validate_repo_id, _validate_serve_model_id, _validate_include, _validate_token,
-    _validate_local_dir, _validate_gpus, _shell_path,
-    _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
-    _safe_env_prefix, _local_tooling_path_export, _append_serve_preflight_exit_lines,
-    _append_serve_exit_code_lines, _append_llama_cpp_linux_accel_build_lines, _cached_model_scan_script,
-    load_stored_hf_token,
-    _append_vllm_linux_preflight_lines, _ollama_bind_from_cmd, _pip_install_fallback_chain,
-    _pip_install_no_cache, _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
-    _diagnose_serve_output, run_ssh_command_async,
-    _ollama_bind_from_cmd, _pip_install_fallback_chain, _pip_install_no_cache,
-    _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
+    _SESSION_ID_RE,
+    ModelDownloadRequest,
+    ServeRequest,
+    _append_llama_cpp_linux_accel_build_lines,
+    _append_serve_exit_code_lines,
+    _append_serve_preflight_exit_lines,
+    _bash_squote,
+    _cached_model_scan_script,
+    _local_tooling_path_export,
     _normalize_llama_cpp_python_cache_types,
-    ModelDownloadRequest, ServeRequest,
+    _ollama_bind_from_cmd,
+    _parse_serve_phase,
+    _pip_install_fallback_chain,
+    _pip_install_no_cache,
+    _ps_squote,
+    _safe_env_prefix,
+    _shell_path,
+    _user_shell_path_bootstrap,
+    _validate_gpus,
+    _validate_include,
+    _validate_local_dir,
+    _validate_repo_id,
+    _validate_serve_cmd,
+    _validate_serve_model_id,
+    _validate_token,
+    _venv_safe_local_pip_install_cmd,
+    load_stored_hf_token,
 )
 
 _HF_TOKEN_STATUS_SNIPPET = (
     'if [ -n "$HF_TOKEN" ]; then '
     'echo "[odysseus] HF token: applied"; '
-    'else '
+    "else "
     'echo "[odysseus] HF token: NOT SET — gated/private models will be denied. '
     'Add one in Odysseus Cookbook -> Settings -> HuggingFace Token."; '
-    'fi'
+    "fi"
 )
+
 
 def setup_cookbook_routes() -> APIRouter:
     router = APIRouter(tags=["cookbook"])
@@ -73,14 +89,19 @@ def setup_cookbook_routes() -> APIRouter:
             return "stored"
         return f"{value[:4]}...{value[-4:]}"
 
+    def _client_host_platform() -> str:
+        return "windows" if IS_WINDOWS else ""
+
     def _decrypt_secret(value: str | None) -> str:
         if not value:
             return ""
         from src.secret_storage import decrypt
+
         return decrypt(value)
 
     def _encrypt_secret(value: str) -> str:
         from src.secret_storage import encrypt
+
         return encrypt(value)
 
     def _strip_task_secrets(state):
@@ -106,7 +127,12 @@ def setup_cookbook_routes() -> APIRouter:
                 r"No available memory for the cache blocks|Available KV cache memory:.*-",
                 "No GPU memory left for KV cache after loading model.",
                 [
-                    {"label": "retry with GPU memory utilization 0.95", "op": "replace", "flag": "--gpu-memory-utilization", "value": "0.95"},
+                    {
+                        "label": "retry with GPU memory utilization 0.95",
+                        "op": "replace",
+                        "flag": "--gpu-memory-utilization",
+                        "value": "0.95",
+                    },
                     {"label": "retry with context 2048", "op": "replace", "flag": "--max-model-len", "value": "2048"},
                 ],
             ),
@@ -115,7 +141,12 @@ def setup_cookbook_routes() -> APIRouter:
                 "GPU ran out of memory during startup or warmup.",
                 [
                     {"label": "retry with context 4096", "op": "replace", "flag": "--max-model-len", "value": "4096"},
-                    {"label": "retry with GPU memory utilization 0.80", "op": "replace", "flag": "--gpu-memory-utilization", "value": "0.80"},
+                    {
+                        "label": "retry with GPU memory utilization 0.80",
+                        "op": "replace",
+                        "flag": "--gpu-memory-utilization",
+                        "value": "0.80",
+                    },
                     {"label": "retry with --enforce-eager", "op": "append", "arg": "--enforce-eager"},
                 ],
             ),
@@ -123,8 +154,18 @@ def setup_cookbook_routes() -> APIRouter:
                 r"not divisib|must be divisible|attention heads.*divisible",
                 "Tensor parallel size is incompatible with the model.",
                 [
-                    {"label": "retry with tensor parallel size 1", "op": "replace", "flag": "--tensor-parallel-size", "value": "1"},
-                    {"label": "retry with tensor parallel size 2", "op": "replace", "flag": "--tensor-parallel-size", "value": "2"},
+                    {
+                        "label": "retry with tensor parallel size 1",
+                        "op": "replace",
+                        "flag": "--tensor-parallel-size",
+                        "value": "1",
+                    },
+                    {
+                        "label": "retry with tensor parallel size 2",
+                        "op": "replace",
+                        "flag": "--tensor-parallel-size",
+                        "value": "2",
+                    },
                 ],
             ),
             (
@@ -148,7 +189,13 @@ def setup_cookbook_routes() -> APIRouter:
             (
                 r"Either a revision or a version must be specified|transformers\.integrations\.hub_kernels|kernels/layer",
                 "vLLM/Transformers kernel package mismatch.",
-                [{"label": "update vLLM, Transformers, and kernels on this server", "op": "dependency", "package": "vllm transformers kernels"}],
+                [
+                    {
+                        "label": "update vLLM, Transformers, and kernels on this server",
+                        "op": "dependency",
+                        "package": "vllm transformers kernels",
+                    }
+                ],
             ),
             (
                 r"Address already in use|bind.*address.*in use",
@@ -158,7 +205,14 @@ def setup_cookbook_routes() -> APIRouter:
             (
                 r"No CUDA GPUs are available|no GPU.*found|CUDA_VISIBLE_DEVICES.*invalid",
                 "No GPUs are visible to the serve process.",
-                [{"label": "clear Cookbook GPU selection or choose available GPUs", "op": "settings", "field": "gpus", "value": ""}],
+                [
+                    {
+                        "label": "clear Cookbook GPU selection or choose available GPUs",
+                        "op": "settings",
+                        "field": "gpus",
+                        "value": "",
+                    }
+                ],
             ),
             (
                 r"Failed to infer device type|NVML Shared Library Not Found|No module named 'amdsmi'|platform is not available",
@@ -196,32 +250,67 @@ def setup_cookbook_routes() -> APIRouter:
             (
                 r"cmake: command not found|cmake.*not found.*[Cc]ould not",
                 "cmake is required to build llama.cpp from source but isn't installed on this server.",
-                [{"label": "install build deps for llama.cpp (apt: cmake build-essential git / pacman: cmake base-devel git / dnf: cmake gcc-c++ make git / brew: cmake git)", "op": "dependency", "package": "llama-cpp-python[server]"}],
+                [
+                    {
+                        "label": "install build deps for llama.cpp (apt: cmake build-essential git / pacman: cmake base-devel git / dnf: cmake gcc-c++ make git / brew: cmake git)",
+                        "op": "dependency",
+                        "package": "llama-cpp-python[server]",
+                    }
+                ],
             ),
             (
                 r"^(make|g\+\+|gcc): command not found|Could not find C\+\+ compiler",
                 "A C/C++ compiler (build-essential) is required to build llama.cpp from source.",
-                [{"label": "install build deps for llama.cpp on this server", "op": "dependency", "package": "llama-cpp-python[server]"}],
+                [
+                    {
+                        "label": "install build deps for llama.cpp on this server",
+                        "op": "dependency",
+                        "package": "llama-cpp-python[server]",
+                    }
+                ],
             ),
             (
                 r"^git: command not found",
                 "git is required to clone the llama.cpp source tree.",
-                [{"label": "install build deps for llama.cpp on this server", "op": "dependency", "package": "llama-cpp-python[server]"}],
+                [
+                    {
+                        "label": "install build deps for llama.cpp on this server",
+                        "op": "dependency",
+                        "package": "llama-cpp-python[server]",
+                    }
+                ],
             ),
             (
                 r"llama-server.*command not found|llama\.cpp.*not found|No module named.*llama_cpp|No module named 'starlette_context'",
                 "llama.cpp / llama-cpp-python dependencies are missing.",
-                [{"label": "install llama.cpp dependencies or llama-cpp-python[server]", "op": "dependency", "package": "llama-cpp-python[server]"}],
+                [
+                    {
+                        "label": "install llama.cpp dependencies or llama-cpp-python[server]",
+                        "op": "dependency",
+                        "package": "llama-cpp-python[server]",
+                    }
+                ],
             ),
             (
                 r"No GGUF found on this host|no \.gguf file|No GGUF file found",
                 "No GGUF file found for this model on this host. The llama.cpp backend needs a .gguf file.",
-                [{"label": "download a GGUF build of this model (repo name usually ends in -GGUF, file like Q4_K_M.gguf)", "op": "manual"}],
+                [
+                    {
+                        "label": "download a GGUF build of this model (repo name usually ends in -GGUF, file like Q4_K_M.gguf)",
+                        "op": "manual",
+                    }
+                ],
             ),
             (
                 r"No module named 'torch'|No module named torch|No module named 'diffusers'|No module named diffusers",
                 "Diffusion serving requires PyTorch and diffusers.",
-                [{"label": "install diffusers[torch] in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch]"}],
+                [
+                    {
+                        "label": "install diffusers[torch] in Cookbook Dependencies",
+                        "op": "dependency",
+                        "package": "diffusers[torch]",
+                    }
+                ],
             ),
             (
                 r"403 Forbidden|401 Unauthorized|Access to model.*is restricted|gated repo|not in the authorized list|awaiting a review",
@@ -237,7 +326,9 @@ def setup_cookbook_routes() -> APIRouter:
         ):
             return {
                 "message": "Python traceback detected during serve startup.",
-                "suggestions": [{"label": "inspect traceback and retry with adjusted backend/settings", "op": "manual"}],
+                "suggestions": [
+                    {"label": "inspect traceback and retry with adjusted backend/settings", "op": "manual"}
+                ],
             }
         return None
 
@@ -245,11 +336,15 @@ def setup_cookbook_routes() -> APIRouter:
         """Return cookbook state without raw secrets for browser clients."""
         _strip_task_secrets(state)
         env = state.get("env") if isinstance(state, dict) else None
+        if isinstance(state, dict) and not isinstance(env, dict):
+            env = {}
+            state["env"] = env
         if isinstance(env, dict):
             token = _decrypt_secret(env.get("hfToken"))
             env.pop("hfToken", None)
             env["hfTokenConfigured"] = bool(token)
             env["hfTokenMasked"] = _mask_secret(token)
+            env["hostPlatform"] = _client_host_platform()
         return state
 
     def _state_for_storage(state, on_disk=None):
@@ -268,6 +363,7 @@ def setup_cookbook_routes() -> APIRouter:
                 env.pop("hfToken", None)
             env.pop("hfTokenMasked", None)
             env.pop("hfTokenConfigured", None)
+            env.pop("hostPlatform", None)
         return state
 
     def _load_stored_hf_token() -> str:
@@ -388,7 +484,15 @@ def setup_cookbook_routes() -> APIRouter:
             # which_tool so the .exe is found even when PATHEXT is unusual.
             ssh_keygen = which_tool("ssh-keygen") or "ssh-keygen"
             proc = await asyncio.create_subprocess_exec(
-                ssh_keygen, "-t", "ed25519", "-N", "", "-C", "odysseus-cookbook", "-f", str(key_path),
+                ssh_keygen,
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "odysseus-cookbook",
+                "-f",
+                str(key_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -416,17 +520,25 @@ def setup_cookbook_routes() -> APIRouter:
             )
         return f"{binary} is required on {target}, but it was not found."
 
-    async def _remote_binary_available(remote: str, ssh_port: str | None, binary: str, *, windows: bool = False) -> bool:
+    async def _remote_binary_available(
+        remote: str, ssh_port: str | None, binary: str, *, windows: bool = False
+    ) -> bool:
         _port = ssh_port or ""
         _pf = ["-p", _port] if _port and _port != "22" else []
         if windows:
-            check = f"powershell -NoProfile -Command \"if (Get-Command {binary} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 127 }}\""
+            check = f'powershell -NoProfile -Command "if (Get-Command {binary} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 127 }}"'
         else:
             check = f"command -v {shlex.quote(binary)} >/dev/null 2>&1"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "ssh", "-o", "ConnectTimeout=6", "-o", "StrictHostKeyChecking=no",
-                *_pf, remote, check,
+                "ssh",
+                "-o",
+                "ConnectTimeout=6",
+                "-o",
+                "StrictHostKeyChecking=no",
+                *_pf,
+                remote,
+                check,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -435,7 +547,9 @@ def setup_cookbook_routes() -> APIRouter:
         except Exception:
             return False
 
-    async def _binary_available(binary: str, remote: str | None, ssh_port: str | None, *, windows: bool = False) -> bool:
+    async def _binary_available(
+        binary: str, remote: str | None, ssh_port: str | None, *, windows: bool = False
+    ) -> bool:
         if remote:
             return await _remote_binary_available(remote, ssh_port, binary, windows=windows)
         return shutil.which(binary) is not None
@@ -568,22 +682,32 @@ def setup_cookbook_routes() -> APIRouter:
         # slower-but-reliable downloader (resumes cleanly from the .incomplete files).
         # Use `python3 -m pip` not `pip` — macOS has no bare `pip` command.
         if is_ollama_download:
-            lines.append('if command -v ollama >/dev/null 2>&1; then')
-            lines.append(f'  ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote(ollama_cmd)}')
-            lines.append('elif command -v docker >/dev/null 2>&1; then')
-            lines.append('  ODYSSEUS_OLLAMA_CONTAINER="$(docker ps --format \'{{.Names}}\' 2>/dev/null | grep -E \'^(ollama-rocm|ollama-test)$\' | head -1)"')
+            lines.append("if command -v ollama >/dev/null 2>&1; then")
+            lines.append(f"  ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote(ollama_cmd)}")
+            lines.append("elif command -v docker >/dev/null 2>&1; then")
+            lines.append(
+                "  ODYSSEUS_OLLAMA_CONTAINER=\"$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(ollama-rocm|ollama-test)$' | head -1)\""
+            )
             lines.append('  if [ -n "$ODYSSEUS_OLLAMA_CONTAINER" ]; then')
-            lines.append(f'    ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote("docker exec ${ODYSSEUS_OLLAMA_CONTAINER} " + ollama_cmd)}')
-            lines.append('  fi')
-            lines.append('fi')
-            lines.append('if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
+            lines.append(
+                f"    ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote('docker exec ${ODYSSEUS_OLLAMA_CONTAINER} ' + ollama_cmd)}"
+            )
+            lines.append("  fi")
+            lines.append("fi")
+            lines.append(
+                'if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi'
+            )
         else:
-            lines.append(f"command -v hf >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', upgrade=True)}")
+            lines.append(
+                f"command -v hf >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', upgrade=True)}"
+            )
             if req.disable_hf_transfer:
                 lines.append("export HF_HUB_ENABLE_HF_TRANSFER=0")
                 lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=4")
             else:
-                lines.append(f"python3 -c 'import hf_transfer' 2>/dev/null || {_pip_install_fallback_chain('hf_transfer')}")
+                lines.append(
+                    f"python3 -c 'import hf_transfer' 2>/dev/null || {_pip_install_fallback_chain('hf_transfer')}"
+                )
                 lines.append("python3 -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1")
                 lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=8")
 
@@ -592,7 +716,9 @@ def setup_cookbook_routes() -> APIRouter:
         # LOCAL execution on a native-Windows host never uses tmux (it uses the
         # detached-process path below), regardless of the UI-supplied platform.
         local_windows = IS_WINDOWS and not remote
-        logger.info(f"Download request: repo={req.repo_id}, remote={remote}, ssh_port={req.ssh_port}, platform={req.platform}")
+        logger.info(
+            f"Download request: repo={req.repo_id}, remote={remote}, ssh_port={req.ssh_port}, platform={req.platform}"
+        )
 
         if not is_windows and not local_windows and not await _binary_available("tmux", remote, req.ssh_port):
             return {
@@ -606,7 +732,7 @@ def setup_cookbook_routes() -> APIRouter:
             remote_runner = f".{session_id}_run.ps1"
             ps_lines = []
             ps_lines.append('$sessionDir = "$env:TEMP\\odysseus-sessions"')
-            ps_lines.append('New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null')
+            ps_lines.append("New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null")
             if req.hf_token:
                 ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
             if req.local_dir and not is_ollama_download:
@@ -620,35 +746,43 @@ def setup_cookbook_routes() -> APIRouter:
             if req.env_prefix:
                 ps_lines.append(_safe_env_prefix(req.env_prefix))
             if is_ollama_download:
-                ps_lines.append('if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) { Write-Host "ERROR: Ollama not found. Install from https://ollama.com/download/windows"; exit 127 }')
+                ps_lines.append(
+                    'if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) { Write-Host "ERROR: Ollama not found. Install from https://ollama.com/download/windows"; exit 127 }'
+                )
                 ps_lines.append(f"$null | ollama pull '{_ps_squote(req.repo_id)}'")
-                ps_lines.append('if ($LASTEXITCODE -eq 0) { Write-Host ""; Write-Host "DOWNLOAD_OK" } else { Write-Host ""; Write-Host "DOWNLOAD_FAILED (exit $LASTEXITCODE)" }')
+                ps_lines.append(
+                    'if ($LASTEXITCODE -eq 0) { Write-Host ""; Write-Host "DOWNLOAD_OK" } else { Write-Host ""; Write-Host "DOWNLOAD_FAILED (exit $LASTEXITCODE)" }'
+                )
             else:
                 # Try hf CLI, fall back to Python huggingface_hub, then auto-install
-                ps_lines.append('try {{')
-                ps_lines.append('  $hfPath = Get-Command hf -ErrorAction SilentlyContinue')
-                ps_lines.append('  if ($hfPath) {{')
+                ps_lines.append("try {{")
+                ps_lines.append("  $hfPath = Get-Command hf -ErrorAction SilentlyContinue")
+                ps_lines.append("  if ($hfPath) {{")
                 # Pipe $null to stdin to suppress interactive "update available? [Y/n]" prompt
-                ps_lines.append(f'    $null | {hf_cmd}')
-                ps_lines.append('  }} else {{')
+                ps_lines.append(f"    $null | {hf_cmd}")
+                ps_lines.append("  }} else {{")
                 ps_lines.append('    python -c "import huggingface_hub" 2>$null')
-                ps_lines.append('    if ($LASTEXITCODE -eq 0) {{')
+                ps_lines.append("    if ($LASTEXITCODE -eq 0) {{")
                 ps_lines.append('      Write-Host "hf CLI not found, using Python huggingface_hub..."')
-                ps_lines.append('      python -m pip install -q hf_transfer 2>$null')
+                ps_lines.append("      python -m pip install -q hf_transfer 2>$null")
                 ps_lines.append('      $env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
-                ps_lines.append(f"      python -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers=8)\"")
-                ps_lines.append('    }} else {{')
+                ps_lines.append(
+                    f"      python -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers=8)\""
+                )
+                ps_lines.append("    }} else {{")
                 ps_lines.append('      Write-Host "Installing huggingface-hub..."')
-                ps_lines.append('      python -m pip install -q huggingface-hub hf_transfer')
+                ps_lines.append("      python -m pip install -q huggingface-hub hf_transfer")
                 ps_lines.append('      $env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
-                ps_lines.append(f"      python -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers=8)\"")
-                ps_lines.append('    }}')
-                ps_lines.append('  }}')
+                ps_lines.append(
+                    f"      python -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers=8)\""
+                )
+                ps_lines.append("    }}")
+                ps_lines.append("  }}")
                 ps_lines.append('  if ($LASTEXITCODE -eq 0) {{ Write-Host ""; Write-Host "DOWNLOAD_OK" }}')
                 ps_lines.append('  else {{ Write-Host ""; Write-Host "DOWNLOAD_FAILED (exit $LASTEXITCODE)" }}')
-                ps_lines.append('}} catch {{')
+                ps_lines.append("}} catch {{")
                 ps_lines.append('  Write-Host ""; Write-Host "DOWNLOAD_FAILED ($_)"')
-                ps_lines.append('}}')
+                ps_lines.append("}}")
             ps_lines.append(f'Remove-Item -Force "$HOME\\{remote_runner}" -ErrorAction SilentlyContinue')
             runner_path = TMUX_LOG_DIR / f"{session_id}_run.ps1"
             runner_path.write_text("\r\n".join(ps_lines) + "\r\n", encoding="utf-8")
@@ -659,11 +793,11 @@ def setup_cookbook_routes() -> APIRouter:
             _pf = f"-p {_port} " if _port and _port != "22" else ""
             # Start-Process creates a fully detached process that survives SSH disconnect
             launch_ps = (
-                "$sd = \\\"$env:TEMP\\odysseus-sessions\\\"; "
+                '$sd = \\"$env:TEMP\\odysseus-sessions\\"; '
                 f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
-                f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
-                f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
-                f"-NoNewWindow -PassThru | ForEach-Object {{ $_.Id | Out-File \\\"$sd\\{session_id}.pid\\\" }}"
+                f'-RedirectStandardOutput \\"$sd\\{session_id}.log\\" '
+                f'-RedirectStandardError \\"$sd\\{session_id}.err.log\\" '
+                f'-NoNewWindow -PassThru | ForEach-Object {{ $_.Id | Out-File \\"$sd\\{session_id}.pid\\" }}'
             )
             setup_cmd = (
                 f"scp -O {_Pf}-q '{runner_path}' {remote}:{remote_runner} && "
@@ -688,9 +822,9 @@ def setup_cookbook_routes() -> APIRouter:
             else:
                 # Fallback: find a venv with hf CLI, or install huggingface-hub
                 runner_lines.append(
-                    'for p in ~/vllm-env ~/venv ~/.venv; do '
+                    "for p in ~/vllm-env ~/venv ~/.venv; do "
                     'if [ -f "$p/bin/activate" ]; then source "$p/bin/activate"; break; fi; '
-                    'done'
+                    "done"
                 )
             # Ensure pip-user scripts (e.g. hf CLI installed via --user) are on PATH
             runner_lines.append('export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
@@ -699,23 +833,35 @@ def setup_cookbook_routes() -> APIRouter:
             # flaky near the end of very large multi-file downloads.
             # Use --break-system-packages on PEP-668 systems (Arch, newer Debian) so it doesn't bail.
             if is_ollama_download:
-                runner_lines.append('if command -v ollama >/dev/null 2>&1; then')
-                runner_lines.append(f'  ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote(ollama_cmd)}')
-                runner_lines.append('elif command -v docker >/dev/null 2>&1; then')
-                runner_lines.append('  ODYSSEUS_OLLAMA_CONTAINER="$(docker ps --format \'{{.Names}}\' 2>/dev/null | grep -E \'^(ollama-rocm|ollama-test)$\' | head -1)"')
+                runner_lines.append("if command -v ollama >/dev/null 2>&1; then")
+                runner_lines.append(f"  ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote(ollama_cmd)}")
+                runner_lines.append("elif command -v docker >/dev/null 2>&1; then")
+                runner_lines.append(
+                    "  ODYSSEUS_OLLAMA_CONTAINER=\"$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(ollama-rocm|ollama-test)$' | head -1)\""
+                )
                 runner_lines.append('  if [ -n "$ODYSSEUS_OLLAMA_CONTAINER" ]; then')
-                runner_lines.append(f'    ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote("docker exec ${ODYSSEUS_OLLAMA_CONTAINER} " + ollama_cmd)}')
-                runner_lines.append('  fi')
-                runner_lines.append('fi')
-                runner_lines.append('if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
+                runner_lines.append(
+                    f"    ODYSSEUS_OLLAMA_PULL_CMD={shlex.quote('docker exec ${ODYSSEUS_OLLAMA_CONTAINER} ' + ollama_cmd)}"
+                )
+                runner_lines.append("  fi")
+                runner_lines.append("fi")
+                runner_lines.append(
+                    'if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi'
+                )
             else:
-                runner_lines.append(f"command -v hf >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', python_cmd='pip', upgrade=True)}")
+                runner_lines.append(
+                    f"command -v hf >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', python_cmd='pip', upgrade=True)}"
+                )
                 if req.disable_hf_transfer:
                     runner_lines.append("export HF_HUB_ENABLE_HF_TRANSFER=0")
                     runner_lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=4")
                 else:
-                    runner_lines.append(f"python3 -c 'import hf_transfer' 2>/dev/null || {_pip_install_fallback_chain('hf_transfer', python_cmd='pip')}")
-                    runner_lines.append("python3 -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1")
+                    runner_lines.append(
+                        f"python3 -c 'import hf_transfer' 2>/dev/null || {_pip_install_fallback_chain('hf_transfer', python_cmd='pip')}"
+                    )
+                    runner_lines.append(
+                        "python3 -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1"
+                    )
                     runner_lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=8")
                 # Surface whether the HF token actually reached THIS server, so a gated
                 # download's "not authorized" failure can be told apart from a missing
@@ -724,36 +870,52 @@ def setup_cookbook_routes() -> APIRouter:
             # Wrap the download in a retry loop. Large HF/Ollama transfers can
             # hit transient network failures; both backends resume cached partials.
             mw = 4 if req.disable_hf_transfer else 8
-            runner_lines.append('_max_retries=10; _attempt=0; _ec=0')
-            runner_lines.append('while [ $_attempt -lt $_max_retries ]; do')
-            runner_lines.append('  _attempt=$((_attempt+1))')
+            runner_lines.append("_max_retries=10; _attempt=0; _ec=0")
+            runner_lines.append("while [ $_attempt -lt $_max_retries ]; do")
+            runner_lines.append("  _attempt=$((_attempt+1))")
             if is_ollama_download:
                 runner_lines.append('  eval "$ODYSSEUS_OLLAMA_PULL_CMD" < /dev/null')
             else:
-                runner_lines.append('  if command -v hf &>/dev/null; then')
-                runner_lines.append(f'    {hf_cmd} < /dev/null')
+                runner_lines.append("  if command -v hf &>/dev/null; then")
+                runner_lines.append(f"    {hf_cmd} < /dev/null")
                 runner_lines.append('  elif python3 -c "import huggingface_hub" 2>/dev/null; then')
-                runner_lines.append('    [ $_attempt -eq 1 ] && echo "hf CLI not found, using Python huggingface_hub..."')
-                runner_lines.append(f'    python3 -c "import os; from huggingface_hub import snapshot_download; snapshot_download(\'{req.repo_id}\'{_dl_pyarg}, max_workers={mw})"')
-                runner_lines.append('  else')
+                runner_lines.append(
+                    '    [ $_attempt -eq 1 ] && echo "hf CLI not found, using Python huggingface_hub..."'
+                )
+                runner_lines.append(
+                    f"    python3 -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers={mw})\""
+                )
+                runner_lines.append("  else")
                 runner_lines.append('    echo "Installing huggingface-hub and dependencies..."')
-                runner_lines.append('    pip install --no-deps -q huggingface-hub 2>/dev/null')
+                runner_lines.append("    pip install --no-deps -q huggingface-hub 2>/dev/null")
                 if req.disable_hf_transfer:
-                    runner_lines.append('    pip install -q filelock fsspec packaging pyyaml tqdm typer httpx requests 2>/dev/null')
-                    runner_lines.append('    export HF_HUB_ENABLE_HF_TRANSFER=0')
+                    runner_lines.append(
+                        "    pip install -q filelock fsspec packaging pyyaml tqdm typer httpx requests 2>/dev/null"
+                    )
+                    runner_lines.append("    export HF_HUB_ENABLE_HF_TRANSFER=0")
                 else:
-                    runner_lines.append('    pip install -q filelock fsspec packaging pyyaml tqdm typer httpx requests hf_transfer 2>/dev/null')
-                    runner_lines.append("    python3 -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1")
-                runner_lines.append(f'    python3 -c "import os; from huggingface_hub import snapshot_download; snapshot_download(\'{req.repo_id}\'{_dl_pyarg}, max_workers={mw})"')
-                runner_lines.append('  fi')
-            runner_lines.append('  _ec=$?')
-            runner_lines.append('  if [ $_ec -eq 0 ]; then break; fi')
-            runner_lines.append('  if [ $_attempt -lt $_max_retries ]; then')
-            runner_lines.append('    echo ""; echo "Download attempt $_attempt failed (exit $_ec) — retrying in 30s..."')
-            runner_lines.append('    sleep 30')
-            runner_lines.append('  fi')
-            runner_lines.append('done')
-            runner_lines.append('if [ $_ec -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; else echo ""; echo "DOWNLOAD_FAILED (exit $_ec after $_attempt attempts)"; fi')
+                    runner_lines.append(
+                        "    pip install -q filelock fsspec packaging pyyaml tqdm typer httpx requests hf_transfer 2>/dev/null"
+                    )
+                    runner_lines.append(
+                        "    python3 -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1"
+                    )
+                runner_lines.append(
+                    f"    python3 -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers={mw})\""
+                )
+                runner_lines.append("  fi")
+            runner_lines.append("  _ec=$?")
+            runner_lines.append("  if [ $_ec -eq 0 ]; then break; fi")
+            runner_lines.append("  if [ $_attempt -lt $_max_retries ]; then")
+            runner_lines.append(
+                '    echo ""; echo "Download attempt $_attempt failed (exit $_ec) — retrying in 30s..."'
+            )
+            runner_lines.append("    sleep 30")
+            runner_lines.append("  fi")
+            runner_lines.append("done")
+            runner_lines.append(
+                'if [ $_ec -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; else echo ""; echo "DOWNLOAD_FAILED (exit $_ec after $_attempt attempts)"; fi'
+            )
             runner_lines.append(f"rm -f {remote_runner}")
             runner_lines.append('exec "${SHELL:-/bin/bash}"')
             runner_path = TMUX_LOG_DIR / f"{session_id}_run.sh"
@@ -782,27 +944,39 @@ def setup_cookbook_routes() -> APIRouter:
             if not is_ollama_download:
                 lines.append(_HF_TOKEN_STATUS_SNIPPET)
             # Retry loop — same rationale as the remote-bash path. Issue #2722.
-            _hf_invoke = 'eval "$ODYSSEUS_OLLAMA_PULL_CMD" < /dev/null' if is_ollama_download else (hf_cmd if IS_WINDOWS else f"{hf_cmd} < /dev/null")
-            lines.append('_max_retries=10; _attempt=0; _ec=0')
-            lines.append('while [ $_attempt -lt $_max_retries ]; do')
-            lines.append('  _attempt=$((_attempt+1))')
-            lines.append(f'  {_hf_invoke}')
-            lines.append('  _ec=$?')
-            lines.append('  if [ $_ec -eq 0 ]; then break; fi')
-            lines.append('  if [ $_attempt -lt $_max_retries ]; then')
+            _hf_invoke = (
+                'eval "$ODYSSEUS_OLLAMA_PULL_CMD" < /dev/null'
+                if is_ollama_download
+                else (hf_cmd if IS_WINDOWS else f"{hf_cmd} < /dev/null")
+            )
+            lines.append("_max_retries=10; _attempt=0; _ec=0")
+            lines.append("while [ $_attempt -lt $_max_retries ]; do")
+            lines.append("  _attempt=$((_attempt+1))")
+            lines.append(f"  {_hf_invoke}")
+            lines.append("  _ec=$?")
+            lines.append("  if [ $_ec -eq 0 ]; then break; fi")
+            lines.append("  if [ $_attempt -lt $_max_retries ]; then")
             lines.append('    echo ""; echo "Download attempt $_attempt failed (exit $_ec) — retrying in 30s..."')
-            lines.append('    sleep 30')
-            lines.append('  fi')
-            lines.append('done')
-            lines.append('if [ $_ec -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; else echo ""; echo "DOWNLOAD_FAILED (exit $_ec after $_attempt attempts)"; fi')
+            lines.append("    sleep 30")
+            lines.append("  fi")
+            lines.append("done")
+            lines.append(
+                'if [ $_ec -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; else echo ""; echo "DOWNLOAD_FAILED (exit $_ec after $_attempt attempts)"; fi'
+            )
             if not IS_WINDOWS:
                 lines.append(f"rm -f '{wrapper_script}'")
                 lines.append('exec "${SHELL:-/bin/bash}"')
                 wrapper_script.write_text("\n".join(lines) + "\n", encoding="utf-8")
                 wrapper_script.chmod(0o755)
-            setup_cmd = None if IS_WINDOWS else f"tmux set-option -g history-limit 100000 2>/dev/null; tmux new-session -d -s {session_id} {shlex.quote(str(wrapper_script))}"
+            setup_cmd = (
+                None
+                if IS_WINDOWS
+                else f"tmux set-option -g history-limit 100000 2>/dev/null; tmux new-session -d -s {session_id} {shlex.quote(str(wrapper_script))}"
+            )
 
-        logger.info(f"Model download: {req.repo_id} (backend={'ollama' if is_ollama_download else 'hf'}, include={req.include}, session={session_id}, remote={remote})")
+        logger.info(
+            f"Model download: {req.repo_id} (backend={'ollama' if is_ollama_download else 'hf'}, include={req.include}, session={session_id}, remote={remote})"
+        )
         logger.info(f"Download setup_cmd: {setup_cmd}")
 
         if setup_cmd is None:
@@ -829,6 +1003,7 @@ def setup_cookbook_routes() -> APIRouter:
         try:
             from src.assistant_log import log_to_assistant
             from src.auth_helpers import get_current_user
+
             owner = get_current_user(request)
             log_to_assistant(
                 owner,
@@ -841,7 +1016,13 @@ def setup_cookbook_routes() -> APIRouter:
         return {"ok": True, "session_id": session_id, "remote": remote or "local"}
 
     @router.get("/api/model/cached")
-    async def model_cached(request: Request, host: str | None = None, model_dir: str | None = None, ssh_port: str | None = None, platform: str | None = None):
+    async def model_cached(
+        request: Request,
+        host: str | None = None,
+        model_dir: str | None = None,
+        ssh_port: str | None = None,
+        platform: str | None = None,
+    ):
         """List cached models. Scans HF cache + optional model directory."""
         require_admin(request)
         # Validate shell-bound inputs, matching the sibling list_gpus endpoint —
@@ -853,7 +1034,7 @@ def setup_cookbook_routes() -> APIRouter:
 
         model_dirs = []
         if model_dir:
-            for d in model_dir.split(','):
+            for d in model_dir.split(","):
                 d = d.strip()
                 if d:
                     model_dirs.append(d)
@@ -866,7 +1047,7 @@ def setup_cookbook_routes() -> APIRouter:
             _pf = f"-p {ssh_port} " if ssh_port and ssh_port != "22" else ""
             if platform == "windows":
                 # Windows: use 'python' and pipe via stdin with double-quote wrapping
-                cmd = f'ssh {_pf}{host} "python -" < \'{scan_py}\''
+                cmd = f"ssh {_pf}{host} \"python -\" < '{scan_py}'"
             else:
                 cmd = f"ssh {_pf}{host} 'python3 -' < '{scan_py}'"
             proc = await asyncio.create_subprocess_shell(
@@ -883,12 +1064,10 @@ def setup_cookbook_routes() -> APIRouter:
             # "Python was not found; run without arguments to install from the
             # Microsoft Store" and exits 9009, producing empty stdout and a
             # JSON parse error. sys.executable bypasses PATH entirely.
-            local_py = sys.executable or (
-                which_tool("python3") or which_tool("python")
-                or which_tool("py") or "python"
-            )
+            local_py = sys.executable or (which_tool("python3") or which_tool("python") or which_tool("py") or "python")
             proc = await asyncio.create_subprocess_exec(
-                local_py, str(scan_py),
+                local_py,
+                str(scan_py),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(Path.home()),
@@ -899,7 +1078,7 @@ def setup_cookbook_routes() -> APIRouter:
         try:
             raw = json.loads(stdout_b.decode(errors="replace").strip())
             for m in raw:
-                size_gb = m["size_bytes"] / (1024 ** 3)
+                size_gb = m["size_bytes"] / (1024**3)
                 if size_gb >= 1:
                     size_str = f"{size_gb:.1f} GB"
                 else:
@@ -933,10 +1112,11 @@ def setup_cookbook_routes() -> APIRouter:
     def _auto_register_image_endpoint(req: ServeRequest, remote: str | None) -> str | None:
         """Register a diffusion model as an image endpoint so it appears in the model selector."""
         import re
-        from core.database import SessionLocal, ModelEndpoint
+
+        from core.database import ModelEndpoint, SessionLocal
 
         # Parse port from command (--port NNNN), default 8100 for diffusion_server
-        port_match = re.search(r'--port\s+(\d+)', req.cmd)
+        port_match = re.search(r"--port\s+(\d+)", req.cmd)
         port = int(port_match.group(1)) if port_match else 8100
 
         # Determine host
@@ -992,6 +1172,7 @@ def setup_cookbook_routes() -> APIRouter:
         don't reattach to an external systemd ollama (or other listener) the
         Cookbook Stop button can't kill."""
         import socket
+
         if remote:
             # Probe over SSH. Bash's /dev/tcp gives a portable "is anything
             # listening" check without requiring ss/netstat/nmap.
@@ -1016,9 +1197,13 @@ def setup_cookbook_routes() -> APIRouter:
             )
             try:
                 import subprocess
+
                 r = subprocess.run(
                     ssh_base + [host_arg, script],
-                    capture_output=True, text=True, timeout=8,
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    check=False,
                 )
                 if r.returncode == 0:
                     out = (r.stdout or "").strip().splitlines()
@@ -1034,7 +1219,7 @@ def setup_cookbook_routes() -> APIRouter:
                 s.settimeout(0.25)
                 try:
                     s.connect(("127.0.0.1", p))
-                except (ConnectionRefusedError, socket.timeout, OSError):
+                except (TimeoutError, ConnectionRefusedError, OSError):
                     return p
         return None
 
@@ -1114,7 +1299,9 @@ def setup_cookbook_routes() -> APIRouter:
                 return
             # Non-zero exit — drop the endpoint.
             try:
-                from core.database import SessionLocal as _SL, ModelEndpoint as _ME
+                from core.database import ModelEndpoint as _ME
+                from core.database import SessionLocal as _SL
+
                 db = _SL()
                 try:
                     ep = db.query(_ME).filter(_ME.id == endpoint_id).first()
@@ -1144,11 +1331,11 @@ def setup_cookbook_routes() -> APIRouter:
         so registering immediately (before the server finishes loading) is safe.
         """
         logger.info(
-            f"_auto_register_llm_endpoint: ENTRY repo_id={req.repo_id!r} "
-            f"remote={remote!r} cmd_prefix={req.cmd[:80]!r}"
+            f"_auto_register_llm_endpoint: ENTRY repo_id={req.repo_id!r} remote={remote!r} cmd_prefix={req.cmd[:80]!r}"
         )
         import re
-        from core.database import SessionLocal, ModelEndpoint
+
+        from core.database import ModelEndpoint, SessionLocal
 
         # Port: ordered fallbacks so we match whatever the user actually
         # asked for, not a hardcoded default:
@@ -1160,8 +1347,8 @@ def setup_cookbook_routes() -> APIRouter:
         # set OLLAMA_HOST=0.0.0.0:11435 to avoid colliding with an
         # existing systemd Ollama, the registered endpoint pointed at
         # the OLD port and showed as offline.
-        port_match = re.search(r'--port\s+(\d+)', req.cmd)
-        ollama_host_match = re.search(r'OLLAMA_HOST=[^\s]*?:(\d+)', req.cmd)
+        port_match = re.search(r"--port\s+(\d+)", req.cmd)
+        ollama_host_match = re.search(r"OLLAMA_HOST=[^\s]*?:(\d+)", req.cmd)
         if port_match:
             port = int(port_match.group(1))
         elif ollama_host_match:
@@ -1218,8 +1405,10 @@ def setup_cookbook_routes() -> APIRouter:
                 # serves right now (the URL may have stayed the same but the
                 # model behind it changed across launches).
                 try:
-                    from routes.model_routes import _probe_endpoint
                     import json as _json2
+
+                    from routes.model_routes import _probe_endpoint
+
                     probed = _probe_endpoint(base_url, existing.api_key, timeout=5)
                     if probed:
                         existing.cached_models = _json2.dumps(probed)
@@ -1232,11 +1421,13 @@ def setup_cookbook_routes() -> APIRouter:
                 # the working one. Only sweeps endpoints whose id starts with
                 # `local-` so we never touch a user's hand-added DeepSeek/OpenAI/
                 # etc. entry with a coincidentally matching name.
-                stale = (db.query(ModelEndpoint)
-                         .filter(ModelEndpoint.name == display_name)
-                         .filter(ModelEndpoint.base_url != base_url)
-                         .filter(ModelEndpoint.id.like("local-%"))
-                         .all())
+                stale = (
+                    db.query(ModelEndpoint)
+                    .filter(ModelEndpoint.name == display_name)
+                    .filter(ModelEndpoint.base_url != base_url)
+                    .filter(ModelEndpoint.id.like("local-%"))
+                    .all()
+                )
                 for s in stale:
                     logger.info(f"Sweeping stale local endpoint {s.id} ({s.base_url})")
                     db.delete(s)
@@ -1262,11 +1453,13 @@ def setup_cookbook_routes() -> APIRouter:
             logger.info(f"Auto-registered local model endpoint: {display_name} @ {base_url}")
             # Same sweep on first-register path: drop any pre-existing local-*
             # endpoints with this display name pointed elsewhere.
-            stale = (db.query(ModelEndpoint)
-                     .filter(ModelEndpoint.name == display_name)
-                     .filter(ModelEndpoint.id != ep_id)
-                     .filter(ModelEndpoint.id.like("local-%"))
-                     .all())
+            stale = (
+                db.query(ModelEndpoint)
+                .filter(ModelEndpoint.name == display_name)
+                .filter(ModelEndpoint.id != ep_id)
+                .filter(ModelEndpoint.id.like("local-%"))
+                .all()
+            )
             for s in stale:
                 logger.info(f"Sweeping stale local endpoint {s.id} ({s.base_url})")
                 db.delete(s)
@@ -1279,8 +1472,10 @@ def setup_cookbook_routes() -> APIRouter:
             # to a minute later) and the picker shows nothing — even
             # though the endpoint is in the DB and the server is up.
             try:
-                from routes.model_routes import _probe_endpoint
                 import json as _json2
+
+                from routes.model_routes import _probe_endpoint
+
                 probed = _probe_endpoint(base_url, None, timeout=5)
                 if probed:
                     ep.cached_models = _json2.dumps(probed)
@@ -1354,9 +1549,7 @@ def setup_cookbook_routes() -> APIRouter:
             # also allowed spaces and `+`, both of which can be abused to
             # introduce extra shell tokens once interpolated into the
             # serve command. We now use `re.fullmatch` and drop space/`+`.
-            if not req.repo_id or not re.fullmatch(
-                r"[A-Za-z0-9][A-Za-z0-9._\-\[\]<>=!,~]{0,200}", req.repo_id
-            ):
+            if not req.repo_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\-\[\]<>=!,~]{0,200}", req.repo_id):
                 raise HTTPException(400, "Invalid pip package name")
         else:
             _validate_serve_model_id(req.repo_id)
@@ -1378,7 +1571,10 @@ def setup_cookbook_routes() -> APIRouter:
         if re.search(r"\bollama\s+serve\b", req.cmd) and "OLLAMA_HOST=" not in req.cmd:
             _ollama_bind_host = "0.0.0.0" if remote else "127.0.0.1"
             _ollama_chosen_port = _pick_free_port_for_ollama(
-                remote, req.ssh_port, start_port=11434, max_offset=10,
+                remote,
+                req.ssh_port,
+                start_port=11434,
+                max_offset=10,
             )
             if _ollama_chosen_port:
                 req.cmd = f"OLLAMA_HOST={_ollama_bind_host}:{_ollama_chosen_port} {req.cmd}"
@@ -1397,7 +1593,9 @@ def setup_cookbook_routes() -> APIRouter:
                 "error": _missing_binary_message("tmux", remote or "local server"),
                 "session_id": session_id,
             }
-        if _needs_binary(req.cmd, "docker") and not await _binary_available("docker", remote, req.ssh_port, windows=is_windows):
+        if _needs_binary(req.cmd, "docker") and not await _binary_available(
+            "docker", remote, req.ssh_port, windows=is_windows
+        ):
             return {
                 "ok": False,
                 "error": _missing_binary_message("docker", remote or "local server"),
@@ -1409,7 +1607,7 @@ def setup_cookbook_routes() -> APIRouter:
             remote_runner = f".{session_id}_run.ps1"
             ps_lines = []
             ps_lines.append('$sessionDir = "$env:TEMP\\odysseus-sessions"')
-            ps_lines.append('New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null')
+            ps_lines.append("New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null")
             if req.hf_token:
                 ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
             if req.gpus:
@@ -1418,21 +1616,25 @@ def setup_cookbook_routes() -> APIRouter:
                 ps_lines.append(_safe_env_prefix(req.env_prefix))
             # Auto-install ollama if the command uses it
             if "ollama" in req.cmd:
-                ps_lines.append('# Check if ollama is available')
-                ps_lines.append('if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {')
-                ps_lines.append('  Write-Host "Ollama not found. Please install from https://ollama.com/download/windows"')
-                ps_lines.append('  exit 1')
-                ps_lines.append('}')
+                ps_lines.append("# Check if ollama is available")
+                ps_lines.append("if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {")
+                ps_lines.append(
+                    '  Write-Host "Ollama not found. Please install from https://ollama.com/download/windows"'
+                )
+                ps_lines.append("  exit 1")
+                ps_lines.append("}")
             elif "llama_cpp" in req.cmd or "llama-server" in req.cmd:
-                ps_lines.append('# Auto-install llama-cpp-python if missing')
+                ps_lines.append("# Auto-install llama-cpp-python if missing")
                 ps_lines.append('try { python -c "import llama_cpp" 2>$null } catch {}')
-                ps_lines.append('if ($LASTEXITCODE -ne 0) {')
+                ps_lines.append("if ($LASTEXITCODE -ne 0) {")
                 ps_lines.append('  Write-Host "Installing llama-cpp-python..."')
-                ps_lines.append('  python -m pip install llama-cpp-python[server]')
-                ps_lines.append('}')
+                ps_lines.append("  python -m pip install llama-cpp-python[server]")
+                ps_lines.append("}")
             elif "vllm" in req.cmd:
-                ps_lines.append('Write-Host "ERROR: vLLM is not supported on Windows. Use Ollama or llama.cpp instead."')
-                ps_lines.append('exit 1')
+                ps_lines.append(
+                    'Write-Host "ERROR: vLLM is not supported on Windows. Use Ollama or llama.cpp instead."'
+                )
+                ps_lines.append("exit 1")
             ps_lines.append(req.cmd)
             if is_pip_install:
                 ps_lines.append('if ($LASTEXITCODE -eq 0) { Write-Host ""; Write-Host "DOWNLOAD_OK" }')
@@ -1445,11 +1647,11 @@ def setup_cookbook_routes() -> APIRouter:
             _Pf = f"-P {_port} " if _port and _port != "22" else ""
             _pf = f"-p {_port} " if _port and _port != "22" else ""
             launch_ps = (
-                "$sd = \\\"$env:TEMP\\odysseus-sessions\\\"; "
+                '$sd = \\"$env:TEMP\\odysseus-sessions\\"; '
                 f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
-                f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
-                f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
-                f"-NoNewWindow -PassThru | ForEach-Object {{ $_.Id | Out-File \\\"$sd\\{session_id}.pid\\\" }}"
+                f'-RedirectStandardOutput \\"$sd\\{session_id}.log\\" '
+                f'-RedirectStandardError \\"$sd\\{session_id}.err.log\\" '
+                f'-NoNewWindow -PassThru | ForEach-Object {{ $_.Id | Out-File \\"$sd\\{session_id}.pid\\" }}'
             )
             setup_cmd = (
                 f"scp -O {_Pf}-q '{runner_path}' {remote}:{remote_runner} && "
@@ -1470,15 +1672,19 @@ def setup_cookbook_routes() -> APIRouter:
             # the actual traceback ends up earlier than the tail window.
             runner_lines.append("mkdir -p /tmp/odysseus-tmux 2>/dev/null || true")
             runner_lines.append("exec 3>&1 4>&2")
-            runner_lines.append(
-                f"exec > >(tee -a /tmp/odysseus-tmux/{session_id}.log) 2>&1"
-            )
+            runner_lines.append(f"exec > >(tee -a /tmp/odysseus-tmux/{session_id}.log) 2>&1")
             runner_lines.extend(_user_shell_path_bootstrap())
             runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=""')
             # Put Odysseus's own venv bin on PATH (local runs only) so the serve
             # shell resolves the bundled python3/hf, mirroring the download flow.
             if not remote:
                 runner_lines.append(_local_tooling_path_export(sys.executable))
+                if local_windows:
+                    # Detached Git Bash runs do not always inherit recently edited
+                    # user PATH entries from the already-running Odysseus process.
+                    runner_lines.append(
+                        'export PATH="$HOME/bin:$HOME/llama.cpp/build-cuda/bin/Release:$HOME/llama.cpp/build/bin/Release:$HOME/llama.cpp/build/bin/Debug:$HOME/llama.cpp/build/bin:$PATH"'
+                    )
             runner_lines.append("export FLASHINFER_DISABLE_VERSION_CHECK=1")
             if req.hf_token:
                 runner_lines.append(f"export HF_TOKEN='{_bash_squote(req.hf_token)}'")
@@ -1493,27 +1699,36 @@ def setup_cookbook_routes() -> APIRouter:
             runner_lines.append(_HF_TOKEN_STATUS_SNIPPET)
             handled_ollama_serve = False
             # Auto-install inference engine if missing
-            if "llama_cpp" in req.cmd or "llama-server" in req.cmd:
+            local_windows_llama_cmd = local_windows and ("llama_cpp" in req.cmd or "llama-server" in req.cmd)
+            if ("llama_cpp" in req.cmd or "llama-server" in req.cmd) and not local_windows_llama_cmd:
                 # Prefer the NATIVE llama-server binary — its minja templating
                 # renders modern GGUF chat templates that the Python bindings'
                 # Jinja2 rejects (do_tojson ensure_ascii). Build it once from
                 # source if missing; keep llama-cpp-python only as a fallback.
-                runner_lines.append('# Ensure a llama.cpp server (prefer native llama-server)')
+                runner_lines.append("# Ensure a llama.cpp server (prefer native llama-server)")
                 # Include the Homebrew bin dirs so a brew-installed llama-server /
                 # ollama is found (otherwise macOS falls back to a slow source build).
                 # /opt/homebrew = Apple Silicon, /usr/local = Intel; harmless on Linux.
-                runner_lines.append('export PATH="$HOME/.local/bin:$HOME/bin:$HOME/llama.cpp/build/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
-                runner_lines.append('if [ -d /data/data/com.termux ]; then')
-                runner_lines.append('  # Termux: no native build — use the Python bindings (CPU).')
+                runner_lines.append(
+                    'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/llama.cpp/build/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"'
+                )
+                runner_lines.append("if [ -d /data/data/com.termux ]; then")
+                runner_lines.append("  # Termux: no native build — use the Python bindings (CPU).")
                 runner_lines.append('  if ! python3 -c "import llama_cpp" 2>/dev/null; then')
-                runner_lines.append('    pkg install -y cmake 2>/dev/null')
-                runner_lines.append('    pip install numpy diskcache jinja2 2>/dev/null')
-                runner_lines.append('    CMAKE_ARGS="-DGGML_BLAS=OFF -DGGML_LLAMAFILE=OFF" pip install \'llama-cpp-python[server]\' --no-build-isolation --no-cache-dir 2>&1 || true')
-                runner_lines.append('  fi')
-                runner_lines.append('elif ! command -v llama-server &>/dev/null; then')
-                runner_lines.append('  echo "Native llama-server not found — building from source (one-time, may take a few minutes)..."')
-                runner_lines.append('  mkdir -p ~/bin')
-                runner_lines.append('  cd ~ && [ -d llama.cpp ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp')
+                runner_lines.append("    pkg install -y cmake 2>/dev/null")
+                runner_lines.append("    pip install numpy diskcache jinja2 2>/dev/null")
+                runner_lines.append(
+                    "    CMAKE_ARGS=\"-DGGML_BLAS=OFF -DGGML_LLAMAFILE=OFF\" pip install 'llama-cpp-python[server]' --no-build-isolation --no-cache-dir 2>&1 || true"
+                )
+                runner_lines.append("  fi")
+                runner_lines.append("elif ! command -v llama-server &>/dev/null; then")
+                runner_lines.append(
+                    '  echo "Native llama-server not found — building from source (one-time, may take a few minutes)..."'
+                )
+                runner_lines.append("  mkdir -p ~/bin")
+                runner_lines.append(
+                    "  cd ~ && [ -d llama.cpp ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp"
+                )
                 # Build with the right accelerator: Metal on macOS (llama.cpp
                 # enables it automatically, no flag), CUDA on Linux when present,
                 # else a plain CPU build. nproc is Linux-only — fall back to
@@ -1521,21 +1736,25 @@ def setup_cookbook_routes() -> APIRouter:
                 # a prebuilt llama-server and skips this whole source build.)
                 runner_lines.append('  NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"')
                 runner_lines.append('  if [ "$(uname -s)" = "Darwin" ]; then')
-                runner_lines.append('    command -v cmake >/dev/null 2>&1 || echo "WARNING: cmake not found — install it with: brew install cmake (or: brew install llama.cpp for a prebuilt llama-server)."')
+                runner_lines.append(
+                    '    command -v cmake >/dev/null 2>&1 || echo "WARNING: cmake not found — install it with: brew install cmake (or: brew install llama.cpp for a prebuilt llama-server)."'
+                )
                 # Start from a clean cache: a prior failed configure (e.g. a CUDA
                 # attempt) poisons build/CMakeCache.txt, so a plain `cmake -B build`
                 # would reuse the bad settings and fail again. CMAKE_BUILD_TYPE is
                 # explicit so the binary is optimized (Metal auto-enables on macOS).
-                runner_lines.append('    cd ~/llama.cpp && rm -rf build && cmake -B build -DCMAKE_BUILD_TYPE=Release \\')
+                runner_lines.append(
+                    "    cd ~/llama.cpp && rm -rf build && cmake -B build -DCMAKE_BUILD_TYPE=Release \\"
+                )
                 runner_lines.append('      && cmake --build build -j"$NPROC" --target llama-server \\')
-                runner_lines.append('      && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
-                runner_lines.append('  else')
+                runner_lines.append("      && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server")
+                runner_lines.append("  else")
                 _append_llama_cpp_linux_accel_build_lines(runner_lines)
-                runner_lines.append('  fi')
+                runner_lines.append("  fi")
                 # Source the env file the prebuilt-download path writes so
                 # LD_LIBRARY_PATH includes the directory holding libllama.so
                 # and friends. No-op when prebuilt wasn't used.
-                runner_lines.append('  [ -r ~/.config/odysseus-llama-cpp-env ] && . ~/.config/odysseus-llama-cpp-env')
+                runner_lines.append("  [ -r ~/.config/odysseus-llama-cpp-env ] && . ~/.config/odysseus-llama-cpp-env")
                 # Auto-upgrade pip llama-cpp-python to the CUDA-enabled
                 # wheel when (a) NVIDIA hardware is present and (b) the
                 # currently-installed wheel is CPU-only. Without this the
@@ -1543,15 +1762,25 @@ def setup_cookbook_routes() -> APIRouter:
                 # because pip's default index ships CPU-only wheels.
                 # Forward-compat: cu124 wheels work on driver/runtime
                 # 12.4+ including the cu13.x line.
-                runner_lines.append('  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q "GPU " && python3 -c "import llama_cpp" 2>/dev/null; then')
-                runner_lines.append('    if ! python3 -c "import llama_cpp; import sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" 2>/dev/null; then')
-                runner_lines.append('      echo "[odysseus] NVIDIA detected but installed llama-cpp-python is CPU-only — reinstalling with CUDA wheel index for GPU offload..."')
-                runner_lines.append('      python3 -m pip install --user --break-system-packages --force-reinstall --no-cache-dir "llama-cpp-python[server]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 2>&1 | tail -8 || echo "[odysseus] WARNING: CUDA wheel reinstall failed — Python server will stay CPU-only (slow). Manual fix: pip install --user --force-reinstall \'llama-cpp-python[server]\' --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124"')
-                runner_lines.append('      if python3 -c "import llama_cpp; import sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" 2>/dev/null; then')
+                runner_lines.append(
+                    '  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q "GPU " && python3 -c "import llama_cpp" 2>/dev/null; then'
+                )
+                runner_lines.append(
+                    '    if ! python3 -c "import llama_cpp; import sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" 2>/dev/null; then'
+                )
+                runner_lines.append(
+                    '      echo "[odysseus] NVIDIA detected but installed llama-cpp-python is CPU-only — reinstalling with CUDA wheel index for GPU offload..."'
+                )
+                runner_lines.append(
+                    '      python3 -m pip install --user --break-system-packages --force-reinstall --no-cache-dir "llama-cpp-python[server]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 2>&1 | tail -8 || echo "[odysseus] WARNING: CUDA wheel reinstall failed — Python server will stay CPU-only (slow). Manual fix: pip install --user --force-reinstall \'llama-cpp-python[server]\' --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124"'
+                )
+                runner_lines.append(
+                    '      if python3 -c "import llama_cpp; import sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" 2>/dev/null; then'
+                )
                 runner_lines.append('        echo "[odysseus] llama-cpp-python now supports GPU offload."')
-                runner_lines.append('      fi')
-                runner_lines.append('    fi')
-                runner_lines.append('  fi')
+                runner_lines.append("      fi")
+                runner_lines.append("    fi")
+                runner_lines.append("  fi")
                 # SHORT-CIRCUIT before the build/pip fallback: if the
                 # native binary is missing but llama_cpp Python is already
                 # installed, drop a wrapper at ~/bin/llama-server that
@@ -1561,50 +1790,64 @@ def setup_cookbook_routes() -> APIRouter:
                 # no second install. This is the path that unblocks every
                 # remote where pip-installed llama-cpp-python is already
                 # working but Cookbook used to insist on a native binary.
-                runner_lines.append('  if ! command -v llama-server >/dev/null 2>&1 && python3 -c "import llama_cpp" 2>/dev/null; then')
-                runner_lines.append('    mkdir -p ~/bin')
-                runner_lines.append('    cat > ~/bin/llama-server <<\'_ODY_LLAMA_SHIM_EOF\'')
-                runner_lines.append('#!/usr/bin/env bash')
-                runner_lines.append('# Auto-generated by Odysseus Cookbook: a `llama-server` lookalike')
-                runner_lines.append('# that translates the native CLI to `python -m llama_cpp.server`.')
-                runner_lines.append('# Lets cookbook-generated launch commands run unchanged on hosts')
-                runner_lines.append('# where only the pip llama-cpp-python package is installed.')
-                runner_lines.append('ARGS=()')
-                runner_lines.append('while [ $# -gt 0 ]; do')
+                runner_lines.append(
+                    '  if ! command -v llama-server >/dev/null 2>&1 && python3 -c "import llama_cpp" 2>/dev/null; then'
+                )
+                runner_lines.append("    mkdir -p ~/bin")
+                runner_lines.append("    cat > ~/bin/llama-server <<'_ODY_LLAMA_SHIM_EOF'")
+                runner_lines.append("#!/usr/bin/env bash")
+                runner_lines.append("# Auto-generated by Odysseus Cookbook: a `llama-server` lookalike")
+                runner_lines.append("# that translates the native CLI to `python -m llama_cpp.server`.")
+                runner_lines.append("# Lets cookbook-generated launch commands run unchanged on hosts")
+                runner_lines.append("# where only the pip llama-cpp-python package is installed.")
+                runner_lines.append("ARGS=()")
+                runner_lines.append("while [ $# -gt 0 ]; do")
                 runner_lines.append('  case "$1" in')
                 runner_lines.append('    -ngl|--gpu-layers|--n-gpu-layers) ARGS+=(--n_gpu_layers "$2"); shift 2 ;;')
                 runner_lines.append('    -c|--ctx-size) ARGS+=(--n_ctx "$2"); shift 2 ;;')
                 runner_lines.append('    -b|--batch-size) ARGS+=(--n_batch "$2"); shift 2 ;;')
-                runner_lines.append('    -ub|--ubatch-size) shift 2 ;;  # llama-cpp-python has no separate ubatch')
-                runner_lines.append('    --flash-attn) ARGS+=(--flash_attn true); shift 2 ;;')
+                runner_lines.append("    -ub|--ubatch-size) shift 2 ;;  # llama-cpp-python has no separate ubatch")
+                runner_lines.append("    --flash-attn) ARGS+=(--flash_attn true); shift 2 ;;")
                 runner_lines.append('    --cache-type-k) ARGS+=(--type_k "$2"); shift 2 ;;')
                 runner_lines.append('    --cache-type-v) ARGS+=(--type_v "$2"); shift 2 ;;')
                 runner_lines.append('    --n-cpu-moe) ARGS+=(--n_cpu_moe "$2"); shift 2 ;;')
                 runner_lines.append('    --mmproj) ARGS+=(--clip_model_path "$2"); shift 2 ;;')
-                runner_lines.append('    --image-max-tokens) shift 2 ;;  # native-only')
-                runner_lines.append('    --no-mmap) ARGS+=(--no_mmap true); shift ;;')
-                runner_lines.append('    --no-warmup) shift ;;  # native-only')
+                runner_lines.append("    --image-max-tokens) shift 2 ;;  # native-only")
+                runner_lines.append("    --no-mmap) ARGS+=(--no_mmap true); shift ;;")
+                runner_lines.append("    --no-warmup) shift ;;  # native-only")
                 runner_lines.append('    --chat-template) ARGS+=(--chat_format "$2"); shift 2 ;;')
-                runner_lines.append('    --fit|--split-mode|--tensor-split|--main-gpu|--parallel) shift 2 ;;  # native-only')
-                runner_lines.append('    --mlock) ARGS+=(--use_mlock true); shift ;;')
+                runner_lines.append(
+                    "    --fit|--split-mode|--tensor-split|--main-gpu|--parallel) shift 2 ;;  # native-only"
+                )
+                runner_lines.append("    --mlock) ARGS+=(--use_mlock true); shift ;;")
                 runner_lines.append('    *) ARGS+=("$1"); shift ;;')
-                runner_lines.append('  esac')
-                runner_lines.append('done')
+                runner_lines.append("  esac")
+                runner_lines.append("done")
                 runner_lines.append('exec python3 -m llama_cpp.server "${ARGS[@]}"')
-                runner_lines.append('_ODY_LLAMA_SHIM_EOF')
-                runner_lines.append('    chmod +x ~/bin/llama-server')
-                runner_lines.append('    echo "[odysseus] Created llama-server shim → python -m llama_cpp.server (no native binary needed)"')
-                runner_lines.append('  fi')
-                runner_lines.append('  # If the native build failed, fall back to the Python bindings.')
-                runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
+                runner_lines.append("_ODY_LLAMA_SHIM_EOF")
+                runner_lines.append("    chmod +x ~/bin/llama-server")
+                runner_lines.append(
+                    '    echo "[odysseus] Created llama-server shim → python -m llama_cpp.server (no native binary needed)"'
+                )
+                runner_lines.append("  fi")
+                runner_lines.append("  # If the native build failed, fall back to the Python bindings.")
+                runner_lines.append(
+                    '  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then'
+                )
                 runner_lines.append('    echo "llama-server build failed — installing Python bindings as fallback..."')
-                runner_lines.append(f"    {_pip_install_fallback_chain('llama-cpp-python[server]', python_cmd='pip')} || true")
-                runner_lines.append('  fi')
-                runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
-                runner_lines.append('    echo "ERROR: llama.cpp serving is not available after install/build attempts."')
-                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('  fi')
-                runner_lines.append('fi')
+                runner_lines.append(
+                    f"    {_pip_install_fallback_chain('llama-cpp-python[server]', python_cmd='pip')} || true"
+                )
+                runner_lines.append("  fi")
+                runner_lines.append(
+                    '  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then'
+                )
+                runner_lines.append(
+                    '    echo "ERROR: llama.cpp serving is not available after install/build attempts."'
+                )
+                runner_lines.append("    ODYSSEUS_PREFLIGHT_EXIT=127")
+                runner_lines.append("  fi")
+                runner_lines.append("fi")
             elif re.search(r"\bollama\s+serve\b", req.cmd):
                 handled_ollama_serve = True
                 _ollama_default_host = "0.0.0.0" if remote else "127.0.0.1"
@@ -1617,172 +1860,199 @@ def setup_cookbook_routes() -> APIRouter:
                 # ollama on 11434), scan upward for a free one rather than
                 # silently reattaching to an external service that Stop
                 # can't reach.
-                runner_lines.append(f'ODYSSEUS_OLLAMA_HOST={_bash_squote(_ollama_host)}')
+                runner_lines.append(f"ODYSSEUS_OLLAMA_HOST={_bash_squote(_ollama_host)}")
                 runner_lines.append(f'ODYSSEUS_OLLAMA_PORT="{_ollama_port}"')
-                runner_lines.append('for _ody_off in 0 1 2 3 4 5 6 7 8 9; do')
-                runner_lines.append('  _ody_try_port=$((ODYSSEUS_OLLAMA_PORT + _ody_off))')
-                runner_lines.append('  if ! (exec 3<>/dev/tcp/127.0.0.1/$_ody_try_port) 2>/dev/null; then')
-                runner_lines.append('    exec 3<&-; exec 3>&-')
+                runner_lines.append("for _ody_off in 0 1 2 3 4 5 6 7 8 9; do")
+                runner_lines.append("  _ody_try_port=$((ODYSSEUS_OLLAMA_PORT + _ody_off))")
+                runner_lines.append("  if ! (exec 3<>/dev/tcp/127.0.0.1/$_ody_try_port) 2>/dev/null; then")
+                runner_lines.append("    exec 3<&-; exec 3>&-")
                 runner_lines.append('    ODYSSEUS_OLLAMA_PORT="$_ody_try_port"')
-                runner_lines.append('    break')
-                runner_lines.append('  fi')
-                runner_lines.append('  exec 3<&-; exec 3>&-')
-                runner_lines.append('done')
-                runner_lines.append('if ! command -v ollama &>/dev/null; then')
-                runner_lines.append('  echo "ERROR: Ollama not found on this server. Install it from https://ollama.com/download or `curl -fsSL https://ollama.com/install.sh | sh`."')
-                runner_lines.append('  echo')
+                runner_lines.append("    break")
+                runner_lines.append("  fi")
+                runner_lines.append("  exec 3<&-; exec 3>&-")
+                runner_lines.append("done")
+                runner_lines.append("if ! command -v ollama &>/dev/null; then")
+                runner_lines.append(
+                    '  echo "ERROR: Ollama not found on this server. Install it from https://ollama.com/download or `curl -fsSL https://ollama.com/install.sh | sh`."'
+                )
+                runner_lines.append("  echo")
                 runner_lines.append('  echo "=== Process exited with code 127 ==="')
-                runner_lines.append('  exec bash -i')
-                runner_lines.append('fi')
+                runner_lines.append("  exec bash -i")
+                runner_lines.append("fi")
                 runner_lines.append('ODYSSEUS_OLLAMA_URL="http://${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}"')
                 if remote and _ollama_host in ("0.0.0.0", "::"):
-                    runner_lines.append('echo "[odysseus] WARNING: remote Ollama will bind to ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT} so Odysseus can reach it from this host."')
-                    runner_lines.append('echo "[odysseus] Ollama has no built-in authentication; expose this only on a trusted LAN/VPN or provide an explicit OLLAMA_HOST with your own access controls."')
-                runner_lines.append('echo "Starting ollama server on ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}..."')
+                    runner_lines.append(
+                        'echo "[odysseus] WARNING: remote Ollama will bind to ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT} so Odysseus can reach it from this host."'
+                    )
+                    runner_lines.append(
+                        'echo "[odysseus] Ollama has no built-in authentication; expose this only on a trusted LAN/VPN or provide an explicit OLLAMA_HOST with your own access controls."'
+                    )
+                runner_lines.append(
+                    'echo "Starting ollama server on ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}..."'
+                )
                 runner_lines.append('OLLAMA_HOST="${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}" ollama serve')
-                runner_lines.append('_ody_exit=$?')
-                runner_lines.append('echo')
+                runner_lines.append("_ody_exit=$?")
+                runner_lines.append("echo")
                 runner_lines.append('echo "=== Process exited with code ${_ody_exit} ==="')
-                runner_lines.append('exec bash -i')
+                runner_lines.append("exec bash -i")
             elif "vllm serve" in req.cmd:
                 # vLLM is CUDA/ROCm-only and does not run on macOS at all.
                 runner_lines.append('if [ "$(uname -s)" = "Darwin" ]; then')
-                runner_lines.append('  echo "ERROR: vLLM does not run on macOS. Use Ollama or llama.cpp (Metal) instead."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=1')
-                runner_lines.append('fi')
+                runner_lines.append(
+                    '  echo "ERROR: vLLM does not run on macOS. Use Ollama or llama.cpp (Metal) instead."'
+                )
+                runner_lines.append("  ODYSSEUS_PREFLIGHT_EXIT=1")
+                runner_lines.append("fi")
                 # Put ~/.local/bin on PATH first — without a venv, vllm installs
                 # there via --user and the non-login serve shell otherwise can't
                 # find the `vllm` CLI ("command not found"). Mirrors llama.cpp above.
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append('if ! command -v vllm &>/dev/null; then')
+                runner_lines.append("if ! command -v vllm &>/dev/null; then")
                 runner_lines.append('  echo "ERROR: vLLM is not installed."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('fi')
+                runner_lines.append("  ODYSSEUS_PREFLIGHT_EXIT=127")
+                runner_lines.append("fi")
                 runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
                 runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
                 runner_lines.append('  ODYSSEUS_VLLM_HELP_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
-                runner_lines.append('import shlex, sys')
-                runner_lines.append('parts = shlex.split(sys.argv[1])')
-                runner_lines.append('try:')
+                runner_lines.append("import shlex, sys")
+                runner_lines.append("parts = shlex.split(sys.argv[1])")
+                runner_lines.append("try:")
                 runner_lines.append('    serve_i = parts.index("serve")')
-                runner_lines.append('except ValueError:')
+                runner_lines.append("except ValueError:")
                 runner_lines.append('    print("vllm serve --help")')
-                runner_lines.append('else:')
+                runner_lines.append("else:")
                 runner_lines.append('    print(shlex.join(parts[:serve_i + 1] + ["--help"]))')
-                runner_lines.append('PY')
+                runner_lines.append("PY")
                 runner_lines.append(')"')
-                runner_lines.append('  ODYSSEUS_VLLM_SUPPORTS_SWAP=0')
-                runner_lines.append('  if eval "$ODYSSEUS_VLLM_HELP_CMD" 2>&1 | grep -q -- "--swap-space"; then ODYSSEUS_VLLM_SUPPORTS_SWAP=1; fi')
-                runner_lines.append('fi')
-                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ] && [ "${ODYSSEUS_VLLM_SUPPORTS_SWAP:-0}" = "1" ] && ! printf "%s" "$ODYSSEUS_SERVE_CMD" | grep -q -- "--swap-space"; then')
-                runner_lines.append('  echo "[odysseus] Setting vLLM --swap-space 0 so the runtime does not reserve CPU swap per GPU."')
+                runner_lines.append("  ODYSSEUS_VLLM_SUPPORTS_SWAP=0")
+                runner_lines.append(
+                    '  if eval "$ODYSSEUS_VLLM_HELP_CMD" 2>&1 | grep -q -- "--swap-space"; then ODYSSEUS_VLLM_SUPPORTS_SWAP=1; fi'
+                )
+                runner_lines.append("fi")
+                runner_lines.append(
+                    'if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ] && [ "${ODYSSEUS_VLLM_SUPPORTS_SWAP:-0}" = "1" ] && ! printf "%s" "$ODYSSEUS_SERVE_CMD" | grep -q -- "--swap-space"; then'
+                )
+                runner_lines.append(
+                    '  echo "[odysseus] Setting vLLM --swap-space 0 so the runtime does not reserve CPU swap per GPU."'
+                )
                 runner_lines.append('  ODYSSEUS_SERVE_CMD="${ODYSSEUS_SERVE_CMD} --swap-space 0"')
-                runner_lines.append('fi')
-                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ] && [ "${ODYSSEUS_VLLM_SUPPORTS_SWAP:-0}" != "1" ]; then')
+                runner_lines.append("fi")
+                runner_lines.append(
+                    'if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ] && [ "${ODYSSEUS_VLLM_SUPPORTS_SWAP:-0}" != "1" ]; then'
+                )
                 runner_lines.append('  if printf "%s" "$ODYSSEUS_SERVE_CMD" | grep -q -- "--swap-space"; then')
-                runner_lines.append('    echo "[odysseus] vLLM serve does not expose --swap-space; removing the flag and patching the runtime default to 0."')
+                runner_lines.append(
+                    '    echo "[odysseus] vLLM serve does not expose --swap-space; removing the flag and patching the runtime default to 0."'
+                )
                 runner_lines.append('    ODYSSEUS_SERVE_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
-                runner_lines.append('import shlex, sys')
-                runner_lines.append('parts = shlex.split(sys.argv[1])')
-                runner_lines.append('out = []')
-                runner_lines.append('skip = False')
-                runner_lines.append('for part in parts:')
-                runner_lines.append('    if skip:')
-                runner_lines.append('        skip = False')
-                runner_lines.append('        continue')
+                runner_lines.append("import shlex, sys")
+                runner_lines.append("parts = shlex.split(sys.argv[1])")
+                runner_lines.append("out = []")
+                runner_lines.append("skip = False")
+                runner_lines.append("for part in parts:")
+                runner_lines.append("    if skip:")
+                runner_lines.append("        skip = False")
+                runner_lines.append("        continue")
                 runner_lines.append('    if part == "--swap-space":')
-                runner_lines.append('        skip = True')
-                runner_lines.append('        continue')
+                runner_lines.append("        skip = True")
+                runner_lines.append("        continue")
                 runner_lines.append('    if part.startswith("--swap-space="):')
-                runner_lines.append('        continue')
-                runner_lines.append('    out.append(part)')
-                runner_lines.append('print(shlex.join(out))')
-                runner_lines.append('PY')
+                runner_lines.append("        continue")
+                runner_lines.append("    out.append(part)")
+                runner_lines.append("print(shlex.join(out))")
+                runner_lines.append("PY")
                 runner_lines.append(')"')
-                runner_lines.append('  fi')
+                runner_lines.append("  fi")
                 runner_lines.append('  ODYSSEUS_SERVE_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
-                runner_lines.append('import shlex, sys')
-                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append("import shlex, sys")
+                runner_lines.append("parts = shlex.split(sys.argv[1])")
                 runner_lines.append('patch = r"""import inspect, sys')
-                runner_lines.append('from vllm.engine.arg_utils import EngineArgs, AsyncEngineArgs')
-                runner_lines.append('def _odysseus_swap0(cls):')
-                runner_lines.append('    params = list(inspect.signature(cls).parameters)')
+                runner_lines.append("from vllm.engine.arg_utils import EngineArgs, AsyncEngineArgs")
+                runner_lines.append("def _odysseus_swap0(cls):")
+                runner_lines.append("    params = list(inspect.signature(cls).parameters)")
                 runner_lines.append('    if "swap_space" not in params:')
-                runner_lines.append('        return')
+                runner_lines.append("        return")
                 runner_lines.append('    idx = params.index("swap_space")')
-                runner_lines.append('    defaults = list(cls.__init__.__defaults__ or ())')
-                runner_lines.append('    if idx < len(defaults):')
-                runner_lines.append('        defaults[idx] = 0')
-                runner_lines.append('        cls.__init__.__defaults__ = tuple(defaults)')
+                runner_lines.append("    defaults = list(cls.__init__.__defaults__ or ())")
+                runner_lines.append("    if idx < len(defaults):")
+                runner_lines.append("        defaults[idx] = 0")
+                runner_lines.append("        cls.__init__.__defaults__ = tuple(defaults)")
                 runner_lines.append('    fields = getattr(cls, "__dataclass_fields__", {})')
                 runner_lines.append('    if "swap_space" in fields:')
                 runner_lines.append('        fields["swap_space"].default = 0')
-                runner_lines.append('_odysseus_swap0(EngineArgs)')
-                runner_lines.append('_odysseus_swap0(AsyncEngineArgs)')
-                runner_lines.append('try:')
-                runner_lines.append('    from vllm.config import CacheConfig')
-                runner_lines.append('    CacheConfig.swap_space = 0')
-                runner_lines.append('except Exception:')
-                runner_lines.append('    pass')
-                runner_lines.append('_orig_create_engine_config = EngineArgs.create_engine_config')
-                runner_lines.append('def _odysseus_create_engine_config(self, *args, **kwargs):')
-                runner_lines.append('    self.swap_space = 0')
-                runner_lines.append('    return _orig_create_engine_config(self, *args, **kwargs)')
-                runner_lines.append('EngineArgs.create_engine_config = _odysseus_create_engine_config')
-                runner_lines.append('AsyncEngineArgs.create_engine_config = _odysseus_create_engine_config')
-                runner_lines.append('from vllm.entrypoints.cli.main import main')
+                runner_lines.append("_odysseus_swap0(EngineArgs)")
+                runner_lines.append("_odysseus_swap0(AsyncEngineArgs)")
+                runner_lines.append("try:")
+                runner_lines.append("    from vllm.config import CacheConfig")
+                runner_lines.append("    CacheConfig.swap_space = 0")
+                runner_lines.append("except Exception:")
+                runner_lines.append("    pass")
+                runner_lines.append("_orig_create_engine_config = EngineArgs.create_engine_config")
+                runner_lines.append("def _odysseus_create_engine_config(self, *args, **kwargs):")
+                runner_lines.append("    self.swap_space = 0")
+                runner_lines.append("    return _orig_create_engine_config(self, *args, **kwargs)")
+                runner_lines.append("EngineArgs.create_engine_config = _odysseus_create_engine_config")
+                runner_lines.append("AsyncEngineArgs.create_engine_config = _odysseus_create_engine_config")
+                runner_lines.append("from vllm.entrypoints.cli.main import main")
                 runner_lines.append('sys.exit(main())"""')
-                runner_lines.append('try:')
+                runner_lines.append("try:")
                 runner_lines.append('    serve_i = parts.index("serve")')
-                runner_lines.append('except ValueError:')
-                runner_lines.append('    print(shlex.join(parts))')
-                runner_lines.append('else:')
-                runner_lines.append('    exe_i = serve_i - 1')
+                runner_lines.append("except ValueError:")
+                runner_lines.append("    print(shlex.join(parts))")
+                runner_lines.append("else:")
+                runner_lines.append("    exe_i = serve_i - 1")
                 runner_lines.append('    exe = parts[exe_i] if exe_i >= 0 else "vllm"')
                 runner_lines.append('    py = "python3"')
                 runner_lines.append('    if exe.endswith("/bin/vllm"):')
                 runner_lines.append('        py = exe[:-len("/bin/vllm")] + "/bin/python"')
                 runner_lines.append('    parts[exe_i:serve_i] = [py, "-c", patch]')
-                runner_lines.append('    print(shlex.join(parts))')
-                runner_lines.append('PY')
+                runner_lines.append("    print(shlex.join(parts))")
+                runner_lines.append("PY")
                 runner_lines.append(')"')
-                runner_lines.append('  echo "[odysseus] Patched vLLM internal swap_space default to 0 for this runtime."')
-                runner_lines.append('fi')
+                runner_lines.append(
+                    '  echo "[odysseus] Patched vLLM internal swap_space default to 0 for this runtime."'
+                )
+                runner_lines.append("fi")
             elif "sglang.launch_server" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append('if ! command -v sglang &>/dev/null; then')
+                runner_lines.append("if ! command -v sglang &>/dev/null; then")
                 runner_lines.append('  echo "ERROR: SGLang is not installed."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append("  ODYSSEUS_PREFLIGHT_EXIT=127")
                 runner_lines.append('elif ! ODYSSEUS_SGLANG_IMPORT_ERROR="$(python3 -c "import sglang" 2>&1)"; then')
                 runner_lines.append('  echo "ERROR: SGLang is installed but failed to import."')
                 runner_lines.append('  printf "%s\\n" "$ODYSSEUS_SGLANG_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('fi')
+                runner_lines.append("  ODYSSEUS_PREFLIGHT_EXIT=127")
+                runner_lines.append("fi")
             elif "scripts/diffusion_server.py" in req.cmd or ".diffusion_server.py" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$(python3 -c "import torch, diffusers" 2>&1)"; then')
+                runner_lines.append(
+                    'if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$(python3 -c "import torch, diffusers" 2>&1)"; then'
+                )
                 runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + diffusers."')
                 runner_lines.append('  printf "%s\\n" "$ODYSSEUS_DIFFUSION_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('fi')
+                runner_lines.append("  ODYSSEUS_PREFLIGHT_EXIT=127")
+                runner_lines.append("fi")
 
             handled_ollama_sidecar_probe = False
-            if (not handled_ollama_serve
-                and re.search(r"\bdocker\s+exec\s+(?:ollama-rocm|ollama-test)\s+ollama\s+show\b", req.cmd or "")):
+            if not handled_ollama_serve and re.search(
+                r"\bdocker\s+exec\s+(?:ollama-rocm|ollama-test)\s+ollama\s+show\b", req.cmd or ""
+            ):
                 handled_ollama_sidecar_probe = True
                 _append_serve_preflight_exit_lines(
                     runner_lines,
                     keep_shell_open=not local_windows,
                 )
                 runner_lines.append(req.cmd)
-                runner_lines.append('_ody_exit=$?')
-                runner_lines.append('echo')
+                runner_lines.append("_ody_exit=$?")
+                runner_lines.append("echo")
                 runner_lines.append('echo "=== Process exited with code ${_ody_exit} ==="')
                 runner_lines.append('if [ "$_ody_exit" -eq 0 ]; then')
-                runner_lines.append('  echo "[odysseus] Ollama sidecar model is available; keeping Cookbook task attached to the persistent Ollama daemon."')
-                runner_lines.append('  while true; do sleep 3600; done')
-                runner_lines.append('fi')
-                runner_lines.append('exec bash -i')
+                runner_lines.append(
+                    '  echo "[odysseus] Ollama sidecar model is available; keeping Cookbook task attached to the persistent Ollama daemon."'
+                )
+                runner_lines.append("  while true; do sleep 3600; done")
+                runner_lines.append("fi")
+                runner_lines.append("exec bash -i")
 
             if not handled_ollama_serve and not handled_ollama_sidecar_probe:
                 _append_serve_preflight_exit_lines(
@@ -1827,6 +2097,7 @@ def setup_cookbook_routes() -> APIRouter:
                 _pf = f"-p {_port} " if _port and _port != "22" else ""
                 if "scripts/diffusion_server.py" in req.cmd:
                     from core.constants import BASE_DIR
+
                     diff_script = Path(BASE_DIR) / "scripts" / "diffusion_server.py"
                     if diff_script.exists():
                         scp_extras = f"scp -O {_Pf}-q '{diff_script}' {remote}:.diffusion_server.py && "
@@ -1886,18 +2157,21 @@ def setup_cookbook_routes() -> APIRouter:
         # created. Skipped for diffusion (different image-endpoint cleanup
         # path) and pip-install tasks (no endpoint to drop).
         if endpoint_id and not is_diffusion and not is_pip_install:
-            asyncio.create_task(_serve_crash_watchdog(
-                endpoint_id=endpoint_id,
-                session_id=session_id,
-                remote=remote,
-                ssh_port=req.ssh_port,
-                is_windows=is_windows,
-            ))
+            asyncio.create_task(
+                _serve_crash_watchdog(
+                    endpoint_id=endpoint_id,
+                    session_id=session_id,
+                    remote=remote,
+                    ssh_port=req.ssh_port,
+                    is_windows=is_windows,
+                )
+            )
 
         # Log to assistant
         try:
             from src.assistant_log import log_to_assistant
             from src.auth_helpers import get_current_user
+
             owner = get_current_user(request)
             short = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
             log_to_assistant(
@@ -1908,8 +2182,7 @@ def setup_cookbook_routes() -> APIRouter:
         except Exception:
             pass
 
-        return {"ok": True, "session_id": session_id, "remote": remote or "local",
-                "endpoint_id": endpoint_id}
+        return {"ok": True, "session_id": session_id, "remote": remote or "local", "endpoint_id": endpoint_id}
 
     # ── Server setup (install deps on remote) ──
 
@@ -1961,7 +2234,7 @@ def setup_cookbook_routes() -> APIRouter:
                 "python -c \\\"from huggingface_hub import snapshot_download; print('OK')\\\""
                 '"'
             )
-            cmd = f'ssh {pf}{host} {setup_script}'
+            cmd = f"ssh {pf}{host} {setup_script}"
         elif platform == "termux":
             setup_script = (
                 "pkg install -y python tmux 2>/dev/null; "
@@ -2001,7 +2274,7 @@ def setup_cookbook_routes() -> APIRouter:
             output = stdout.decode() + stderr.decode()
             ok = "OK" in output
             return {"ok": ok, "output": output.strip(), "platform": platform}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"ok": False, "error": "Setup timed out (120s)", "platform": platform}
         except Exception as e:
             return {"ok": False, "error": str(e), "platform": platform}
@@ -2019,11 +2292,12 @@ def setup_cookbook_routes() -> APIRouter:
         else:
             proc = await asyncio.create_subprocess_exec(
                 *shlex.split(query),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             return None, "nvidia-smi timed out"
         if proc.returncode != 0:
@@ -2052,7 +2326,7 @@ def setup_cookbook_routes() -> APIRouter:
             )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             return None, "GPU probe timed out"
         if proc.returncode != 0:
@@ -2103,11 +2377,13 @@ def setup_cookbook_routes() -> APIRouter:
         # prefix logic — it would emit `HIP_VISIBLE_DEVICES=` for a
         # Vulkan-only stack, which is a silent no-op at best.
         rt_out, _ = await _run_gpu_shell(
-            'command -v rocminfo >/dev/null 2>&1 && echo rocm '
-            '|| (command -v hipconfig >/dev/null 2>&1 && echo rocm) '
-            '|| (command -v vulkaninfo >/dev/null 2>&1 && echo vulkan) '
-            '|| echo unknown',
-            host, ssh_port, timeout=4,
+            "command -v rocminfo >/dev/null 2>&1 && echo rocm "
+            "|| (command -v hipconfig >/dev/null 2>&1 && echo rocm) "
+            "|| (command -v vulkaninfo >/dev/null 2>&1 && echo vulkan) "
+            "|| echo unknown",
+            host,
+            ssh_port,
+            timeout=4,
         )
         _amd_runtime = (rt_out or "").strip().splitlines()[-1:][0].strip() if rt_out else "rocm"
         if _amd_runtime not in ("rocm", "vulkan"):
@@ -2152,15 +2428,26 @@ def setup_cookbook_routes() -> APIRouter:
             # VRAM into RAM over PCIe — much slower. Surface it so the UI can
             # warn "spilling to RAM" instead of the user wondering why it's slow.
             gtt_used_raw = await _gpu_read_file(f"{base}/mem_info_gtt_used", host, ssh_port)
-            gtt_used_mb = max(0, int(int(gtt_used_raw) / (1024 * 1024))) if (gtt_used_raw and gtt_used_raw.isdigit()) else 0
-            gpus.append({
-                "index": len(gpus), "name": name, "uuid": entry,
-                "free_mb": free_mb, "total_mb": total_mb, "used_mb": used_mb,
-                "gtt_used_mb": gtt_used_mb,
-                "util_pct": 0, "busy": bool(total_mb and (free_mb / total_mb) < 0.85),
-                "processes": [], "backend": _amd_runtime, "source": "amd-sysfs",
-                "unified_memory": unified,
-            })
+            gtt_used_mb = (
+                max(0, int(int(gtt_used_raw) / (1024 * 1024))) if (gtt_used_raw and gtt_used_raw.isdigit()) else 0
+            )
+            gpus.append(
+                {
+                    "index": len(gpus),
+                    "name": name,
+                    "uuid": entry,
+                    "free_mb": free_mb,
+                    "total_mb": total_mb,
+                    "used_mb": used_mb,
+                    "gtt_used_mb": gtt_used_mb,
+                    "util_pct": 0,
+                    "busy": bool(total_mb and (free_mb / total_mb) < 0.85),
+                    "processes": [],
+                    "backend": _amd_runtime,
+                    "source": "amd-sysfs",
+                    "unified_memory": unified,
+                }
+            )
         if gpus:
             processes = await _probe_gpu_device_processes(host, ssh_port)
             if processes:
@@ -2222,15 +2509,24 @@ def setup_cookbook_routes() -> APIRouter:
                 continue
             busy = total_mb > 0 and (free_mb / total_mb) < 0.5
             uuid_to_idx[gpu_uuid] = idx
-            gpus.append({
-                "index": idx, "name": name, "uuid": gpu_uuid,
-                "free_mb": free_mb, "total_mb": total_mb,
-                "used_mb": used_mb, "util_pct": util_pct,
-                "busy": busy, "processes": [],
-            })
+            gpus.append(
+                {
+                    "index": idx,
+                    "name": name,
+                    "uuid": gpu_uuid,
+                    "free_mb": free_mb,
+                    "total_mb": total_mb,
+                    "used_mb": used_mb,
+                    "util_pct": util_pct,
+                    "busy": busy,
+                    "processes": [],
+                }
+            )
 
         # Best-effort process listing — skip silently if it fails
-        proc_query = "nvidia-smi --query-compute-apps=pid,gpu_uuid,process_name,used_memory --format=csv,noheader,nounits"
+        proc_query = (
+            "nvidia-smi --query-compute-apps=pid,gpu_uuid,process_name,used_memory --format=csv,noheader,nounits"
+        )
         try:
             proc_out, proc_err = await _run_nvidia_smi(proc_query, host, ssh_port, timeout=5)
             if proc_err is None and proc_out:
@@ -2248,9 +2544,13 @@ def setup_cookbook_routes() -> APIRouter:
                     idx = uuid_to_idx.get(parts[1])
                     if idx is None or idx not in gpus_by_idx:
                         continue
-                    gpus_by_idx[idx]["processes"].append({
-                        "pid": pid, "name": pname, "used_mb": pmem,
-                    })
+                    gpus_by_idx[idx]["processes"].append(
+                        {
+                            "pid": pid,
+                            "name": pname,
+                            "used_mb": pmem,
+                        }
+                    )
         except Exception:
             pass
 
@@ -2265,6 +2565,7 @@ def setup_cookbook_routes() -> APIRouter:
         if not host and sys.platform == "darwin":
             try:
                 from services.hwfit.hardware import detect_system
+
                 info = detect_system(fresh=True)
                 backend = str(info.get("backend") or "").lower()
                 if backend in {"metal", "mps", "apple"} and info.get("gpu_count", 0) > 0:
@@ -2275,20 +2576,22 @@ def setup_cookbook_routes() -> APIRouter:
                     used_mb = max(0, total_mb - max(0, free_mb))
                     return {
                         "ok": True,
-                        "gpus": [{
-                            "index": 0,
-                            "name": info.get("gpu_name") or info.get("cpu_name") or "Apple Silicon GPU",
-                            "uuid": "apple-metal-0",
-                            "free_mb": max(0, free_mb),
-                            "total_mb": max(0, total_mb),
-                            "used_mb": used_mb,
-                            "util_pct": 0,
-                            "busy": bool(total_mb and (free_mb / total_mb) < 0.5),
-                            "processes": [],
-                            "backend": "metal",
-                            "source": "apple-metal",
-                            "unified_memory": True,
-                        }],
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": info.get("gpu_name") or info.get("cpu_name") or "Apple Silicon GPU",
+                                "uuid": "apple-metal-0",
+                                "free_mb": max(0, free_mb),
+                                "total_mb": max(0, total_mb),
+                                "used_mb": used_mb,
+                                "util_pct": 0,
+                                "busy": bool(total_mb and (free_mb / total_mb) < 0.5),
+                                "processes": [],
+                                "backend": "metal",
+                                "source": "apple-metal",
+                                "unified_memory": True,
+                            }
+                        ],
                         "backend": "metal",
                         "source": "apple-metal",
                         "fallback_from": "nvidia-smi",
@@ -2317,12 +2620,21 @@ def setup_cookbook_routes() -> APIRouter:
         if processes:
             return {
                 "ok": True,
-                "gpus": [{
-                    "index": 0, "name": "GPU device holders", "uuid": "dev-dri",
-                    "free_mb": 0, "total_mb": 0, "used_mb": 0, "util_pct": 0,
-                    "busy": True, "processes": processes,
-                    "backend": "generic", "source": "gpu-devices",
-                }],
+                "gpus": [
+                    {
+                        "index": 0,
+                        "name": "GPU device holders",
+                        "uuid": "dev-dri",
+                        "free_mb": 0,
+                        "total_mb": 0,
+                        "used_mb": 0,
+                        "util_pct": 0,
+                        "busy": True,
+                        "processes": processes,
+                        "backend": "generic",
+                        "source": "gpu-devices",
+                    }
+                ],
                 "backend": "generic",
                 "source": "gpu-devices",
                 "fallback_from": "nvidia-smi",
@@ -2373,15 +2685,18 @@ def setup_cookbook_routes() -> APIRouter:
                 return {"ok": True, "pid": req.pid, "signal": sig}
             else:
                 proc = await asyncio.create_subprocess_exec(
-                    "kill", f"-{sig}", str(req.pid),
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    "kill",
+                    f"-{sig}",
+                    str(req.pid),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
             if proc.returncode != 0:
                 err = (stderr.decode("utf-8", errors="replace") or "").strip()[:200]
                 return {"ok": False, "error": err or f"kill returned {proc.returncode}"}
             return {"ok": True, "pid": req.pid, "signal": sig}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"ok": False, "error": "kill command timed out"}
         except Exception as e:
             return {"ok": False, "error": str(e)[:200]}
@@ -2396,8 +2711,8 @@ def setup_cookbook_routes() -> APIRouter:
             try:
                 return _state_for_client(json.loads(_cookbook_state_path.read_text(encoding="utf-8")))
             except Exception:
-                return {}
-        return {}
+                return _state_for_client({})
+        return _state_for_client({})
 
     @router.post("/api/cookbook/state")
     async def save_cookbook_state(request: Request):
@@ -2418,6 +2733,7 @@ def setup_cookbook_routes() -> APIRouter:
         RACE_WINDOW_MS = 60_000
         try:
             from core.atomic_io import atomic_write_json
+
             data = await request.json()
             if not isinstance(data, dict):
                 data = {}
@@ -2435,27 +2751,36 @@ def setup_cookbook_routes() -> APIRouter:
             # saved servers on disk. Never let an empty/absent incoming
             # env.servers clobber a populated on-disk one — preserve the disk
             # values while still accepting the rest of the incoming env.
-            disk_env = on_disk.get("env") if isinstance(on_disk, dict) and isinstance(on_disk.get("env"), dict) else None
+            disk_env = (
+                on_disk.get("env") if isinstance(on_disk, dict) and isinstance(on_disk.get("env"), dict) else None
+            )
             if disk_env:
                 inc_env = data.get("env") if isinstance(data.get("env"), dict) else None
                 if inc_env is None:
                     data["env"] = disk_env
-                    logger.warning("cookbook state POST: incoming body had no env; preserved on-disk env (anti-wipe guard)")
+                    logger.warning(
+                        "cookbook state POST: incoming body had no env; preserved on-disk env (anti-wipe guard)"
+                    )
                 elif disk_env.get("servers") and not inc_env.get("servers"):
                     inc_env["servers"] = disk_env["servers"]
-                    logger.warning("cookbook state POST: incoming env.servers empty; preserved on-disk servers (anti-wipe guard)")
+                    logger.warning(
+                        "cookbook state POST: incoming env.servers empty; preserved on-disk servers (anti-wipe guard)"
+                    )
 
             disk_tasks = on_disk.get("tasks") or [] if isinstance(on_disk, dict) else []
             incoming_tasks = data.get("tasks") if isinstance(data.get("tasks"), list) else []
             incoming_removed = data.get("removedTasks") if isinstance(data.get("removedTasks"), dict) else {}
-            disk_removed = on_disk.get("removedTasks") if isinstance(on_disk, dict) and isinstance(on_disk.get("removedTasks"), dict) else {}
+            disk_removed = (
+                on_disk.get("removedTasks")
+                if isinstance(on_disk, dict) and isinstance(on_disk.get("removedTasks"), dict)
+                else {}
+            )
             removed_tasks = {**disk_removed, **incoming_removed}
             data["removedTasks"] = removed_tasks
             removed_ids = set(removed_tasks.keys())
             if removed_ids:
                 incoming_tasks = [
-                    t for t in incoming_tasks
-                    if not (isinstance(t, dict) and t.get("sessionId") in removed_ids)
+                    t for t in incoming_tasks if not (isinstance(t, dict) and t.get("sessionId") in removed_ids)
                 ]
                 data["tasks"] = incoming_tasks
             # Anti-poisoning guard: a stale browser tab can keep POSTing a
@@ -2465,6 +2790,7 @@ def setup_cookbook_routes() -> APIRouter:
             # shard pattern says N<total AND no DOWNLOAD_OK/DOWNLOAD_FAILED/
             # /snapshots/ sentinel is in the output.
             import re as _re_dl
+
             for _it in incoming_tasks:
                 if (not isinstance(_it, dict)) or _it.get("type") != "download" or _it.get("status") != "done":
                     continue
@@ -2475,18 +2801,23 @@ def setup_cookbook_routes() -> APIRouter:
                 if _shards:
                     _n, _tot = _shards[-1]
                     if int(_n) < int(_tot):
-                        logger.info(f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
-                                    f"(last shard {_n}/{_tot}, no DOWNLOAD_OK)")
+                        logger.info(
+                            f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
+                            f"(last shard {_n}/{_tot}, no DOWNLOAD_OK)"
+                        )
                         _it["status"] = "running"
                 else:
                     _completed = _out.count("Download complete")
                     _starts = _out.count("Downloading '")
                     if _starts > _completed:
-                        logger.info(f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
-                                    f"({_completed}/{_starts} files complete, no DOWNLOAD_OK)")
+                        logger.info(
+                            f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
+                            f"({_completed}/{_starts} files complete, no DOWNLOAD_OK)"
+                        )
                         _it["status"] = "running"
             incoming_ids = {t.get("sessionId") for t in incoming_tasks if isinstance(t, dict) and t.get("sessionId")}
             import time as _t
+
             now_ms = int(_t.time() * 1000)
             preserved = []
             for t in disk_tasks:
@@ -2501,9 +2832,11 @@ def setup_cookbook_routes() -> APIRouter:
                 if isinstance(ts, (int, float)) and (now_ms - ts) <= RACE_WINDOW_MS:
                     preserved.append(t)
             if preserved:
-                logger.info(f"cookbook state POST: preserving {len(preserved)} recent task(s) "
-                            f"not in incoming body (race guard): "
-                            f"{[t.get('sessionId') for t in preserved]}")
+                logger.info(
+                    f"cookbook state POST: preserving {len(preserved)} recent task(s) "
+                    f"not in incoming body (race guard): "
+                    f"{[t.get('sessionId') for t in preserved]}"
+                )
                 data["tasks"] = incoming_tasks + preserved
             atomic_write_json(str(_cookbook_state_path), _state_for_storage(data, on_disk), indent=2)
             return {"ok": True, "preserved": len(preserved)}
@@ -2511,7 +2844,9 @@ def setup_cookbook_routes() -> APIRouter:
             return {"ok": False, "error": str(e)}
 
     @router.get("/api/cookbook/hf-latest")
-    async def hf_latest(vram_gb: float = 0, limit: int = 10, pipeline: str = "text-generation", owner: str = Depends(require_user)):
+    async def hf_latest(
+        vram_gb: float = 0, limit: int = 10, pipeline: str = "text-generation", owner: str = Depends(require_user)
+    ):
         """Fetch latest HuggingFace models, filtered by what fits in available VRAM.
 
         vram_gb: total available VRAM in GB. 0 = no filter (return everything).
@@ -2519,14 +2854,12 @@ def setup_cookbook_routes() -> APIRouter:
         pipeline: HF pipeline_tag filter (text-generation, text-to-image, etc.).
         """
         import re
+
         import httpx
 
         # Fetch a larger pool so we have enough to filter from (we drop ~80%)
         pool_size = max(limit * 15, 100)
-        url = (
-            "https://huggingface.co/api/models"
-            f"?sort=trendingScore&direction=-1&limit={pool_size}&filter={pipeline}"
-        )
+        url = f"https://huggingface.co/api/models?sort=trendingScore&direction=-1&limit={pool_size}&filter={pipeline}"
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(url)
@@ -2539,7 +2872,7 @@ def setup_cookbook_routes() -> APIRouter:
         # Estimate VRAM from the model id. Looks for patterns like "7B", "70B", "1.5B" etc.
         # Returns approx VRAM in GB at fp16 (params*2). Caller adjusts for quant.
         def _est_vram_fp16(repo_id: str) -> float | None:
-            m = re.search(r'[-_/](\d+(?:\.\d+)?)\s*[Bb](?![a-zA-Z])', repo_id)
+            m = re.search(r"[-_/](\d+(?:\.\d+)?)\s*[Bb](?![a-zA-Z])", repo_id)
             if not m:
                 return None
             params_b = float(m.group(1))
@@ -2548,7 +2881,15 @@ def setup_cookbook_routes() -> APIRouter:
         # Detect quantization from repo_id / tags. Returns a multiplier on fp16 size.
         def _quant_factor(repo_id: str, tags: list) -> float:
             text = (repo_id + " " + " ".join(tags or [])).lower()
-            if "fp4" in text or "nf4" in text or "int4" in text or "4bit" in text or "q4" in text or "awq" in text or "gptq" in text:
+            if (
+                "fp4" in text
+                or "nf4" in text
+                or "int4" in text
+                or "4bit" in text
+                or "q4" in text
+                or "awq" in text
+                or "gptq" in text
+            ):
                 return 0.25
             if "int8" in text or "8bit" in text or "q8" in text or "fp8" in text:
                 return 0.5
@@ -2558,16 +2899,28 @@ def setup_cookbook_routes() -> APIRouter:
 
         # Exclude adapters, LoRAs, datasets, GGUF-only repos, and other non-runnable artifacts
         EXCLUDE_TAG_SUBSTRINGS = (
-            "lora", "adapter", "peft", "qlora",
-            "dataset", "embeddings",
-            "merge", "control-lora",
-            "diffusion-lora", "stable-diffusion-lora",
-            "text-classification", "token-classification",
-            "feature-extraction", "sentence-similarity",
+            "lora",
+            "adapter",
+            "peft",
+            "qlora",
+            "dataset",
+            "embeddings",
+            "merge",
+            "control-lora",
+            "diffusion-lora",
+            "stable-diffusion-lora",
+            "text-classification",
+            "token-classification",
+            "feature-extraction",
+            "sentence-similarity",
         )
         EXCLUDE_NAME_SUBSTRINGS = (
-            "lora", "adapter", "peft", "qlora",
-            "embedding", "embed-",
+            "lora",
+            "adapter",
+            "peft",
+            "qlora",
+            "embedding",
+            "embed-",
             "dataset",
         )
 
@@ -2612,16 +2965,18 @@ def setup_cookbook_routes() -> APIRouter:
                 if needed_vram > vram_gb:
                     continue
 
-            out.append({
-                "repo_id": repo_id,
-                "downloads": entry.get("downloads", 0),
-                "likes": entry.get("likes", 0),
-                "createdAt": entry.get("createdAt", ""),
-                "tags": tags[:5],  # trim
-                "pipeline_tag": pipeline_tag,
-                "est_vram_gb": round(est_vram, 1) if est_vram else None,
-                "needed_vram_gb": round(needed_vram, 1) if needed_vram else None,
-            })
+            out.append(
+                {
+                    "repo_id": repo_id,
+                    "downloads": entry.get("downloads", 0),
+                    "likes": entry.get("likes", 0),
+                    "createdAt": entry.get("createdAt", ""),
+                    "tags": tags[:5],  # trim
+                    "pipeline_tag": pipeline_tag,
+                    "est_vram_gb": round(est_vram, 1) if est_vram else None,
+                    "needed_vram_gb": round(needed_vram, 1) if needed_vram else None,
+                }
+            )
             if len(out) >= limit:
                 break
 
@@ -2645,6 +3000,7 @@ def setup_cookbook_routes() -> APIRouter:
         the event loop and a slower (60s) cadence.
         """
         import time as _time
+
         now = _time.monotonic()
         if _orphan_sweep_inflight[0]:
             return
@@ -2662,6 +3018,7 @@ def setup_cookbook_routes() -> APIRouter:
         # Caller is _cookbook_tasks_status_sync (sync context, no event
         # loop). Use a plain background thread — no asyncio needed.
         import threading
+
         def _run_sweep() -> None:
             try:
                 _sync_sweep_orphans(tasks_snap, state_snap)
@@ -2669,6 +3026,7 @@ def setup_cookbook_routes() -> APIRouter:
                 logger.warning(f"orphan sweep thread failed: {_e!r}")
             finally:
                 _orphan_sweep_inflight[0] = False
+
         try:
             threading.Thread(target=_run_sweep, daemon=True, name="orphan-sweep").start()
         except Exception as _e:
@@ -2679,16 +3037,16 @@ def setup_cookbook_routes() -> APIRouter:
     def _sync_sweep_orphans(tasks: list, state: dict) -> None:
         """The actual sync sweep — never call this on the event loop."""
         import subprocess
+
         env = state.get("env") if isinstance(state, dict) else {}
         servers = env.get("servers") if isinstance(env, dict) else []
-        logger.info(f"orphan sweep starting: {len(servers) if isinstance(servers, list) else 0} server(s), known_sids={len([t for t in tasks if isinstance(t, dict) and t.get('sessionId')])}")
+        logger.info(
+            f"orphan sweep starting: {len(servers) if isinstance(servers, list) else 0} server(s), known_sids={len([t for t in tasks if isinstance(t, dict) and t.get('sessionId')])}"
+        )
         if not isinstance(servers, list):
             return
 
-        known_sids = {
-            t.get("sessionId") for t in tasks
-            if isinstance(t, dict) and t.get("sessionId")
-        }
+        known_sids = {t.get("sessionId") for t in tasks if isinstance(t, dict) and t.get("sessionId")}
 
         adopted_any = False
         for srv in servers:
@@ -2714,7 +3072,10 @@ def setup_cookbook_routes() -> APIRouter:
             try:
                 ls = subprocess.run(
                     ssh_base + [host, "tmux ls 2>/dev/null"],
-                    timeout=6, capture_output=True, text=True,
+                    timeout=6,
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
             except Exception:
                 continue
@@ -2738,16 +3099,27 @@ def setup_cookbook_routes() -> APIRouter:
                 # real model serves leave a python/vllm/etc. process there.
                 try:
                     pc = subprocess.run(
-                        ssh_base + [host, "tmux", "list-panes", "-t", sid,
-                                    "-F", "#{pane_current_command}"],
-                        timeout=4, capture_output=True, text=True,
+                        ssh_base + [host, "tmux", "list-panes", "-t", sid, "-F", "#{pane_current_command}"],
+                        timeout=4,
+                        capture_output=True,
+                        text=True,
+                        check=False,
                     )
                     cur = (pc.stdout or "").strip().splitlines()
                 except Exception:
                     cur = []
-                LIVE_PROCS = {"python", "python3", "vllm", "llama-server",
-                              "llama_cpp_main", "sglang", "lmdeploy",
-                              "ollama", "node", "uvicorn"}
+                LIVE_PROCS = {
+                    "python",
+                    "python3",
+                    "vllm",
+                    "llama-server",
+                    "llama_cpp_main",
+                    "sglang",
+                    "lmdeploy",
+                    "ollama",
+                    "node",
+                    "uvicorn",
+                }
                 if not any(c in LIVE_PROCS for c in cur):
                     continue
                 # Try to recover a plausible repo_id + port from the
@@ -2756,12 +3128,16 @@ def setup_cookbook_routes() -> APIRouter:
                 try:
                     cap = subprocess.run(
                         ssh_base + [host, "tmux", "capture-pane", "-t", sid, "-p", "-S", "-300"],
-                        timeout=6, capture_output=True, text=True,
+                        timeout=6,
+                        capture_output=True,
+                        text=True,
+                        check=False,
                     )
                     pane = cap.stdout or ""
                 except Exception:
                     pane = ""
                 import re as _re_orphan
+
                 # vLLM banner: "model   /path/...". Falls back to the
                 # raw vllm-serve command if the banner already scrolled.
                 m_model = _re_orphan.search(r"model\s+(\S+)", pane)
@@ -2773,28 +3149,30 @@ def setup_cookbook_routes() -> APIRouter:
                 port = int(m_port.group(1)) if m_port else 0
 
                 import time as _t2
-                tasks.append({
-                    "id": sid,
-                    "sessionId": sid,
-                    "name": model.split("/")[-1] if "/" in model else model,
-                    "type": "serve",
-                    "status": "running",
-                    "output": f"Auto-adopted from orphan tmux session on {host}. "
-                              "Open the task to see live output.",
-                    "ts": int(_t2.time() * 1000),
-                    "payload": {
-                        "repo_id": model,
-                        "remote_host": host,
-                        "_cmd": "(orphan tmux session — original launch cmd unknown)",
-                        "port": port,
-                    },
-                    "remoteHost": host,
-                    "sshPort": sport,
-                    "platform": "linux",
-                    "_serveReady": False,
-                    "_endpointAdded": False,
-                    "_adoptedExternally": True,
-                })
+
+                tasks.append(
+                    {
+                        "id": sid,
+                        "sessionId": sid,
+                        "name": model.split("/")[-1] if "/" in model else model,
+                        "type": "serve",
+                        "status": "running",
+                        "output": f"Auto-adopted from orphan tmux session on {host}. Open the task to see live output.",
+                        "ts": int(_t2.time() * 1000),
+                        "payload": {
+                            "repo_id": model,
+                            "remote_host": host,
+                            "_cmd": "(orphan tmux session — original launch cmd unknown)",
+                            "port": port,
+                        },
+                        "remoteHost": host,
+                        "sshPort": sport,
+                        "platform": "linux",
+                        "_serveReady": False,
+                        "_endpointAdded": False,
+                        "_adoptedExternally": True,
+                    }
+                )
                 known_sids.add(sid)
                 adopted_any = True
                 logger.info(f"auto-adopted orphan tmux session {sid!r} on {host}")
@@ -2802,6 +3180,7 @@ def setup_cookbook_routes() -> APIRouter:
         if adopted_any:
             try:
                 from core.atomic_io import atomic_write_json
+
                 state["tasks"] = tasks
                 atomic_write_json(_cookbook_state_path, state)
             except Exception as e:
@@ -2841,13 +3220,33 @@ def setup_cookbook_routes() -> APIRouter:
     _ollama_library_cache: dict = {"models": [], "fetched_at": 0.0, "error": None}
 
     _OLLAMA_FALLBACK_LIBRARY = [
-        {"name": "qwen2.5", "description": "Qwen2.5 series — strong general/coding model from Alibaba.", "sizes": ["0.5b", "1.5b", "3b", "7b", "14b", "32b", "72b"]},
-        {"name": "qwen2.5-coder", "description": "Code-specialized Qwen2.5 family.", "sizes": ["0.5b", "1.5b", "3b", "7b", "14b", "32b"]},
-        {"name": "qwen3", "description": "Qwen3 — newer Alibaba family with hybrid reasoning.", "sizes": ["0.6b", "1.7b", "4b", "8b", "14b", "32b"]},
-        {"name": "llama3.2", "description": "Meta Llama 3.2 instruct (and tiny / vision variants).", "sizes": ["1b", "3b", "11b", "90b"]},
+        {
+            "name": "qwen2.5",
+            "description": "Qwen2.5 series — strong general/coding model from Alibaba.",
+            "sizes": ["0.5b", "1.5b", "3b", "7b", "14b", "32b", "72b"],
+        },
+        {
+            "name": "qwen2.5-coder",
+            "description": "Code-specialized Qwen2.5 family.",
+            "sizes": ["0.5b", "1.5b", "3b", "7b", "14b", "32b"],
+        },
+        {
+            "name": "qwen3",
+            "description": "Qwen3 — newer Alibaba family with hybrid reasoning.",
+            "sizes": ["0.6b", "1.7b", "4b", "8b", "14b", "32b"],
+        },
+        {
+            "name": "llama3.2",
+            "description": "Meta Llama 3.2 instruct (and tiny / vision variants).",
+            "sizes": ["1b", "3b", "11b", "90b"],
+        },
         {"name": "llama3.1", "description": "Meta Llama 3.1 instruct.", "sizes": ["8b", "70b", "405b"]},
         {"name": "llama3.3", "description": "Meta Llama 3.3 70B instruct.", "sizes": ["70b"]},
-        {"name": "gemma3", "description": "Google Gemma 3 — multimodal capable open-weights.", "sizes": ["1b", "4b", "12b", "27b"]},
+        {
+            "name": "gemma3",
+            "description": "Google Gemma 3 — multimodal capable open-weights.",
+            "sizes": ["1b", "4b", "12b", "27b"],
+        },
         {"name": "gemma2", "description": "Google Gemma 2 instruct.", "sizes": ["2b", "9b", "27b"]},
         {"name": "mistral", "description": "Mistral 7B instruct — small, fast generalist.", "sizes": ["7b"]},
         {"name": "mistral-nemo", "description": "Mistral NeMo 12B instruct.", "sizes": ["12b"]},
@@ -2855,7 +3254,11 @@ def setup_cookbook_routes() -> APIRouter:
         {"name": "mixtral", "description": "Mistral MoE 8x7B / 8x22B.", "sizes": ["8x7b", "8x22b"]},
         {"name": "phi3", "description": "Microsoft Phi-3 small / medium.", "sizes": ["mini", "medium"]},
         {"name": "phi4", "description": "Microsoft Phi-4 14B.", "sizes": ["14b"]},
-        {"name": "deepseek-r1", "description": "DeepSeek R1 reasoning model (distilled variants).", "sizes": ["1.5b", "7b", "8b", "14b", "32b", "70b"]},
+        {
+            "name": "deepseek-r1",
+            "description": "DeepSeek R1 reasoning model (distilled variants).",
+            "sizes": ["1.5b", "7b", "8b", "14b", "32b", "70b"],
+        },
         {"name": "deepseek-v3", "description": "DeepSeek V3 MoE 671B (huge — needs serious VRAM).", "sizes": ["671b"]},
         {"name": "codellama", "description": "Meta Code Llama instruct family.", "sizes": ["7b", "13b", "34b", "70b"]},
         {"name": "starcoder2", "description": "BigCode StarCoder2 — code completion.", "sizes": ["3b", "7b", "15b"]},
@@ -2867,7 +3270,11 @@ def setup_cookbook_routes() -> APIRouter:
         {"name": "command-r", "description": "Cohere Command R — RAG-oriented.", "sizes": ["35b"]},
         {"name": "command-r-plus", "description": "Cohere Command R+ — larger RAG model.", "sizes": ["104b"]},
         {"name": "qwq", "description": "Qwen QwQ reasoning preview.", "sizes": ["32b"]},
-        {"name": "smollm2", "description": "HuggingFaceTB SmolLM2 — tiny capable models.", "sizes": ["135m", "360m", "1.7b"]},
+        {
+            "name": "smollm2",
+            "description": "HuggingFaceTB SmolLM2 — tiny capable models.",
+            "sizes": ["135m", "360m", "1.7b"],
+        },
         {"name": "granite3.1-dense", "description": "IBM Granite 3.1 dense instruct.", "sizes": ["2b", "8b"]},
         {"name": "nemotron", "description": "NVIDIA Nemotron 70B.", "sizes": ["70b"]},
         {"name": "olmo2", "description": "AI2 OLMo 2 open-weights.", "sizes": ["7b", "13b"]},
@@ -2880,7 +3287,9 @@ def setup_cookbook_routes() -> APIRouter:
         Tries a 1-hour-cached fetch of ollama.com/library, falls back to a
         curated hard-coded list so the picker always renders something."""
         import time as _time
+
         import httpx as _httpx
+
         TTL = 3600.0
         now = _time.time()
         if refresh or (now - _ollama_library_cache["fetched_at"]) > TTL or not _ollama_library_cache["models"]:
@@ -2902,10 +3311,10 @@ def setup_cookbook_routes() -> APIRouter:
                         r'<a[^>]*href="/library/([A-Za-z0-9._-]+)"[^>]*>(.*?)</a>',
                         re.DOTALL,
                     )
-                    desc_re = re.compile(r'<p[^>]*>([^<]{4,400})</p>', re.DOTALL)
+                    desc_re = re.compile(r"<p[^>]*>([^<]{4,400})</p>", re.DOTALL)
                     # Size tags on ollama.com cards look like "0.5b", "14b",
                     # "8x7b", "27b". Pulled from short <span>-wrapped chips.
-                    size_re = re.compile(r'>\s*(\d+(?:\.\d+)?(?:x\d+)?[bBmM])\s*<')
+                    size_re = re.compile(r">\s*(\d+(?:\.\d+)?(?:x\d+)?[bBmM])\s*<")
                     seen: set[str] = set()
                     for bm in block_re.finditer(html):
                         name = bm.group(1).strip()
@@ -2966,18 +3375,14 @@ def setup_cookbook_routes() -> APIRouter:
         One GitHub Tree API call, 12h cache. The frontend uses this to badge
         rows in the model list before the user expands them."""
         import time as _time
+
         import httpx as _httpx
+
         TTL = 12 * 3600.0
         now = _time.time()
-        if (
-            refresh
-            or (now - _vllm_recipe_manifest["fetched_at"]) > TTL
-            or not _vllm_recipe_manifest["models"]
-        ):
-            url = (
-                "https://api.github.com/repos/vllm-project/recipes/"
-                "git/trees/main?recursive=1"
-            )
+        if refresh or (now - _vllm_recipe_manifest["fetched_at"]) > TTL or not _vllm_recipe_manifest["models"]:
+            url = "https://api.github.com/repos/vllm-project/recipes/git/trees/main?recursive=1"
+
             def _fetch_sync() -> tuple[int, dict | None, str]:
                 try:
                     headers = {"Accept": "application/vnd.github+json"}
@@ -2988,6 +3393,7 @@ def setup_cookbook_routes() -> APIRouter:
                         return 200, r.json(), ""
                 except Exception as e:
                     return 0, None, f"fetch error: {e}"
+
             status, data, err = await asyncio.to_thread(_fetch_sync)
             if status == 200 and isinstance(data, dict):
                 models: set[str] = set()
@@ -2996,16 +3402,14 @@ def setup_cookbook_routes() -> APIRouter:
                     if not path.startswith("models/") or not path.endswith(".yaml"):
                         continue
                     # path = "models/<org>/<model>.yaml" → "<org>/<model>"
-                    body = path[len("models/"):-len(".yaml")]
+                    body = path[len("models/") : -len(".yaml")]
                     if "/" in body:
                         models.add(body)
                 _vllm_recipe_manifest["models"] = models
                 _vllm_recipe_manifest["fetched_at"] = now
                 _vllm_recipe_manifest["error"] = ""
             else:
-                _vllm_recipe_manifest["error"] = (
-                    f"HTTP {status}: {err}" if status else err
-                )
+                _vllm_recipe_manifest["error"] = f"HTTP {status}: {err}" if status else err
                 # Don't clobber a stale-but-usable list on transient failures.
                 if not _vllm_recipe_manifest["models"]:
                     return {
@@ -3026,6 +3430,7 @@ def setup_cookbook_routes() -> APIRouter:
         exists at vllm-project/recipes. `repo` is the full HF id like
         'MiniMaxAI/MiniMax-M2'. Cached 6h."""
         import time as _time
+
         import httpx as _httpx
         import yaml as _yaml
 
@@ -3039,10 +3444,7 @@ def setup_cookbook_routes() -> APIRouter:
         if cached and not refresh and (now - cached[0]) < TTL:
             return cached[1] or {"exists": False, "cached": True}
 
-        url = (
-            f"https://raw.githubusercontent.com/vllm-project/recipes/"
-            f"main/models/{repo}.yaml"
-        )
+        url = f"https://raw.githubusercontent.com/vllm-project/recipes/main/models/{repo}.yaml"
 
         def _fetch_sync() -> tuple[int, str]:
             try:
@@ -3096,18 +3498,23 @@ def setup_cookbook_routes() -> APIRouter:
             "tool_calling": {
                 "description": tool_calling.get("description") or "",
                 "args": list(tool_calling.get("args") or []),
-            } if tool_calling else None,
+            }
+            if tool_calling
+            else None,
             "reasoning": {
                 "description": reasoning.get("description") or "",
                 "args": list(reasoning.get("args") or []),
-            } if reasoning else None,
+            }
+            if reasoning
+            else None,
             "dependencies": [
                 {
                     "note": (d.get("note") or "").strip(),
                     "command": (d.get("command") or "").strip(),
                     "optional": bool(d.get("optional", False)),
                 }
-                for d in deps if isinstance(d, dict)
+                for d in deps
+                if isinstance(d, dict)
             ],
             "variants": {
                 k: {
@@ -3118,18 +3525,19 @@ def setup_cookbook_routes() -> APIRouter:
                     "extra_args": list(v.get("extra_args") or []),
                     "extra_env": dict(v.get("extra_env") or {}),
                 }
-                for k, v in variants.items() if isinstance(v, dict)
+                for k, v in variants.items()
+                if isinstance(v, dict)
             },
             "hardware_overrides": {
                 hw: {
                     "extra_args": list((ov or {}).get("extra_args") or []),
                     "extra_env": dict((ov or {}).get("extra_env") or {}),
                 }
-                for hw, ov in hw_overrides.items() if isinstance(ov, dict)
+                for hw, ov in hw_overrides.items()
+                if isinstance(ov, dict)
             },
             "strategy_overrides": {
-                strat: dict(ov or {})
-                for strat, ov in strat_overrides.items() if isinstance(ov, dict)
+                strat: dict(ov or {}) for strat, ov in strat_overrides.items() if isinstance(ov, dict)
             },
             "compatible_strategies": list(doc.get("compatible_strategies") or []),
         }
@@ -3150,7 +3558,9 @@ def setup_cookbook_routes() -> APIRouter:
     def _cookbook_tasks_status_sync():
         import subprocess
 
-        def _download_cache_complete(repo_id: str, remote_host: str = "", ssh_port: str = "", cache_root: str = "") -> bool:
+        def _download_cache_complete(
+            repo_id: str, remote_host: str = "", ssh_port: str = "", cache_root: str = ""
+        ) -> bool:
             """Best-effort check for a completed HF cache entry.
 
             tmux output can stop at a stale progress line if the pane/session
@@ -3170,14 +3580,18 @@ def setup_cookbook_routes() -> APIRouter:
                     if ssh_port and ssh_port != "22":
                         ssh_base.extend(["-p", str(ssh_port)])
                     shell_cmd = " ".join(shlex.quote(x) for x in cmd)
-                    proc = subprocess.run(ssh_base + [remote_host, shell_cmd], timeout=12, capture_output=True)
+                    proc = subprocess.run(
+                        ssh_base + [remote_host, shell_cmd], timeout=12, capture_output=True, check=False
+                    )
                 else:
-                    proc = subprocess.run(cmd, timeout=12, capture_output=True)
+                    proc = subprocess.run(cmd, timeout=12, capture_output=True, check=False)
                 return proc.returncode == 0
             except Exception:
                 return False
 
-        def _download_cache_incomplete(repo_id: str, remote_host: str = "", ssh_port: str = "", cache_root: str = "") -> bool:
+        def _download_cache_incomplete(
+            repo_id: str, remote_host: str = "", ssh_port: str = "", cache_root: str = ""
+        ) -> bool:
             """Best-effort check for resumable HF partial blobs.
 
             A lost SSH/tmux session can leave a real download still incomplete.
@@ -3193,9 +3607,11 @@ def setup_cookbook_routes() -> APIRouter:
                     if ssh_port and ssh_port != "22":
                         ssh_base.extend(["-p", str(ssh_port)])
                     shell_cmd = " ".join(shlex.quote(x) for x in cmd)
-                    proc = subprocess.run(ssh_base + [remote_host, shell_cmd], timeout=12, capture_output=True)
+                    proc = subprocess.run(
+                        ssh_base + [remote_host, shell_cmd], timeout=12, capture_output=True, check=False
+                    )
                 else:
-                    proc = subprocess.run(cmd, timeout=12, capture_output=True)
+                    proc = subprocess.run(cmd, timeout=12, capture_output=True, check=False)
                 return proc.returncode == 0
             except Exception:
                 return False
@@ -3280,14 +3696,14 @@ def setup_cookbook_routes() -> APIRouter:
                     remote,
                     "powershell",
                     "-Command",
-                    f"$pid = Get-Content \"{sd}\\{session_id}.pid\" -ErrorAction SilentlyContinue; "
-                    "if ($pid) {{ Get-Process -Id $pid -ErrorAction SilentlyContinue | Out-Null; if ($?) {{ exit 0 }} else {{ exit 1 }} }} else {{ exit 1 }}"
+                    f'$pid = Get-Content "{sd}\\{session_id}.pid" -ErrorAction SilentlyContinue; '
+                    "if ($pid) {{ Get-Process -Id $pid -ErrorAction SilentlyContinue | Out-Null; if ($?) {{ exit 0 }} else {{ exit 1 }} }} else {{ exit 1 }}",
                 ]
                 capture_cmd = ssh_base + [
                     remote,
                     "powershell",
                     "-Command",
-                    f"Get-Content \"{sd}\\{session_id}.log\" -Tail 10 -ErrorAction SilentlyContinue",
+                    f'Get-Content "{sd}\\{session_id}.log" -Tail 10 -ErrorAction SilentlyContinue',
                 ]
             elif remote:
                 ssh_base = ["ssh"]
@@ -3327,10 +3743,8 @@ def setup_cookbook_routes() -> APIRouter:
                 is_alive = pid_alive(task_pid)
                 try:
                     if log_path.exists():
-                        full_snapshot = log_path.read_text(
-                            encoding="utf-8", errors="replace"
-                        ).strip()[-12000:]
-                        lines = [l.strip() for l in full_snapshot.split('\n') if l.strip()]
+                        full_snapshot = log_path.read_text(encoding="utf-8", errors="replace").strip()[-12000:]
+                        lines = [l.strip() for l in full_snapshot.split("\n") if l.strip()]
                         downloading_lines = [l for l in lines if l.startswith("Downloading")]
                         if downloading_lines:
                             progress_text = downloading_lines[-1]
@@ -3346,16 +3760,14 @@ def setup_cookbook_routes() -> APIRouter:
                 # stopped tasks). The agent's `list_served_models` call
                 # was blocking the chat stream every time.
                 _task_status = (task.get("status") or "").lower()
-                if _task_status in {"stopped", "done", "completed",
-                                    "crashed", "error", "failed",
-                                    "ended", "killed"}:
+                if _task_status in {"stopped", "done", "completed", "crashed", "error", "failed", "ended", "killed"}:
                     is_alive = False
                     # Keep the persisted output_tail for the UI — it's
                     # what the agent uses to diagnose past failures.
                     full_snapshot = (task.get("output") or "")[-12000:]
                 else:
                     try:
-                        alive = subprocess.run(check_cmd, timeout=4, capture_output=True)
+                        alive = subprocess.run(check_cmd, timeout=4, capture_output=True, check=False)
                         is_alive = alive.returncode == 0
                     except Exception:
                         is_alive = False
@@ -3365,10 +3777,10 @@ def setup_cookbook_routes() -> APIRouter:
                     # lags with hf_transfer). Falls back to the true last line otherwise.
                     if is_alive:
                         try:
-                            cap = subprocess.run(capture_cmd, timeout=4, capture_output=True, text=True)
+                            cap = subprocess.run(capture_cmd, timeout=4, capture_output=True, text=True, check=False)
                             if cap.returncode == 0:
                                 full_snapshot = cap.stdout.strip()
-                                lines = [l.strip() for l in full_snapshot.split('\n') if l.strip()]
+                                lines = [l.strip() for l in full_snapshot.split("\n") if l.strip()]
                                 downloading_lines = [l for l in lines if l.startswith("Downloading")]
                                 if downloading_lines:
                                     progress_text = downloading_lines[-1]
@@ -3386,12 +3798,11 @@ def setup_cookbook_routes() -> APIRouter:
             status = "unknown"
             download_has_ok = task_type == "download" and "DOWNLOAD_OK" in full_snapshot
             download_has_failed = task_type == "download" and "DOWNLOAD_FAILED" in full_snapshot
-            download_has_incomplete_evidence = (
-                task_type == "download"
-                and (
-                    ".incomplete" in full_snapshot
-                    or bool(re.search(r'model-\d+-of-\d+\.[A-Za-z0-9_.-]+:\s+(?:[0-9]|[1-8][0-9])%', full_snapshot))
-                    or _download_cache_incomplete(_payload.get("repo_id") or model, remote, str(_tport or ""), _payload.get("local_dir") or "")
+            download_has_incomplete_evidence = task_type == "download" and (
+                ".incomplete" in full_snapshot
+                or bool(re.search(r"model-\d+-of-\d+\.[A-Za-z0-9_.-]+:\s+(?:[0-9]|[1-8][0-9])%", full_snapshot))
+                or _download_cache_incomplete(
+                    _payload.get("repo_id") or model, remote, str(_tport or ""), _payload.get("local_dir") or ""
                 )
             )
             if is_alive or (local_win_task and full_snapshot):
@@ -3410,9 +3821,12 @@ def setup_cookbook_routes() -> APIRouter:
                         status = "running" if is_alive else "stopped"
                     else:
                         status = "completed" if exit_code == 0 else "error"
-                elif has_exit and "unrecognized arguments" in lower:
-                    status = "error"
-                elif has_error and not ("application startup complete" in lower):
+                elif (
+                    has_exit
+                    and "unrecognized arguments" in lower
+                    or has_error
+                    and "application startup complete" not in lower
+                ):
                     status = "error"
                 elif task_type == "download" and download_has_ok:
                     if re.search(r"Fetching\s+0\s+files", full_snapshot, re.IGNORECASE):
@@ -3444,7 +3858,9 @@ def setup_cookbook_routes() -> APIRouter:
                 elif (
                     task_type == "download"
                     and not download_has_incomplete_evidence
-                    and _download_cache_complete(_payload.get("repo_id") or model, remote, str(_tport or ""), _payload.get("local_dir") or "")
+                    and _download_cache_complete(
+                        _payload.get("repo_id") or model, remote, str(_tport or ""), _payload.get("local_dir") or ""
+                    )
                 ):
                     status = "completed"
                     if not progress_text:
@@ -3455,7 +3871,9 @@ def setup_cookbook_routes() -> APIRouter:
                     status = "stopped"
 
             # Parse structured phase info — single source of truth for the UI
-            phase_info = _parse_serve_phase(full_snapshot, task_type) if (task_type == "serve" and full_snapshot) else {}
+            phase_info = (
+                _parse_serve_phase(full_snapshot, task_type) if (task_type == "serve" and full_snapshot) else {}
+            )
             if phase_info.get("status") == "ready":
                 status = "ready"
             serve_phase = phase_info.get("phase", "")
@@ -3463,25 +3881,29 @@ def setup_cookbook_routes() -> APIRouter:
             if diagnosis and status in {"running", "unknown", "stopped"} and phase_info.get("status") != "ready":
                 status = "error"
             if download_zero_files:
-                diagnosis = {"message": "No matching files were downloaded. The model repo or filename/quant pattern may be wrong (for example a ':Q4_K_M' tag that does not exist in the repo). Check the repo and the include/quant pattern."}
+                diagnosis = {
+                    "message": "No matching files were downloaded. The model repo or filename/quant pattern may be wrong (for example a ':Q4_K_M' tag that does not exist in the repo). Check the repo and the include/quant pattern."
+                }
             output_tail = error_aware_output_tail(full_snapshot, status)
 
-            results.append({
-                "session_id": session_id,
-                "type": task_type,
-                "model": model.split("/")[-1] if "/" in model else model,
-                "status": status,
-                "progress": serve_phase if task_type == "serve" else progress_text[:120],
-                "phase": serve_phase,
-                "diagnosis": diagnosis,
-                "output_tail": output_tail,
-                "exit_code": exit_code,
-                "cmd": _payload.get("_cmd") or "",
-                "tps": phase_info.get("tps"),
-                "reqs": phase_info.get("reqs"),
-                "pct": phase_info.get("pct"),
-                "remote": remote or "local",
-            })
+            results.append(
+                {
+                    "session_id": session_id,
+                    "type": task_type,
+                    "model": model.split("/")[-1] if "/" in model else model,
+                    "status": status,
+                    "progress": serve_phase if task_type == "serve" else progress_text[:120],
+                    "phase": serve_phase,
+                    "diagnosis": diagnosis,
+                    "output_tail": output_tail,
+                    "exit_code": exit_code,
+                    "cmd": _payload.get("_cmd") or "",
+                    "tps": phase_info.get("tps"),
+                    "reqs": phase_info.get("reqs"),
+                    "pct": phase_info.get("pct"),
+                    "remote": remote or "local",
+                }
+            )
 
         return {"tasks": results}
 

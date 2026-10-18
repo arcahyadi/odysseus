@@ -60,7 +60,8 @@ def test_rename_personal_upload_owner_moves_files_and_rewrites_rag(tmp_path, mon
     rag = SimpleNamespace(
         rename_owner=lambda old, new, path_map=None, path_prefixes=None: rag_calls.append(
             (old, new, dict(path_map or {}), list(path_prefixes or []))
-        ) or {"success": True, "updated_count": 1},
+        )
+        or {"success": True, "updated_count": 1},
     )
 
     result = personal_routes.rename_personal_upload_owner(

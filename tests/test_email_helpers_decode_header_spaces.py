@@ -11,6 +11,7 @@ The sibling mcp_servers.email_server._decode_header was already fixed for this
 (see tests/test_mcp_email_decode_header_spaces.py); these pin the same contract
 for the routes.email_helpers copy.
 """
+
 import os
 import tempfile
 from pathlib import Path

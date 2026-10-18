@@ -8,10 +8,7 @@ from src import endpoint_resolver, llm_core, model_context
 def test_build_models_url_accepts_v1_base_and_chat_url(monkeypatch):
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
 
-    assert (
-        endpoint_resolver.build_models_url("http://127.0.0.1:8080/v1")
-        == "http://127.0.0.1:8080/v1/models"
-    )
+    assert endpoint_resolver.build_models_url("http://127.0.0.1:8080/v1") == "http://127.0.0.1:8080/v1/models"
     assert (
         endpoint_resolver.build_models_url("http://127.0.0.1:8080/v1/chat/completions")
         == "http://127.0.0.1:8080/v1/models"

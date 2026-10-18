@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/odysseus-wordmark.png" alt="Odysseus" width="238">
+  <img src="docs/assets/odysseus-wordmark.png" alt="Odysseus" width="238">
 </p>
 
 <p align="center">
@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
-  <a href="docs/setup.md">Setup Guide</a> ·
+  <a href="docs/operations/setup.md">Setup Guide</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="ROADMAP.md">Roadmap</a>
 </p>
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/odysseus-browser.jpg" alt="Odysseus interface">
+  <img src="docs/assets/odysseus-browser.jpg" alt="Odysseus interface">
 </p>
 
 ---
@@ -36,7 +36,7 @@ docker compose up -d --build
 
 Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
 
-Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](docs/setup.md).
+Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](docs/operations/setup.md).
 
 ## Features
 
@@ -49,9 +49,26 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 - **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
 - **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
 
+## Services
+
+Services inclus dans le stack Docker. Voir [`docs/traceability/00-CODE-INVENTORY.md`](docs/traceability/00-CODE-INVENTORY.md) pour la liste complète et les commandes d'activation.
+
+| Service          | Port  | Profil           | Description                              |
+|------------------|-------|------------------|------------------------------------------|
+| odysseus         | 7000  | _(défaut)_       | Application principale FastAPI           |
+| chromadb         | 8100  | _(défaut)_       | Vector store                             |
+| searxng          | 8080  | _(défaut)_       | Moteur de recherche                      |
+| ntfy             | 8091  | _(défaut)_       | Notifications push                       |
+| kroki            | 8700  | _(défaut)_       | Rendu de diagrammes                      |
+| serena-mcp       | 8765  | _(défaut)_       | Édition symbolique LSP (MCP SSE)         |
+| acontext         | 8029  | `acontext`       | Mémoire Acontext (placeholder)           |
+| scrapling-mcp    | 8800  | `scrapling`      | Web scraping MCP                         |
+| codebase-memory  | 9749  | `knowledge`      | Codebase Memory MCP                      |
+| decision-engine  | 8001  | `decision-engine`| Decision Engine (ConfigOpenCodeNew)      |
+
 ## Demo
 
-A full hover-to-play tour lives on the landing page: [`docs/index.html`](docs/index.html).
+A full hover-to-play tour lives on the landing page: [`docs/assets/index.html`](docs/assets/index.html).
 
 ## Contributing
 
@@ -59,7 +76,7 @@ Help is welcome. The best entry points are fresh-install testing, provider setup
 
 ## Security
 
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
+Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/operations/setup.md#security-notes).
 
 ## Star History
 

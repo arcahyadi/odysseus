@@ -3,7 +3,6 @@
 import json
 import logging
 import uuid
-from typing import Dict, Optional
 
 from fastapi import HTTPException, Request
 
@@ -14,15 +13,15 @@ from routes.device_flow import (
     PendingDeviceFlowStore,
     create_device_flow_router,
 )
-from src.auth_helpers import get_current_user
 from src import chatgpt_subscription
+from src.auth_helpers import get_current_user
 
 logger = logging.getLogger(__name__)
 
 _DEVICE_FLOW_STORE = PendingDeviceFlowStore()
 
 
-def _provision_endpoint(tokens: Dict, owner: Optional[str]) -> Dict:
+def _provision_endpoint(tokens: dict, owner: str | None) -> dict:
     access_token = tokens.get("access_token")
     refresh_token = tokens.get("refresh_token")
     if not access_token or not refresh_token:
@@ -132,7 +131,7 @@ def _start_device_flow(request: Request, _form) -> DeviceFlowStart:
     )
 
 
-def _poll_device_flow(_request: Request, pending: Dict) -> DeviceFlowPoll:
+def _poll_device_flow(_request: Request, pending: dict) -> DeviceFlowPoll:
     try:
         data = chatgpt_subscription.poll_device_auth(pending["device_auth_id"], pending["user_code"])
     except Exception as exc:

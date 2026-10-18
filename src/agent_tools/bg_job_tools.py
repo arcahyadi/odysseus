@@ -12,14 +12,14 @@ from another session is treated as not found.
 
 import json
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 _LIST_ACTIONS = {"list", "ls", "jobs"}
 _OUTPUT_ACTIONS = {"output", "get", "read", "tail", "status", "show"}
 _KILL_ACTIONS = {"kill", "stop", "cancel", "terminate"}
 
 
-def _age(rec: Dict[str, Any]) -> str:
+def _age(rec: dict[str, Any]) -> str:
     start = rec.get("started_at")
     if not start:
         return "?"
@@ -31,7 +31,7 @@ def _age(rec: Dict[str, Any]) -> str:
     return f"{secs // 3600}h{(secs % 3600) // 60}m"
 
 
-def _status_label(rec: Dict[str, Any]) -> str:
+def _status_label(rec: dict[str, Any]) -> str:
     status = rec.get("status", "?")
     if rec.get("killed"):
         return "killed"
@@ -44,7 +44,7 @@ def _status_label(rec: Dict[str, Any]) -> str:
     return status
 
 
-def _row(rec: Dict[str, Any]) -> str:
+def _row(rec: dict[str, Any]) -> str:
     cmd = (rec.get("command") or "").strip().splitlines()[0][:80]
     return f"[{rec.get('id')}] {_status_label(rec)} | {_age(rec)} | {cmd}"
 
@@ -65,10 +65,13 @@ class ManageBgJobsTool:
         job_id = str(args.get("job_id") or args.get("id") or "").strip()
 
         if not session_id:
-            return {"error": "manage_bg_jobs: no active chat session; background jobs are scoped to a chat.", "exit_code": 1}
+            return {
+                "error": "manage_bg_jobs: no active chat session; background jobs are scoped to a chat.",
+                "exit_code": 1,
+            }
 
         if action in _LIST_ACTIONS:
-            jobs: List[Dict[str, Any]] = bg_jobs.list_for_session(session_id)
+            jobs: list[dict[str, Any]] = bg_jobs.list_for_session(session_id)
             if not jobs:
                 return {"output": "No background jobs in this chat.", "exit_code": 0}
             jobs.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
@@ -77,7 +80,10 @@ class ManageBgJobsTool:
 
         if action in _OUTPUT_ACTIONS or action in _KILL_ACTIONS:
             if not job_id:
-                return {"error": f"manage_bg_jobs: action '{action}' requires a job_id (see action='list').", "exit_code": 1}
+                return {
+                    "error": f"manage_bg_jobs: action '{action}' requires a job_id (see action='list').",
+                    "exit_code": 1,
+                }
             rec = bg_jobs.get(job_id)
             # Scope: only the chat that launched a job may see or control it.
             if rec is None or rec.get("session_id") != session_id:
@@ -87,7 +93,10 @@ class ManageBgJobsTool:
                 if rec.get("status") != "running":
                     return {"output": f"Job `{job_id}` already {_status_label(rec)}; nothing to kill.", "exit_code": 0}
                 killed = bg_jobs.kill(job_id)
-                return {"output": f"Killed background job `{job_id}` ({(killed or {}).get('command', '').splitlines()[0][:80]}).", "exit_code": 0}
+                return {
+                    "output": f"Killed background job `{job_id}` ({(killed or {}).get('command', '').splitlines()[0][:80]}).",
+                    "exit_code": 0,
+                }
 
             out = rec.get("output") or "(no output yet)"
             return {

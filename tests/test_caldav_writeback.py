@@ -11,10 +11,10 @@ import types
 from datetime import datetime
 
 from src.caldav_writeback import (
+    _stable_cal_id,
     build_event_ical,
     find_remote_calendar,
     push_event,
-    _stable_cal_id,
 )
 
 REMOTE_URL = "https://p69-caldav.icloud.com/123/calendars/home/"
@@ -55,9 +55,15 @@ class FakeCalendar:
 
 def _ev(**over):
     base = dict(
-        uid="evt-1", summary="Dentist", description="bring x-rays",
-        location="Clinic", dtstart=datetime(2026, 6, 10, 14, 0),
-        dtend=datetime(2026, 6, 10, 15, 0), all_day=False, is_utc=True, rrule="",
+        uid="evt-1",
+        summary="Dentist",
+        description="bring x-rays",
+        location="Clinic",
+        dtstart=datetime(2026, 6, 10, 14, 0),
+        dtend=datetime(2026, 6, 10, 15, 0),
+        all_day=False,
+        is_utc=True,
+        rrule="",
     )
     base.update(over)
     return base
@@ -159,8 +165,7 @@ def test_writeback_validates_saved_url_before_remote_call(monkeypatch):
         captured["validated_url"] = url
         return "https://dav.example.com/calendars/home"
 
-    def fake_writeback_blocking(local_cal_id, ev, delete, url, username, password,
-                                owner="", account_id=""):
+    def fake_writeback_blocking(local_cal_id, ev, delete, url, username, password, owner="", account_id=""):
         captured.update(
             {
                 "local_cal_id": local_cal_id,
@@ -179,9 +184,7 @@ def test_writeback_validates_saved_url_before_remote_call(monkeypatch):
     monkeypatch.setattr(wb, "_writeback_blocking", fake_writeback_blocking)
     monkeypatch.setattr(wb.asyncio, "to_thread", inline_to_thread)
 
-    result = asyncio.run(
-        wb.writeback_event("alice", "caldav", "caldav-123", {"uid": "evt-1"})
-    )
+    result = asyncio.run(wb.writeback_event("alice", "caldav", "caldav-123", {"uid": "evt-1"}))
 
     assert result == {"ok": True}
     assert captured == {
@@ -216,8 +219,7 @@ def test_writeback_rejects_unsafe_saved_url_before_remote_call(monkeypatch):
     def fake_validate(_url):
         raise ValueError("CalDAV URL host is not allowed")
 
-    def fake_writeback_blocking(local_cal_id, ev, delete, url, username, password,
-                                owner="", account_id=""):
+    def fake_writeback_blocking(local_cal_id, ev, delete, url, username, password, owner="", account_id=""):
         nonlocal called
         called = True
         return {"ok": True}
@@ -229,9 +231,7 @@ def test_writeback_rejects_unsafe_saved_url_before_remote_call(monkeypatch):
     monkeypatch.setattr(wb, "_writeback_blocking", fake_writeback_blocking)
     monkeypatch.setattr(wb.asyncio, "to_thread", inline_to_thread)
 
-    result = asyncio.run(
-        wb.writeback_event("alice", "caldav", "caldav-123", {"uid": "evt-1"})
-    )
+    result = asyncio.run(wb.writeback_event("alice", "caldav", "caldav-123", {"uid": "evt-1"}))
 
     assert result == {"ok": False, "error": "CalDAV URL host is not allowed"}
     assert called is False

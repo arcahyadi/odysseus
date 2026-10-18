@@ -5,6 +5,7 @@ seeded "running" jobs stay running through refresh(), and _kill is stubbed so no
 real signal is sent. Jobs are scoped to a chat (session_id), which is the main
 invariant under test.
 """
+
 import asyncio
 import json
 import time
@@ -29,11 +30,16 @@ def store(tmp_path, monkeypatch):
 
 def _seed(session_id="sess-a", status="running", job_id="job0001", output="", pid=4321):
     rec = {
-        "id": job_id, "session_id": session_id, "command": "sleep 60",
-        "status": status, "pid": pid, "started_at": time.time(),
+        "id": job_id,
+        "session_id": session_id,
+        "command": "sleep 60",
+        "status": status,
+        "pid": pid,
+        "started_at": time.time(),
         "ended_at": None if status == "running" else time.time(),
         "exit_code": None if status == "running" else 0,
-        "max_runtime_s": 3600, "followed_up": False,
+        "max_runtime_s": 3600,
+        "followed_up": False,
         "log_path": str(bg_jobs._JOBS_DIR / f"{job_id}.log"),
         "exit_path": str(bg_jobs._JOBS_DIR / f"{job_id}.exit"),
     }
@@ -50,6 +56,7 @@ def _run(args, session_id="sess-a"):
 
 
 # ── bg_jobs.kill ────────────────────────────────────────────────────────────
+
 
 def test_kill_marks_killed_and_suppresses_followup(store):
     _seed(job_id="job0001", pid=4321)
@@ -80,6 +87,7 @@ def test_result_text_reports_killed(store):
 
 
 # ── manage_bg_jobs tool ─────────────────────────────────────────────────────
+
 
 def test_no_session_is_rejected(store):
     out = asyncio.run(ManageBgJobsTool().execute('{"action":"list"}', {"session_id": None}))
@@ -146,17 +154,21 @@ def test_action_aliases(store):
 # this feature hit). These lock in that bg-job control reaches the files domain.
 
 
-@pytest.mark.parametrize("msg", [
-    "stop the job",
-    "kill that job",
-    "Now kill that background job.",
-    "is the job done?",
-    "check the job output",
-    "list my jobs",
-    "kill the bg task",
-])
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "stop the job",
+        "kill that job",
+        "Now kill that background job.",
+        "is the job done?",
+        "check the job output",
+        "list my jobs",
+        "kill the bg task",
+    ],
+)
 def test_bg_job_commands_are_not_low_signal(msg):
-    from src.agent_loop import _classify_agent_request, _DOMAIN_TOOL_MAP
+    from src.agent_loop import _DOMAIN_TOOL_MAP, _classify_agent_request
+
     r = _classify_agent_request([{"role": "user", "content": msg}], msg)
     assert r["low_signal"] is False
     assert "files" in r["domains"]
@@ -164,11 +176,15 @@ def test_bg_job_commands_are_not_low_signal(msg):
     assert "manage_bg_jobs" in _DOMAIN_TOOL_MAP["files"]
 
 
-@pytest.mark.parametrize("msg", [
-    "run this in the background",   # launching, not managing
-    "find me a job listing",        # unrelated use of "job"
-])
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "run this in the background",  # launching, not managing
+        "find me a job listing",  # unrelated use of "job"
+    ],
+)
 def test_non_bg_messages_do_not_trip_files_domain(msg):
     from src.agent_loop import _classify_agent_request
+
     r = _classify_agent_request([{"role": "user", "content": msg}], msg)
     assert "files" not in r["domains"]

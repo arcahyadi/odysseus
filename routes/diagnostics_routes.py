@@ -2,13 +2,13 @@
 
 import logging
 import os
-from typing import Dict, Any
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Form, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 
-from services.youtube.youtube_handler import extract_youtube_id, extract_transcript_async
-from core.constants import DEFAULT_HOST, DATA_DIR
+from core.constants import DATA_DIR, DEFAULT_HOST
 from core.middleware import require_admin
+from services.youtube.youtube_handler import extract_transcript_async, extract_youtube_id
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +22,16 @@ def setup_diagnostics_routes(
     router = APIRouter(tags=["diagnostics"])
 
     @router.get("/api/diagnostics/services")
-    async def get_service_health(request: Request) -> Dict[str, Any]:
+    async def get_service_health(request: Request) -> dict[str, Any]:
         """Consolidated degraded-state report for ChromaDB, SearXNG, email,
         ntfy, and provider endpoints. Non-intrusive probes — safe to poll."""
         require_admin(request)
         from src.service_health import collect_service_health
+
         return await collect_service_health(rag_manager, memory_vector)
 
     @router.get("/api/diagnostics/logs")
-    async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:
+    async def get_diagnostics_logs(request: Request, limit: int = 200) -> dict[str, Any]:
         require_admin(request)
         limit = max(1, min(limit, 1000))
         try:
@@ -39,39 +40,37 @@ def setup_diagnostics_routes(
                 return {"status": "success", "logs": []}
 
             # Safe tail read of the log file (max 5MB via rotation)
-            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+            with open(log_file, encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
 
             tail_lines = lines[-limit:] if len(lines) > limit else lines
-            tail_lines = [line.rstrip('\r\n') for line in tail_lines]
+            tail_lines = [line.rstrip("\r\n") for line in tail_lines]
 
-            return {
-                "status": "success",
-                "logs": tail_lines
-            }
+            return {"status": "success", "logs": tail_lines}
         except Exception as e:
             logger.error(f"Diagnostics logs retrieval error: {e}")
             raise HTTPException(500, f"Failed to retrieve logs: {str(e)}")
 
     @router.get("/api/db/stats")
-    async def get_database_stats(request: Request) -> Dict[str, Any]:
+    async def get_database_stats(request: Request) -> dict[str, Any]:
         require_admin(request)
         try:
             from core.database import get_detailed_stats
+
             return get_detailed_stats()
         except Exception as e:
             logger.error(f"DB stats error: {e}")
             raise HTTPException(500, "Failed to retrieve database statistics")
 
     @router.get("/api/rag/stats")
-    async def get_rag_stats(request: Request) -> Dict[str, Any]:
+    async def get_rag_stats(request: Request) -> dict[str, Any]:
         require_admin(request)
         if rag_available and rag_manager:
             return rag_manager.get_stats()
         return {"error": "RAG system not available"}
 
     @router.get("/api/test/youtube")
-    async def test_youtube(request: Request, url: str) -> Dict[str, Any]:
+    async def test_youtube(request: Request, url: str) -> dict[str, Any]:
         require_admin(request)
         try:
             video_id = extract_youtube_id(url)
@@ -84,15 +83,15 @@ def setup_diagnostics_routes(
                 "transcript_success": data.get("success", False),
                 "transcript_length": len(data.get("transcript", "")) if data.get("success") else 0,
                 "transcript_preview": (data.get("transcript", "")[:500] + "...")
-                    if data.get("success") and len(data.get("transcript", "")) > 500
-                    else data.get("transcript", ""),
+                if data.get("success") and len(data.get("transcript", "")) > 500
+                else data.get("transcript", ""),
                 "error": data.get("error") if not data.get("success") else None,
             }
         except Exception as e:
             return {"error": str(e)}
 
     @router.post("/api/test-research")
-    async def test_research(request: Request, query: str = Form("What is machine learning?")) -> Dict[str, Any]:
+    async def test_research(request: Request, query: str = Form("What is machine learning?")) -> dict[str, Any]:
         require_admin(request)
         try:
             endpoint = f"http://{DEFAULT_HOST}:8000/v1/chat/completions"

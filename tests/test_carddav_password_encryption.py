@@ -1,10 +1,6 @@
 import json
-import os
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 
 def _import_contacts(tmp_path, monkeypatch):
@@ -25,11 +21,13 @@ def _import_contacts(tmp_path, monkeypatch):
 
     sys.modules.pop("src.secret_storage", None)
     from src import secret_storage
+
     monkeypatch.setattr(secret_storage, "_KEY_PATH", tmp_path / ".app_key")
     monkeypatch.setattr(secret_storage, "_fernet", None)
 
     sys.modules.pop("routes.contacts_routes", None)
     from routes import contacts_routes
+
     return contacts_routes
 
 
@@ -39,6 +37,7 @@ def test_carddav_password_encrypted_at_rest(tmp_path, monkeypatch):
     settings = contacts._load_settings()
     password = "my-carddav-secret"
     from src.secret_storage import encrypt
+
     settings["carddav_password"] = encrypt(password)
     contacts._save_settings(settings)
 
@@ -55,6 +54,7 @@ def test_get_carddav_config_decrypts_encrypted_value(tmp_path, monkeypatch):
     contacts = _import_contacts(tmp_path, monkeypatch)
 
     from src.secret_storage import encrypt
+
     encrypted = encrypt("super-secret")
     settings = {
         "carddav_url": "https://carddav.example",
@@ -136,6 +136,7 @@ def test_double_save_encrypted_value_not_corrupted(tmp_path, monkeypatch):
     contacts = _import_contacts(tmp_path, monkeypatch)
 
     from src.secret_storage import encrypt
+
     password = "persistent-secret"
     encrypted = encrypt(password)
 
@@ -153,6 +154,7 @@ def test_double_save_re_encrypts_already_encrypted_is_noop(tmp_path, monkeypatch
     contacts = _import_contacts(tmp_path, monkeypatch)
 
     from src.secret_storage import encrypt
+
     password = "another-secret"
 
     settings = contacts._load_settings()

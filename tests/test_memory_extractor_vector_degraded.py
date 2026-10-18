@@ -17,10 +17,10 @@ the facts still land in the JSON store.
 import asyncio
 import tempfile
 
-import src.llm_core
 import src.event_bus
-from src.memory import MemoryManager
+import src.llm_core
 from services.memory.memory_extractor import extract_and_store
+from src.memory import MemoryManager
 
 
 class _FakeSession:
@@ -68,14 +68,16 @@ def test_extraction_persists_facts_when_vector_store_fails_at_runtime(monkeypatc
     with tempfile.TemporaryDirectory() as data_dir:
         mgr = MemoryManager(data_dir)
 
-        _run(extract_and_store(
-            _FakeSession(),
-            mgr,
-            _BrokenVectorStore(),
-            endpoint_url="http://x",
-            model="m",
-            headers=None,
-        ))
+        _run(
+            extract_and_store(
+                _FakeSession(),
+                mgr,
+                _BrokenVectorStore(),
+                endpoint_url="http://x",
+                model="m",
+                headers=None,
+            )
+        )
 
         stored = mgr.load(owner="alice")
         texts = {e["text"] for e in stored}
@@ -103,8 +105,7 @@ def test_healthy_vector_store_still_dedups_normally(monkeypatch):
         mgr = MemoryManager(data_dir)
         # Seed alice's own memory (persisted so load_all sees it) and point
         # find_similar at its real id.
-        seeded = mgr.add_entry("Alice's home city is Lisbon", source="auto",
-                               category="fact", owner="alice")
+        seeded = mgr.add_entry("Alice's home city is Lisbon", source="auto", category="fact", owner="alice")
         mgr.save([seeded])
 
         class _DedupVectorStore:
@@ -116,10 +117,16 @@ def test_healthy_vector_store_still_dedups_normally(monkeypatch):
             def add(self, memory_id, text):  # pragma: no cover - should not run
                 raise AssertionError("add should not be called for a deduped fact")
 
-        _run(extract_and_store(
-            _FakeSession(), mgr, _DedupVectorStore(),
-            endpoint_url="http://x", model="m", headers=None,
-        ))
+        _run(
+            extract_and_store(
+                _FakeSession(),
+                mgr,
+                _DedupVectorStore(),
+                endpoint_url="http://x",
+                model="m",
+                headers=None,
+            )
+        )
         # The new fact was deduped against alice's own memory, so only the
         # seeded entry remains (no duplicate added).
         assert [e["text"] for e in mgr.load(owner="alice")] == ["Alice's home city is Lisbon"]

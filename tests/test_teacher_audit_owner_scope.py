@@ -8,8 +8,8 @@ owner's ModelEndpoint in a multi-user deployment. See #2283.
 
 import asyncio
 
-import src.teacher_escalation as teacher_escalation
-import routes.skills_routes as skills_routes
+from routes import skills_routes
+from src import teacher_escalation
 
 
 def test_call_teacher_scopes_model_resolution_to_owner(monkeypatch):
@@ -27,9 +27,7 @@ def test_call_teacher_scopes_model_resolution_to_owner(monkeypatch):
     monkeypatch.setattr("src.ai_interaction._TEACHER_SYSTEM_PROMPT", "sys", raising=False)
     monkeypatch.setattr("src.llm_core.llm_call_async", fake_llm_call_async)
 
-    result = asyncio.run(
-        teacher_escalation._call_teacher("teacher-model", "prompt", owner="alice")
-    )
+    result = asyncio.run(teacher_escalation._call_teacher("teacher-model", "prompt", owner="alice"))
 
     assert result == "teacher reply"
     assert seen["owner"] == "alice"

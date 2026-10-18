@@ -5,6 +5,7 @@ only when the key is ABSENT; a body like {"name": null, "email": "x@y.com"}
 gives name=None, so None.strip() raised AttributeError -> 500. Now guarded with
 `(data.get("name") or "")`.
 """
+
 import asyncio
 
 import pytest

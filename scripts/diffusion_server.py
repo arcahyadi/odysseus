@@ -7,10 +7,12 @@ Odysseus's image generation tool.
 Usage:
     python3 scripts/diffusion_server.py --model /path/to/model --port 8100
 """
-import os
-import sys
+
 import importlib
 import importlib.machinery
+import os
+import sys
+
 # Block xformers — create a fake module that reports as not installed
 _fake = type(sys)("xformers")
 _fake.__version__ = "0.0.0"
@@ -26,16 +28,15 @@ import io
 import json
 import logging
 import time
-from pathlib import Path
-
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import torch
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("diffusion_server")
@@ -124,15 +125,15 @@ class ImageRequest(BaseModel):
 def _fix_meta_tensors(pipe, dtype):
     """Replace any meta tensors with real zero tensors on CPU so .to(cuda) works."""
     for name, component in pipe.components.items():
-        if not hasattr(component, 'parameters'):
+        if not hasattr(component, "parameters"):
             continue
         fixed = 0
         for pname, param in component.named_parameters():
-            if param.device.type == 'meta':
+            if param.device.type == "meta":
                 with torch.no_grad():
-                    new_param = torch.zeros(param.shape, dtype=dtype, device='cpu')
+                    new_param = torch.zeros(param.shape, dtype=dtype, device="cpu")
                     # Walk to the actual module holding this param
-                    parts = pname.split('.')
+                    parts = pname.split(".")
                     mod = component
                     for p in parts[:-1]:
                         mod = getattr(mod, p)
@@ -161,6 +162,7 @@ def load_model():
         # Login so all huggingface_hub calls use the token
         try:
             from huggingface_hub import login
+
             login(token=_hf_token, add_to_git_credential=False)
             logger.info("Logged in to HuggingFace Hub")
         except Exception as e:
@@ -200,7 +202,9 @@ def load_model():
                 candidates.append((cls, name))
 
     def _cleanup():
-        import gc; gc.collect()
+        import gc
+
+        gc.collect()
         try:
             torch.cuda.empty_cache()
             logger.debug("GPU cache cleared")
@@ -297,11 +301,12 @@ def load_model():
         # Find the single-file weight (safetensors preferred, then ckpt/bin)
         single_file = None
         from huggingface_hub import hf_hub_download, list_repo_files
+
         # Check if it's a HF repo with a single safetensors file
         try:
             files = list_repo_files(model_path)
-            sf_files = [f for f in files if f.endswith('.safetensors') and '/' not in f]
-            ckpt_files = [f for f in files if f.endswith(('.ckpt', '.bin')) and '/' not in f]
+            sf_files = [f for f in files if f.endswith(".safetensors") and "/" not in f]
+            ckpt_files = [f for f in files if f.endswith((".ckpt", ".bin")) and "/" not in f]
             target = sf_files[0] if sf_files else (ckpt_files[0] if ckpt_files else None)
             if target:
                 logger.info(f"Downloading single file: {target}")
@@ -312,8 +317,8 @@ def load_model():
         if not single_file:
             local_path = Path(model_path)
             if local_path.is_dir():
-                for ext in ('.safetensors', '.ckpt', '.bin'):
-                    matches = list(local_path.glob(f'*{ext}'))
+                for ext in (".safetensors", ".ckpt", ".bin"):
+                    matches = list(local_path.glob(f"*{ext}"))
                     if matches:
                         single_file = str(matches[0])
                         break
@@ -345,13 +350,15 @@ def load_model():
             elif "sdxl" in _path_lower or "xl" in _path_lower:
                 _pipeline_configs.append(("StableDiffusionXLPipeline", _SDXL_CONFIGS))
             # Always add all pipelines as fallbacks
-            _pipeline_configs.extend([
-                ("Flux2Pipeline", _FLUX2_CONFIGS),
-                ("StableDiffusion3Pipeline", _SD35_CONFIGS + _SD3_CONFIGS),
-                ("FluxPipeline", _FLUX_CONFIGS),
-                ("StableDiffusionXLPipeline", _SDXL_CONFIGS + [None]),
-                ("StableDiffusionPipeline", [None]),
-            ])
+            _pipeline_configs.extend(
+                [
+                    ("Flux2Pipeline", _FLUX2_CONFIGS),
+                    ("StableDiffusion3Pipeline", _SD35_CONFIGS + _SD3_CONFIGS),
+                    ("FluxPipeline", _FLUX_CONFIGS),
+                    ("StableDiffusionXLPipeline", _SDXL_CONFIGS + [None]),
+                    ("StableDiffusionPipeline", [None]),
+                ]
+            )
             # Deduplicate while preserving order
             _seen = set()
             _deduped = []
@@ -360,15 +367,28 @@ def load_model():
                     _seen.add(item[0])
                     _deduped.append(item)
             _pipeline_configs = _deduped
+
             # Pre-download config files (json/txt only) so from_single_file doesn't choke
             def _ensure_config_local(repo_id):
                 """Download only config files from a repo, return local path or None."""
                 try:
                     from huggingface_hub import snapshot_download
+
                     local = snapshot_download(
                         repo_id,
                         allow_patterns=["*.json", "*.txt", "**/*.json", "**/*.txt"],
-                        ignore_patterns=["*.safetensors", "*.bin", "*.ckpt", "*.pt", "*.msgpack", "*.h5", "*.onnx", "*.png", "*.jpg", "*.md"],
+                        ignore_patterns=[
+                            "*.safetensors",
+                            "*.bin",
+                            "*.ckpt",
+                            "*.pt",
+                            "*.msgpack",
+                            "*.h5",
+                            "*.onnx",
+                            "*.png",
+                            "*.jpg",
+                            "*.md",
+                        ],
                         token=_hf_token,
                         local_files_only=False,
                     )
@@ -379,6 +399,7 @@ def load_model():
                     # Try without allow_patterns (some hf_hub versions have bugs with filters on gated repos)
                     try:
                         from huggingface_hub import snapshot_download as _sd2
+
                         local = _sd2(
                             repo_id,
                             ignore_patterns=["*.safetensors", "*.bin", "*.ckpt", "*.pt", "*.msgpack", "*.h5", "*.onnx"],
@@ -395,7 +416,7 @@ def load_model():
                 if loaded:
                     break
                 cls = getattr(diffusers, cls_name, None)
-                if not cls or not hasattr(cls, 'from_single_file'):
+                if not cls or not hasattr(cls, "from_single_file"):
                     continue
                 for config in configs:
                     try:
@@ -443,7 +464,7 @@ def load_model():
 
     # Load LoRA weights if specified
     if _args.lora:
-        for lora_path in _args.lora.split(','):
+        for lora_path in _args.lora.split(","):
             lora_path = lora_path.strip()
             if not lora_path:
                 continue
@@ -455,8 +476,10 @@ def load_model():
                 logger.warning(f"Failed to load LoRA {lora_path}: {e}")
         # Set LoRA scale
         try:
-            _pipe.set_adapters([Path(p.strip()).stem for p in _args.lora.split(',') if p.strip()],
-                              adapter_weights=[_args.lora_scale] * len([p for p in _args.lora.split(',') if p.strip()]))
+            _pipe.set_adapters(
+                [Path(p.strip()).stem for p in _args.lora.split(",") if p.strip()],
+                adapter_weights=[_args.lora_scale] * len([p for p in _args.lora.split(",") if p.strip()]),
+            )
             logger.info(f"LoRA scale set to {_args.lora_scale}")
         except Exception as e:
             logger.debug(f"Could not set adapter weights: {e}")
@@ -496,15 +519,16 @@ def generate_image(req: ImageRequest):
     start = time.time()
 
     # Detect if pipeline is inpaint-only (requires image + mask)
-    _is_inpaint_pipe = 'inpaint' in type(_pipe).__name__.lower()
+    _is_inpaint_pipe = "inpaint" in type(_pipe).__name__.lower()
 
     images = []
     for _ in range(req.n):
         if _is_inpaint_pipe:
             # Inpaint pipelines need an image + mask — create blank ones for txt2img
             from PIL import Image as _PILGen
-            _blank = _PILGen.new('RGB', (width, height), (128, 128, 128))
-            _mask = _PILGen.new('L', (width, height), 255)  # full white = regenerate everything
+
+            _blank = _PILGen.new("RGB", (width, height), (128, 128, 128))
+            _mask = _PILGen.new("L", (width, height), 255)  # full white = regenerate everything
             result = _pipe(
                 prompt=req.prompt,
                 image=_blank,
@@ -541,7 +565,7 @@ def generate_image(req: ImageRequest):
 
 class InpaintRequest(BaseModel):
     image: str  # base64 PNG
-    mask: str   # base64 PNG (white = inpaint area)
+    mask: str  # base64 PNG (white = inpaint area)
     prompt: str
     width: int = 0
     height: int = 0
@@ -553,40 +577,42 @@ class InpaintRequest(BaseModel):
 _inpaint_pipe = None
 _img2img_pipe = None
 
+
 def _get_inpaint_pipe():
     """Lazy-load an inpaint or img2img pipeline from the same model."""
     global _inpaint_pipe, _img2img_pipe
     if _inpaint_pipe:
-        return _inpaint_pipe, 'inpaint'
+        return _inpaint_pipe, "inpaint"
     if _img2img_pipe:
-        return _img2img_pipe, 'img2img'
+        return _img2img_pipe, "img2img"
 
     import diffusers
+
     model_path = _args.model
     torch_dtype = DTYPE_MAP.get(_args.dtype, torch.bfloat16)
 
     # Check if the main pipeline IS already an inpaint pipeline
     pipe_cls_name = type(_pipe).__name__
-    if 'inpaint' in pipe_cls_name.lower():
+    if "inpaint" in pipe_cls_name.lower():
         _inpaint_pipe = _pipe
         logger.info(f"Main pipeline is already inpaint: {pipe_cls_name}")
         # Also try to get img2img from it
         try:
-            img2img_cls_name = pipe_cls_name.replace('Inpaint', 'Img2Img')
+            img2img_cls_name = pipe_cls_name.replace("Inpaint", "Img2Img")
             img2img_cls = getattr(diffusers, img2img_cls_name, None)
             if img2img_cls:
                 _img2img_pipe = img2img_cls.from_pipe(_pipe)
                 logger.info(f"Also loaded img2img from inpaint pipe: {img2img_cls_name}")
         except Exception as e:
             logger.debug(f"Could not create img2img from inpaint: {e}")
-        return _inpaint_pipe, 'inpaint'
+        return _inpaint_pipe, "inpaint"
 
     # Try loading a dedicated inpaint pipeline from the same components
     inpaint_names = [
-        pipe_cls_name.replace('Pipeline', 'InpaintPipeline'),
-        'StableDiffusion3InpaintPipeline',
-        'StableDiffusionXLInpaintPipeline',
-        'StableDiffusionInpaintPipeline',
+        pipe_cls_name.replace("Pipeline", "InpaintPipeline"),
+        "StableDiffusion3InpaintPipeline",
+        "StableDiffusionXLInpaintPipeline",
+        "StableDiffusionInpaintPipeline",
     ]
     for name in inpaint_names:
         cls = getattr(diffusers, name, None)
@@ -594,16 +620,16 @@ def _get_inpaint_pipe():
             try:
                 _inpaint_pipe = cls.from_pipe(_pipe)
                 logger.info(f"Loaded inpaint pipeline: {name}")
-                return _inpaint_pipe, 'inpaint'
+                return _inpaint_pipe, "inpaint"
             except Exception as e:
                 logger.debug(f"{name} from_pipe failed: {e}")
 
     # Try img2img pipeline
     img2img_names = [
-        pipe_cls_name.replace('Pipeline', 'Img2ImgPipeline'),
-        'StableDiffusion3Img2ImgPipeline',
-        'StableDiffusionXLImg2ImgPipeline',
-        'StableDiffusionImg2ImgPipeline',
+        pipe_cls_name.replace("Pipeline", "Img2ImgPipeline"),
+        "StableDiffusion3Img2ImgPipeline",
+        "StableDiffusionXLImg2ImgPipeline",
+        "StableDiffusionImg2ImgPipeline",
     ]
     torch_dtype = DTYPE_MAP.get(_args.dtype, torch.bfloat16)
     harmonize_gpu = _args.harmonize_gpu
@@ -618,8 +644,11 @@ def _get_inpaint_pipe():
                     _img2img_pipe = _img2img_pipe.to(f"cuda:{harmonize_gpu}")
                 else:
                     _img2img_pipe = cls.from_pipe(_pipe, torch_dtype=torch_dtype)
-                logger.info(f"Loaded img2img pipeline: {name}" + (f" on cuda:{harmonize_gpu}" if harmonize_gpu is not None else ""))
-                return _img2img_pipe, 'img2img'
+                logger.info(
+                    f"Loaded img2img pipeline: {name}"
+                    + (f" on cuda:{harmonize_gpu}" if harmonize_gpu is not None else "")
+                )
+                return _img2img_pipe, "img2img"
             except Exception as e:
                 logger.debug(f"{name} failed: {e}")
                 try:
@@ -630,7 +659,7 @@ def _get_inpaint_pipe():
                     else:
                         _img2img_pipe = _img2img_pipe.to("cuda")
                     logger.info(f"Loaded img2img pipeline (from_pretrained): {name}")
-                    return _img2img_pipe, 'img2img'
+                    return _img2img_pipe, "img2img"
                 except Exception as e2:
                     logger.debug(f"{name} from_pretrained also failed: {e2}")
 
@@ -675,7 +704,7 @@ def inpaint_image(req: InpaintRequest):
     # model-friendly box (multiples of 8), inpaint there, upscale back.
     max_side = 1024
     scale = min(max_side / max(width, height), 1.0)
-    work_w = max(64, ((int(width  * scale) + 7) // 8) * 8)
+    work_w = max(64, ((int(width * scale) + 7) // 8) * 8)
     work_h = max(64, ((int(height * scale) + 7) // 8) * 8)
     work_init = init_image.resize((work_w, work_h), PILImage.LANCZOS)
     work_mask = mask_image.resize((work_w, work_h), PILImage.BILINEAR)
@@ -685,7 +714,7 @@ def inpaint_image(req: InpaintRequest):
     # decodes to flat grey output. Upcast the VAE to fp32 before the
     # call; cheap (only the VAE decode runs in fp32, the heavy UNet
     # stays in the requested dtype). One-time per pipeline.
-    if alt_pipe is not None and not getattr(alt_pipe, '_ge_vae_upcast', False):
+    if alt_pipe is not None and not getattr(alt_pipe, "_ge_vae_upcast", False):
         try:
             alt_pipe.upcast_vae()
             alt_pipe._ge_vae_upcast = True
@@ -694,7 +723,7 @@ def inpaint_image(req: InpaintRequest):
             logger.warning(f"Could not upcast VAE: {e}")
 
     try:
-        if alt_type == 'inpaint' and alt_pipe:
+        if alt_type == "inpaint" and alt_pipe:
             # Use dedicated inpaint pipeline. guidance_scale 7.5 is the
             # SDXL default — the previous 3.5 was producing muted / grey
             # results, especially on style-transfer prompts with large
@@ -710,7 +739,7 @@ def inpaint_image(req: InpaintRequest):
                 strength=strength,
                 guidance_scale=7.5,
             )
-        elif alt_type == 'img2img' and alt_pipe:
+        elif alt_type == "img2img" and alt_pipe:
             raise TypeError("Skip to img2img fallback")
         else:
             # Try the main pipeline with inpaint args
@@ -728,6 +757,7 @@ def inpaint_image(req: InpaintRequest):
         # Pipeline doesn't support native inpainting — use crop-to-mask + img2img + composite
         # This preserves context by only regenerating the masked region with surrounding padding
         import numpy as np
+
         logger.info(f"Pipeline doesn't support inpainting — using crop+img2img (strength={strength}) + composite")
 
         mask_resized = mask_image.resize((width, height))
@@ -777,7 +807,7 @@ def inpaint_image(req: InpaintRequest):
         crop_mask = mask_resized.crop((cx1, cy1, cx2, cy2))
 
         # Use img2img pipeline if available, otherwise fall back
-        _i2i_pipe = alt_pipe if alt_type == 'img2img' else None
+        _i2i_pipe = alt_pipe if alt_type == "img2img" else None
         # Ensure crop image is properly sized (multiple of 8)
         crop_img = crop_img.resize((cw, ch))
         try:
@@ -815,6 +845,7 @@ def inpaint_image(req: InpaintRequest):
         # Apply feathering to the cropped mask for soft blending edges
         if feather > 0:
             from PIL import ImageFilter
+
             # PIL GaussianBlur radius is ~half of CSS blur pixels, so multiply
             blur_radius = feather * 1.5
             crop_mask = crop_mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
@@ -861,7 +892,7 @@ class HarmonizeRequest(BaseModel):
     #   2) Optional narrow inpaint on `seam_mask` (alpha edge band) to fix
     #      jagged cutouts and seams. Only the edge band is regenerated.
     color_match: float = 0.65  # 0..1 — how much of the color shift to apply
-    seam_fix: float = 0.0      # 0..1 — strength of the seam inpaint pass
+    seam_fix: float = 0.0  # 0..1 — strength of the seam inpaint pass
     body_mask: str | None = None  # base64 PNG, white = layer body
     seam_mask: str | None = None  # base64 PNG, white = layer alpha edge band
     steps: int = 0
@@ -877,39 +908,53 @@ def _rgb_to_lalphabeta(rgb_f):
     original paper used). Pure numpy — no cv2. Input/output: float32 arrays
     of shape (..., 3); input in 0..255, output unbounded log-RGB-style."""
     import numpy as np
+
     eps = 1.0
     # Linearise to LMS cone space
-    M_rgb2lms = np.array([
-        [0.3811, 0.5783, 0.0402],
-        [0.1967, 0.7244, 0.0782],
-        [0.0241, 0.1288, 0.8444],
-    ], dtype=np.float32)
+    M_rgb2lms = np.array(
+        [
+            [0.3811, 0.5783, 0.0402],
+            [0.1967, 0.7244, 0.0782],
+            [0.0241, 0.1288, 0.8444],
+        ],
+        dtype=np.float32,
+    )
     lms = rgb_f @ M_rgb2lms.T
     lms = np.log(np.maximum(lms, eps))
     # LMS → L*alpha*beta
-    M_lms2lab = np.array([
-        [1.0/np.sqrt(3),  1.0/np.sqrt(3),  1.0/np.sqrt(3)],
-        [1.0/np.sqrt(6),  1.0/np.sqrt(6), -2.0/np.sqrt(6)],
-        [1.0/np.sqrt(2), -1.0/np.sqrt(2),  0.0          ],
-    ], dtype=np.float32)
+    M_lms2lab = np.array(
+        [
+            [1.0 / np.sqrt(3), 1.0 / np.sqrt(3), 1.0 / np.sqrt(3)],
+            [1.0 / np.sqrt(6), 1.0 / np.sqrt(6), -2.0 / np.sqrt(6)],
+            [1.0 / np.sqrt(2), -1.0 / np.sqrt(2), 0.0],
+        ],
+        dtype=np.float32,
+    )
     return lms @ M_lms2lab.T
 
 
 def _lalphabeta_to_rgb(lab):
     """Inverse of _rgb_to_lalphabeta. Returns RGB float32 in 0..255 (clipped)."""
     import numpy as np
-    M_lab2lms = np.array([
-        [np.sqrt(3)/3.0,  np.sqrt(6)/6.0,  np.sqrt(2)/2.0],
-        [np.sqrt(3)/3.0,  np.sqrt(6)/6.0, -np.sqrt(2)/2.0],
-        [np.sqrt(3)/3.0, -np.sqrt(6)/3.0,  0.0          ],
-    ], dtype=np.float32)
+
+    M_lab2lms = np.array(
+        [
+            [np.sqrt(3) / 3.0, np.sqrt(6) / 6.0, np.sqrt(2) / 2.0],
+            [np.sqrt(3) / 3.0, np.sqrt(6) / 6.0, -np.sqrt(2) / 2.0],
+            [np.sqrt(3) / 3.0, -np.sqrt(6) / 3.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
     lms = lab @ M_lab2lms.T
     lms = np.exp(lms)
-    M_lms2rgb = np.array([
-        [ 4.4679, -3.5873,  0.1193],
-        [-1.2186,  2.3809, -0.1624],
-        [ 0.0497, -0.2439,  1.2045],
-    ], dtype=np.float32)
+    M_lms2rgb = np.array(
+        [
+            [4.4679, -3.5873, 0.1193],
+            [-1.2186, 2.3809, -0.1624],
+            [0.0497, -0.2439, 1.2045],
+        ],
+        dtype=np.float32,
+    )
     rgb = lms @ M_lms2rgb.T
     return np.clip(rgb, 0, 255)
 
@@ -950,7 +995,7 @@ def _reinhard_color_transfer(source_rgb, body_mask_l, blend: float = 1.0):
     # mask fades back to source smoothly.
     m3 = (mask_np * blend)[..., None]
     out = src_np * (1 - m3) + rgb_shifted * m3
-    return _PILImg.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode='RGB')
+    return _PILImg.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
 
 
 def _decode_mask_b64(b64_str, target_size):
@@ -960,6 +1005,7 @@ def _decode_mask_b64(b64_str, target_size):
         return None
     try:
         from PIL import Image as _PILImg
+
         m = _PILImg.open(io.BytesIO(base64.b64decode(b64_str))).convert("L")
         if m.size != target_size:
             m = m.resize(target_size, _PILImg.BILINEAR)
@@ -1034,8 +1080,8 @@ def harmonize_image(req: HarmonizeRequest):
     final = stage1
     if seam_mask_full is not None and seam_fix > 0.01:
         alt_pipe, alt_type = _get_inpaint_pipe()
-        is_inpaint_main = 'inpaint' in type(_pipe).__name__.lower()
-        inpaint_pipe = alt_pipe if alt_type == 'inpaint' else (_pipe if is_inpaint_main else None)
+        is_inpaint_main = "inpaint" in type(_pipe).__name__.lower()
+        inpaint_pipe = alt_pipe if alt_type == "inpaint" else (_pipe if is_inpaint_main else None)
         if inpaint_pipe is None:
             logger.info("Harmonize: seam_fix requested but no inpaint pipe — skipping stage 2")
         else:
@@ -1062,7 +1108,9 @@ def harmonize_image(req: HarmonizeRequest):
                     guidance_scale=7.0,
                 )
                 ai_small = result.images[0]
-                ai_full = ai_small.resize((orig_w, orig_h), PILImage.LANCZOS) if (w, h) != (orig_w, orig_h) else ai_small
+                ai_full = (
+                    ai_small.resize((orig_w, orig_h), PILImage.LANCZOS) if (w, h) != (orig_w, orig_h) else ai_small
+                )
                 # Composite back using the seam mask as alpha — outside the
                 # seam band stays pixel-identical to stage1.
                 final = PILImage.composite(ai_full, stage1, seam_mask_full)
@@ -1094,24 +1142,33 @@ def _legacy_whole_image_harmonize(req, source_full):
     strength = max(0.1, min(0.9, strength))
 
     alt_pipe, alt_type = _get_inpaint_pipe()
-    i2i_pipe = _img2img_pipe if _img2img_pipe else (alt_pipe if alt_type == 'img2img' else None)
+    i2i_pipe = _img2img_pipe if _img2img_pipe else (alt_pipe if alt_type == "img2img" else None)
 
     start = time.time()
     try:
         if i2i_pipe:
             result = i2i_pipe(
-                prompt=req.prompt, image=init_image,
-                num_inference_steps=steps, strength=strength, guidance_scale=7.0,
+                prompt=req.prompt,
+                image=init_image,
+                num_inference_steps=steps,
+                strength=strength,
+                guidance_scale=7.0,
             )
         else:
             result = _pipe(
-                prompt=req.prompt, image=init_image,
-                num_inference_steps=steps, strength=strength, guidance_scale=7.0,
+                prompt=req.prompt,
+                image=init_image,
+                num_inference_steps=steps,
+                strength=strength,
+                guidance_scale=7.0,
             )
     except TypeError:
         result = _pipe(
-            prompt=req.prompt, width=width, height=height,
-            num_inference_steps=steps, guidance_scale=7.0,
+            prompt=req.prompt,
+            width=width,
+            height=height,
+            num_inference_steps=steps,
+            guidance_scale=7.0,
         )
 
     img = result.images[0]
@@ -1133,7 +1190,12 @@ def health():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, help="Path to diffusers model")
-    parser.add_argument("--lora", type=str, default=None, help="Path to LoRA weights (.safetensors). Can specify multiple comma-separated.")
+    parser.add_argument(
+        "--lora",
+        type=str,
+        default=None,
+        help="Path to LoRA weights (.safetensors). Can specify multiple comma-separated.",
+    )
     parser.add_argument("--lora-scale", type=float, default=1.0, help="LoRA weight scale (0.0-2.0)")
     parser.add_argument("--port", type=int, default=8100)
     parser.add_argument("--host", default="127.0.0.1")
@@ -1145,14 +1207,24 @@ if __name__ == "__main__":
     parser.add_argument("--cpu-offload", action="store_true", help="Enable model CPU offload")
     parser.add_argument("--attention-slicing", action="store_true", help="Enable attention slicing")
     parser.add_argument("--vae-slicing", action="store_true", help="Enable VAE slicing")
-    parser.add_argument("--harmonize-gpu", type=int, default=None, help="GPU index for harmonize/img2img (default: same as main)")
-    parser.add_argument("--allowed-host", action="append", default=[],
+    parser.add_argument(
+        "--harmonize-gpu", type=int, default=None, help="GPU index for harmonize/img2img (default: same as main)"
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
         help="Additional Host header value to accept (DNS-rebinding allowlist). "
-             "Can be repeated. Loopback values are always included.")
-    parser.add_argument("--allowed-origin", action="append", default=[],
+        "Can be repeated. Loopback values are always included.",
+    )
+    parser.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
         help="Additional CORS origin to allow. Can be repeated. Defaults to "
-             "no cross-origin access — only pass this if you need a browser "
-             "on a specific origin to call the server.")
+        "no cross-origin access — only pass this if you need a browser "
+        "on a specific origin to call the server.",
+    )
     _args = parser.parse_args()
 
     # Replace the module-load middleware stack with the CLI-configured one so
@@ -1163,8 +1235,11 @@ if __name__ == "__main__":
     final_hosts = _compute_allowed_hosts(_args.host, _args.allowed_host)
     final_origins = _compute_cors_origins(_args.allowed_origin)
     _configure_security_middleware(app, final_hosts, final_origins)
-    logger.info("security middleware: allowed_hosts=%s allowed_origins=%s",
-                final_hosts, final_origins or "(none — default-deny)")
+    logger.info(
+        "security middleware: allowed_hosts=%s allowed_origins=%s",
+        final_hosts,
+        final_origins or "(none — default-deny)",
+    )
 
     app.state.model_path = _args.model
     uvicorn.run(app, host=_args.host, port=_args.port)

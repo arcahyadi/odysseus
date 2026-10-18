@@ -1,0 +1,114 @@
+# Phase-lock — Mapping déclaratif phase → tools autorisés/retirés
+# Source unique de vérité. Modifié ici = appliqué automatiquement.
+
+phases:
+  RESEARCH:
+    description: "Exploration et collecte d'information uniquement"
+    allowed_categories: [read, search, knowledge]
+    blocked_categories: [write, exec, destructive]
+    blocked_tools:
+      - write_file
+      - edit_file
+      - bash
+    message: "Phase RESEARCH : écriture et exécution désactivées"
+
+  INNOVATE:
+    description: "Brainstorming et exploration de solutions"
+    allowed_categories: [read, search, knowledge, draft]
+    blocked_categories: [exec, destructive]
+    blocked_tools:
+      - bash
+    message: "Phase INNOVATE : exécution de commandes désactivée"
+
+  PLAN:
+    description: "Planification — écriture dans process/ et .planning/ uniquement"
+    allowed_categories: [read, search, knowledge, draft]
+    write_restriction:
+      allowed_paths:
+        - "process/"
+        - ".planning/"
+        - ".opencode/"
+      message: "Phase PLAN : écriture limitée à process/ et .planning/"
+    blocked_tools:
+      - bash
+    message: "Phase PLAN : écriture limitée aux répertoires planning"
+
+  BUILD:
+    description: "Implémentation — accès complet"
+    allowed_categories: [read, search, knowledge, write, exec, draft]
+    blocked_tools: []
+    message: "Phase BUILD : accès complet"
+
+  VERIFY:
+    description: "Vérification — lecture et tests uniquement"
+    allowed_categories: [read, search, knowledge, exec]
+    blocked_categories: [write, destructive]
+    exec_restriction:
+      allowed_commands_patterns:
+        - "pytest"
+        - "npm test"
+        - "cargo test"
+        - "go test"
+        - "jest"
+        - "vitest"
+        - "playwright"
+      message: "Phase VERIFY : seules les commandes de test sont autorisées"
+    blocked_tools:
+      - write_file
+      - edit_file
+      - bash
+    message: "Phase VERIFY : lecture et tests uniquement"
+
+  CLASSIFY:
+    description: "Classification du risque — lecture seule, aucune écriture ni exécution"
+    allowed_categories: [read, search, knowledge]
+    blocked_categories: [write, exec, destructive]
+    blocked_tools:
+      - write_file
+      - edit_file
+      - bash
+    message: "Phase CLASSIFY : classification du risque, écriture et exécution désactivées"
+
+  KNOW:
+    description: "Récupération mémoire/connaissance — lecture et recherche uniquement"
+    allowed_categories: [read, search, knowledge]
+    blocked_categories: [write, exec, destructive]
+    blocked_tools:
+      - write_file
+      - edit_file
+      - bash
+    message: "Phase KNOW : récupération de connaissance, écriture et exécution désactivées"
+
+  QUALITY:
+    description: "Qualité — lecture et commandes de test uniquement"
+    allowed_categories: [read, search, knowledge, exec]
+    blocked_categories: [write, destructive]
+    exec_restriction:
+      allowed_commands_patterns:
+        - "pytest"
+        - "npm test"
+        - "cargo test"
+        - "go test"
+        - "jest"
+        - "vitest"
+        - "playwright"
+        - "lint"
+      message: "Phase QUALITY : seules les commandes de test/lint sont autorisées"
+    blocked_tools: []
+    message: "Phase QUALITY : tests et lint uniquement"
+
+  AUTOEVAL:
+    description: "Auto-évaluation — lecture et exécution d'évaluation, pas de destruction"
+    allowed_categories: [read, search, knowledge, exec]
+    blocked_categories: [destructive]
+    blocked_tools: []
+    message: "Phase AUTOEVAL : auto-évaluation, destruction désactivée"
+
+  MEMORY_OBSERVE:
+    description: "Distillation mémoire et observabilité — écriture mémoire, pas de destruction"
+    allowed_categories: [read, search, knowledge, write]
+    blocked_categories: [destructive]
+    blocked_tools: []
+    message: "Phase MEMORY_OBSERVE : distillation et observation, destruction désactivée"
+
+default_phase: BUILD

@@ -3,7 +3,6 @@ from pathlib import Path
 from src import ai_interaction
 from src import document_processor as dp
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 

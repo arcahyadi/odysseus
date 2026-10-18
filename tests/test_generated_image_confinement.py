@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 def _generated_images_module():
     from src import generated_images
+
     return generated_images
 
 
@@ -58,10 +59,7 @@ def test_generated_image_headers_include_nosniff():
     generated_images = _generated_images_module()
 
     assert generated_images.GENERATED_IMAGE_HEADERS["X-Content-Type-Options"] == "nosniff"
-    assert (
-        generated_images.GENERATED_IMAGE_HEADERS["Cache-Control"]
-        == "public, max-age=31536000, immutable"
-    )
+    assert generated_images.GENERATED_IMAGE_HEADERS["Cache-Control"] == "public, max-age=31536000, immutable"
 
 
 def test_generated_image_route_uses_confining_resolver():

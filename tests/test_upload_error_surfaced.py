@@ -9,6 +9,7 @@ and shows a toast on failure, keeping the pending files for a retry.
 fileHandler.js pulls in browser globals so it can't run under node; guard the
 fix at the source level.
 """
+
 import re
 from pathlib import Path
 

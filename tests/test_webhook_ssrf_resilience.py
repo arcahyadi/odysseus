@@ -1,6 +1,6 @@
+import json
 import os
 import sys
-import json
 from datetime import datetime
 from unittest.mock import patch
 
@@ -20,13 +20,13 @@ from tests.helpers.import_state import clear_module, preserve_import_state
 # and leaves no artifact, and these tests never touch the real engine
 # (validate_webhook_url is pure; the delivery test monkeypatches SessionLocal).
 # patch.dict restores the prior DATABASE_URL after the block.
-with patch.dict(os.environ, {"DATABASE_URL": "sqlite:///:memory:"}), \
-        preserve_import_state("src.database", "core.database"):
+with (
+    patch.dict(os.environ, {"DATABASE_URL": "sqlite:///:memory:"}),
+    preserve_import_state("src.database", "core.database"),
+):
     clear_module("src.database")
     _core_database = sys.modules.get("core.database")
-    _core_database_all = (
-        getattr(_core_database, "__all__", None) if _core_database is not None else None
-    )
+    _core_database_all = getattr(_core_database, "__all__", None) if _core_database is not None else None
     if _core_database is not None and (
         not getattr(_core_database, "__file__", None)
         or (

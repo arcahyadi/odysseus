@@ -1,4 +1,5 @@
 """Regression tests for task-result delivery into chat sessions (issue #326)."""
+
 import asyncio
 import sys
 import types as _types
@@ -17,7 +18,8 @@ from tests.helpers.import_state import clear_fake_database_modules
 clear_fake_database_modules()
 
 import core.database as cdb
-from core.database import Base, Session as DbSession
+from core.database import Base
+from core.database import Session as DbSession
 from core.models import ChatMessage as MemChatMessage
 from src.task_scheduler import TaskScheduler
 
@@ -109,7 +111,4 @@ def test_session_delivery_uses_in_memory_messages_with_manager(monkeypatch):
         "done",
     ]
     assert all(session_id == "existing-session" for session_id, _ in manager.messages)
-    assert all(
-        message.metadata == {"model": "test-model"}
-        for _, message in manager.messages
-    )
+    assert all(message.metadata == {"model": "test-model"} for _, message in manager.messages)

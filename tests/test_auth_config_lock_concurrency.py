@@ -5,11 +5,11 @@ or corrupt auth.json. If someone removes the lock, these tests should fail
 with missing users or assertion errors.
 """
 
+import contextlib
 import json
+import sys
 import threading
 import time
-import contextlib
-import sys
 import types
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -121,7 +121,7 @@ class TestConcurrentDeleteUser:
 
         assert all(results)
         assert len(mgr.users) == 1
-        with open(mgr.auth_path, "r") as f:
+        with open(mgr.auth_path) as f:
             data = json.load(f)
         assert len(data["users"]) == 1
         assert "admin" in data["users"]
@@ -195,7 +195,7 @@ class TestConcurrentMixedOperations:
         for i in range(20):
             assert f"newuser{i}" in mgr.users
 
-        with open(mgr.auth_path, "r") as f:
+        with open(mgr.auth_path) as f:
             data = json.load(f)
         assert set(data["users"].keys()) == set(mgr.users.keys())
 
@@ -214,7 +214,7 @@ class TestDiskConsistency:
         def reader():
             while not stop_event.is_set():
                 try:
-                    with open(mgr.auth_path, "r") as f:
+                    with open(mgr.auth_path) as f:
                         content = f.read()
                     json.loads(content)
                 except json.JSONDecodeError as e:

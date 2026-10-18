@@ -52,8 +52,7 @@ def test_expand_scopes_model_resolution_to_cookie_user(monkeypatch):
     seen = _patch_model_pipeline(monkeypatch)
     endpoint = _expand_endpoint()
 
-    req = _FakeRequest({"name": "Pirate", "prompt": "talks like a pirate", "model": "test-model"},
-                       current_user="alice")
+    req = _FakeRequest({"name": "Pirate", "prompt": "talks like a pirate", "model": "test-model"}, current_user="alice")
     result = asyncio.run(endpoint(req))
 
     assert seen["owner"] == "alice"
@@ -67,8 +66,7 @@ def test_expand_attributes_bearer_token_to_its_owner(monkeypatch):
     seen = _patch_model_pipeline(monkeypatch)
     endpoint = _expand_endpoint()
 
-    req = _FakeRequest({"name": "Pirate", "model": ""},
-                       current_user="api", api_token=True, api_token_owner="bob")
+    req = _FakeRequest({"name": "Pirate", "model": ""}, current_user="api", api_token=True, api_token_owner="bob")
     asyncio.run(endpoint(req))
 
     assert seen["owner"] == "bob"

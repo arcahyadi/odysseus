@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from src.chat_processor import ChatProcessor
 from src.user_time import (
@@ -19,7 +19,7 @@ def test_current_datetime_prompt_uses_browser_timezone():
     set_user_tz_offset(600)
     set_user_tz_name("Australia/Brisbane")
 
-    prompt = current_datetime_prompt(datetime(2026, 6, 1, 9, 16, tzinfo=timezone.utc))
+    prompt = current_datetime_prompt(datetime(2026, 6, 1, 9, 16, tzinfo=UTC))
 
     assert "Monday, June 1, 2026 (2026-06-01)" in prompt
     assert "User local time is 7:16 PM" in prompt
@@ -59,8 +59,9 @@ def test_chat_preface_excludes_current_time_for_non_agent_chat():
         use_rag=False,
     )
 
-    assert all(msg.get("role") != "system" or "## Current date and time" not in (msg.get("content") or "")
-               for msg in preface)
+    assert all(
+        msg.get("role") != "system" or "## Current date and time" not in (msg.get("content") or "") for msg in preface
+    )
     assert all("## Current date and time" not in (msg.get("content") or "") for msg in preface)
 
 
@@ -74,7 +75,7 @@ def test_current_datetime_context_message_is_user_role_not_system():
     set_user_tz_offset(600)
     set_user_tz_name("Australia/Brisbane")
 
-    msg = current_datetime_context_message(datetime(2026, 6, 1, 9, 16, tzinfo=timezone.utc))
+    msg = current_datetime_context_message(datetime(2026, 6, 1, 9, 16, tzinfo=UTC))
 
     assert msg["role"] == "user"
     assert "## Current date and time" in msg["content"]
@@ -89,7 +90,7 @@ def test_agent_system_prompt_includes_shared_current_time(monkeypatch):
     Regression guard for a prior version that did
     ``agent_prompt = current_datetime_prompt() + agent_prompt``, which made
     the system message change every single minute."""
-    import src.agent_loop as agent_loop
+    from src import agent_loop
 
     clear_user_time_context()
     set_user_tz_offset(600)
@@ -112,18 +113,20 @@ def test_agent_system_prompt_includes_shared_current_time(monkeypatch):
     assert system_messages[0]["content"] == "BASE PROMPT"
     assert all("## Current date and time" not in (m.get("content") or "") for m in system_messages)
 
-    datetime_messages = [m for m in messages if m["role"] == "user" and "## Current date and time" in (m.get("content") or "")]
+    datetime_messages = [
+        m for m in messages if m["role"] == "user" and "## Current date and time" in (m.get("content") or "")
+    ]
     assert len(datetime_messages) == 1
     assert "Australia/Brisbane, UTC+10:00" in datetime_messages[0]["content"]
 
 
 def test_calendar_relative_time_parser_handles_dotted_pm(monkeypatch):
-    import routes.calendar_routes as calendar_routes
+    from routes import calendar_routes
 
     class FixedDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            value = datetime(2026, 6, 1, 9, 16, tzinfo=timezone.utc)
+            value = datetime(2026, 6, 1, 9, 16, tzinfo=UTC)
             if tz is not None:
                 return value.astimezone(tz)
             return value.replace(tzinfo=None)

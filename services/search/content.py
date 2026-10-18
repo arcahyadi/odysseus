@@ -4,25 +4,24 @@ import copy
 import io
 import ipaddress
 import json
+import logging
 import os
 import re
-import logging
 import socket
 from datetime import datetime, timedelta
-from typing import List
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
-from src.constants import WEB_FETCH_SOFT_MAX_BYTES, WEB_FETCH_HARD_MAX_BYTES, WEB_FETCH_USER_AGENT
+from src.constants import WEB_FETCH_HARD_MAX_BYTES, WEB_FETCH_SOFT_MAX_BYTES, WEB_FETCH_USER_AGENT
 
 from .analytics import RateLimitError, error_logger
 from .cache import (
     CONTENT_CACHE_DIR,
+    cleanup_cache,
     content_cache_index,
     generate_cache_key,
-    cleanup_cache,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,8 +97,7 @@ class BodyTooLargeError(Exception):
         self.url = url
         self.declared_bytes = declared_bytes
         super().__init__(
-            f"response body is {declared_bytes:,} bytes, over the "
-            f"{WEB_FETCH_HARD_MAX_BYTES:,}-byte hard cap"
+            f"response body is {declared_bytes:,} bytes, over the {WEB_FETCH_HARD_MAX_BYTES:,}-byte hard cap"
         )
 
 
@@ -112,11 +110,9 @@ class _CappedFetch:
     (wire bytes; None when absent).
     """
 
-    __slots__ = ("status_code", "headers", "content", "truncated",
-                 "declared_bytes", "encoding", "url")
+    __slots__ = ("status_code", "headers", "content", "truncated", "declared_bytes", "encoding", "url")
 
-    def __init__(self, status_code, headers, content, truncated,
-                 declared_bytes, encoding, url):
+    def __init__(self, status_code, headers, content, truncated, declared_bytes, encoding, url):
         self.status_code = status_code
         self.headers = headers
         self.content = content
@@ -139,8 +135,9 @@ class _CappedFetch:
             )
 
 
-def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 5,
-                    max_bytes: int = None) -> "_CappedFetch":
+def _get_public_url(
+    url: str, headers: dict, timeout: int, max_redirects: int = 5, max_bytes: int = None
+) -> "_CappedFetch":
     """Capped streaming GET with SSRF-guarded manual redirects.
 
     The body is streamed and buffering stops at ``max_bytes`` (default: the
@@ -161,13 +158,13 @@ def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 
         # size and keeps each streamed chunk bounded by the network read.
         req_headers = dict(headers or {})
         req_headers["Accept-Encoding"] = "identity"
-        with httpx.stream("GET", current, headers=req_headers, timeout=timeout,
-                          follow_redirects=False) as response:
+        with httpx.stream("GET", current, headers=req_headers, timeout=timeout, follow_redirects=False) as response:
             if response.status_code in (301, 302, 303, 307, 308):
                 location = response.headers.get("location")
                 if not location:
-                    return _CappedFetch(response.status_code, response.headers, b"",
-                                        False, None, response.encoding, str(response.url))
+                    return _CappedFetch(
+                        response.status_code, response.headers, b"", False, None, response.encoding, str(response.url)
+                    )
                 current = urljoin(str(response.url), location)
                 continue
 
@@ -210,10 +207,17 @@ def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 
                     truncated = True
                     break
                 chunks.append(chunk)
-            return _CappedFetch(response.status_code, response.headers,
-                                b"".join(chunks), truncated, declared,
-                                response.encoding, str(response.url))
+            return _CappedFetch(
+                response.status_code,
+                response.headers,
+                b"".join(chunks),
+                truncated,
+                declared,
+                response.encoding,
+                str(response.url),
+            )
     raise httpx.RequestError("Too many redirects", request=httpx.Request("GET", current))
+
 
 # PDF extraction (optional dependency)
 try:
@@ -260,7 +264,7 @@ def _extract_og_image(soup: BeautifulSoup) -> str:
     return ""
 
 
-def _extract_lists(soup: BeautifulSoup) -> List[List[str]]:
+def _extract_lists(soup: BeautifulSoup) -> list[list[str]]:
     """Return a list of lists, each inner list representing a <ul>/<ol>."""
     all_lists = []
     for lst in soup.find_all(["ul", "ol"]):
@@ -270,7 +274,7 @@ def _extract_lists(soup: BeautifulSoup) -> List[List[str]]:
     return all_lists
 
 
-def _extract_tables(soup: BeautifulSoup) -> List[List[List[str]]]:
+def _extract_tables(soup: BeautifulSoup) -> list[list[list[str]]]:
     """Return a list of tables, each table is a list of rows, each row a list of cell texts."""
     tables_data = []
     for table in soup.find_all("table"):
@@ -284,7 +288,7 @@ def _extract_tables(soup: BeautifulSoup) -> List[List[List[str]]]:
     return tables_data
 
 
-def _extract_code_blocks(soup: BeautifulSoup) -> List[str]:
+def _extract_code_blocks(soup: BeautifulSoup) -> list[str]:
     """Collect text from <pre> and <code> blocks."""
     blocks = []
     for tag in soup.find_all(["pre", "code"]):
@@ -297,8 +301,17 @@ def _extract_code_blocks(soup: BeautifulSoup) -> List[str]:
 def _detect_js_frameworks(soup: BeautifulSoup) -> bool:
     """Very naive detection of common JS frameworks."""
     js_indicators = [
-        "react", "angular", "vue", "svelte", "next", "nuxt",
-        "ember", "backbone", "jquery", "polymer", "mithril",
+        "react",
+        "angular",
+        "vue",
+        "svelte",
+        "next",
+        "nuxt",
+        "ember",
+        "backbone",
+        "jquery",
+        "polymer",
+        "mithril",
     ]
     for script in soup.find_all("script"):
         src = script.get("src", "").lower()
@@ -334,8 +347,7 @@ def _empty_result(url: str, error: str = "") -> dict:
 # ----------------------------------------------------------------------
 # Main content fetcher
 # ----------------------------------------------------------------------
-def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
-                          max_bytes: int = None) -> dict:
+def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0, max_bytes: int = None) -> dict:
     """Fetch and extract meaningful content from a webpage with caching.
 
     ``max_bytes`` raises the download budget per call (clamped to the hard
@@ -352,7 +364,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
     # Check cache
     if cache_file.exists():
         try:
-            with open(cache_file, "r", encoding="utf-8") as f:
+            with open(cache_file, encoding="utf-8") as f:
                 cached_data = json.load(f)
             timestamp = datetime.fromisoformat(cached_data["timestamp"])
             if datetime.now() - timestamp < timedelta(hours=2):
@@ -377,8 +389,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
             "Accept-Encoding": "identity",
             "Connection": "keep-alive",
         }
-        response = _get_public_url(url, headers=headers, timeout=timeout,
-                                   max_bytes=effective_cap)
+        response = _get_public_url(url, headers=headers, timeout=timeout, max_bytes=effective_cap)
 
         if response.status_code == 429:
             raise RateLimitError(f"Rate limit hit for {url} (attempt {retry_attempt})")
@@ -458,9 +469,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
     is_html = "html" in content_type
     is_json = "json" in content_type
     url_path = url.lower().split("?", 1)[0].split("#", 1)[0]
-    looks_like_text_file = url_path.endswith(
-        (".md", ".markdown", ".txt", ".text", ".json", ".jsonl")
-    )
+    looks_like_text_file = url_path.endswith((".md", ".markdown", ".txt", ".text", ".json", ".jsonl"))
     if not is_html and (content_type.startswith("text/") or is_json or looks_like_text_file):
         text_body = (response.text or "").strip()
         result = {
@@ -495,7 +504,9 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
     meta_info = _extract_meta(soup)
     og_image = _extract_og_image(soup)
     js_rendered = _detect_js_frameworks(soup)
-    js_message = "Page appears to be rendered by a JavaScript framework; content may be incomplete." if js_rendered else ""
+    js_message = (
+        "Page appears to be rendered by a JavaScript framework; content may be incomplete." if js_rendered else ""
+    )
 
     # Main textual content (heuristic): prefer semantic / "content"-classed
     # containers to skip nav/footer/boilerplate; tuned for article pages.
@@ -560,9 +571,9 @@ def _cache_result(cache_file, cache_key: str, result: dict, url: str):
 # ----------------------------------------------------------------------
 # Content summarization helpers
 # ----------------------------------------------------------------------
-def extract_key_points(text: str) -> List[str]:
+def extract_key_points(text: str) -> list[str]:
     """Pull out bullet-style key points from a block of text."""
-    points: List[str] = []
+    points: list[str] = []
     bullet_pat = re.compile(r"^\s*[-*•]\s+(.*)")
     numbered_pat = re.compile(r"^\s*\d+[\.\)]\s+(.*)")
     for line in text.splitlines():
@@ -579,14 +590,14 @@ def get_tldr(text: str, max_sentences: int = 3) -> str:
     return " ".join(selected)
 
 
-def extract_quotes(text: str) -> List[str]:
+def extract_quotes(text: str) -> list[str]:
     """Return quoted excerpts that are at least 15 characters long."""
     # Backreference the opening quote so the closing quote must match it —
     # otherwise `"text'` (open double, close single) is treated as a quote.
     return [m.group(2).strip() for m in re.finditer(r'(["\'])([^"\']{15,}?)\1', text)]
 
 
-def extract_statistics(text: str) -> List[str]:
+def extract_statistics(text: str) -> list[str]:
     """Find numbers, percentages, dates and simple measurements."""
     # Match a comma-grouped number (1,000,000) OR a plain digit run (50000) —
     # the old `\d{1,3}(?:,\d{3})*` matched only the first 3 digits of a

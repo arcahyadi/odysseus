@@ -1,0 +1,13 @@
+{
+  "users": [
+    { "id": "550e8400-e29b-41d4-a716-446655440000", "email": "alice@example.com", "name": "Alice Martin", "createdAt": "2025-03-15T10:00:00.000Z" },
+    { "id": "550e8400-e29b-41d4-a716-446655440001", "email": "bob@example.com", "name": "Bob Dupont", "createdAt": "2025-04-20T08:30:00.000Z" }
+  ],
+  "sessions": [
+    { "id": "660e8400-e29b-41d4-a716-446655440000", "userId": "550e8400-e29b-41d4-a716-446655440000", "model": "deepseek-v4-flash", "tokensUsed": 12345, "costUsd": 0.0123, "createdAt": "2026-06-28T14:00:00.000Z" }
+  ],
+  "memories": [
+    { "id": "770e8400-e29b-41d4-a716-446655440000", "content": "AgentOS uses a loop with BudgetEnforcer to cap resource usage.", "tags": ["coding", "planning"], "createdAt": "2026-06-29T09:00:00.000Z" }
+  ],
+  "note": "Generated with faker.seed(42) — reproductible. Run: node tests/fixtures/generate.js > tests/fixtures/test-data.json"
+}

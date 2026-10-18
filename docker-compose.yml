@@ -24,6 +24,7 @@ services:
       # there must match the host's `docker` group (defaults to 963
       # on Debian, 999 on Ubuntu — override via env if yours differs).
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${OBSIDIAN_VAULT_PATH_HOST:-~/obsidian-vault}:/obsidian-vault:ro,z
     group_add:
       - "${DOCKER_GID:-963}"
     extra_hosts:
@@ -48,6 +49,7 @@ services:
       - ODYSSEUS_ADMIN_PASSWORD=${ODYSSEUS_ADMIN_PASSWORD:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
       - SECURE_COOKIES=${SECURE_COOKIES:-false}
+      - ODYSSEUS_TRAEFIK=${ODYSSEUS_TRAEFIK:-off}
       - EMBEDDING_URL=${EMBEDDING_URL:-}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
       - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
@@ -80,12 +82,111 @@ services:
       # Find yours with:  id -u  /  id -g
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
+      - OBSIDIAN_VAULT_PATH=/obsidian-vault
+      - ODYSSEUS_OBSIDIAN_MCP=${ODYSSEUS_OBSIDIAN_MCP:-off}
+      # ── M3 Orchestration kill-switches (all OFF by default) ──────
+      - ODYSSEUS_DESTRUCTIVE_GATE=${ODYSSEUS_DESTRUCTIVE_GATE:-on}
+      - ODYSSEUS_PHASE_TRACKER=${ODYSSEUS_PHASE_TRACKER:-off}
+      - ODYSSEUS_GOVERNANCE_ANCESTRY=${ODYSSEUS_GOVERNANCE_ANCESTRY:-off}
+      - ODYSSEUS_CHECKPOINT=${ODYSSEUS_CHECKPOINT:-off}
+      - ODYSSEUS_MODEL_ROUTER=${ODYSSEUS_MODEL_ROUTER:-off}
+      - ODYSSEUS_RRF_FUSION=${ODYSSEUS_RRF_FUSION:-off}
+      - ODYSSEUS_ZEN_FROM_ENDPOINT=${ODYSSEUS_ZEN_FROM_ENDPOINT:-off}
+      - ODYSSEUS_AUTOEVAL=${ODYSSEUS_AUTOEVAL:-off}
+      - ODYSSEUS_UNIFIED_TOKENS=${ODYSSEUS_UNIFIED_TOKENS:-off}
+      # ── OPA Policy Engine ───────────────────────────────────────
+      - ODYSSEUS_OPA=${ODYSSEUS_OPA:-off}
+      - ODYSSEUS_OPA_URL=${ODYSSEUS_OPA_URL:-http://opa:8181}
+      # ── Channel Gateway ──────────────────────────────────────────
+      - ODYSSEUS_INPROCESS_DISCORD=${ODYSSEUS_INPROCESS_DISCORD:-off}
+      - ODYSSEUS_INPROCESS_TELEGRAM=${ODYSSEUS_INPROCESS_TELEGRAM:-off}
+      - ODYSSEUS_CHANNEL_AGENT_REPLY=${ODYSSEUS_CHANNEL_AGENT_REPLY:-off}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      - DISCORD_DEFAULT_CHANNEL_ID=${DISCORD_DEFAULT_CHANNEL_ID:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_DEFAULT_CHAT_ID=${TELEGRAM_DEFAULT_CHAT_ID:-}
+      # ── Trinité ──────────────────────────────────────────────────
+      - ODYSSEUS_GRAPHIFY=${ODYSSEUS_GRAPHIFY:-off}
+      - ODYSSEUS_OBSIDIAN_MCP=${ODYSSEUS_OBSIDIAN_MCP:-off}
+      # ── M4 Agent Dispatch ────────────────────────────────────────
+      - ODYSSEUS_AGENT_CATALOG=${ODYSSEUS_AGENT_CATALOG:-off}
+      - ODYSSEUS_AGENT_CONSTITUTION=${ODYSSEUS_AGENT_CONSTITUTION:-off}
+      - ODYSSEUS_AGENT_PLANNER=${ODYSSEUS_AGENT_PLANNER:-off}
+      - ODYSSEUS_AGENT_RESEARCHER=${ODYSSEUS_AGENT_RESEARCHER:-off}
+      - ODYSSEUS_AGENT_EXECUTOR=${ODYSSEUS_AGENT_EXECUTOR:-off}
+      - ODYSSEUS_AGENT_DEBUGGER=${ODYSSEUS_AGENT_DEBUGGER:-off}
+      - ODYSSEUS_AGENT_DEBATE=${ODYSSEUS_AGENT_DEBATE:-off}
+      - ODYSSEUS_AGENT_SECURITY=${ODYSSEUS_AGENT_SECURITY:-off}
+      - ODYSSEUS_AGENT_VERIFIER=${ODYSSEUS_AGENT_VERIFIER:-off}
+      - ODYSSEUS_AGENT_EDGECASE=${ODYSSEUS_AGENT_EDGECASE:-off}
+      - ODYSSEUS_AGENT_ROADMAPPER=${ODYSSEUS_AGENT_ROADMAPPER:-off}
+      - ODYSSEUS_AGENT_DESIGN_EXTRACT=${ODYSSEUS_AGENT_DESIGN_EXTRACT:-off}
+      - ODYSSEUS_AGENT_OPEN_DESIGN=${ODYSSEUS_AGENT_OPEN_DESIGN:-off}
+      # ── Exécution ────────────────────────────────────────────────
+      - SCRAPLING_ENABLED=${SCRAPLING_ENABLED:-false}
+      - SCRAPLING_MCP_URL=${SCRAPLING_MCP_URL:-http://scrapling-mcp:8800/mcp}
+      - KROKI_ENABLED=${KROKI_ENABLED:-off}
+      # ── Mémoire & Évolution ──────────────────────────────────────
+      - ACONTEXT_URL=${ACONTEXT_URL:-http://acontext:8029}
+      - ACONTEXT_ENABLED=${ACONTEXT_ENABLED:-false}
+      - ODYSSEUS_AUTOEVOLVE=${ODYSSEUS_AUTOEVOLVE:-off}
+      # ── Observabilité ────────────────────────────────────────────
+      - ODYSSEUS_CODEBURN=${ODYSSEUS_CODEBURN:-off}
+      - ODYSSEUS_AGENTSEAL=${ODYSSEUS_AGENTSEAL:-off}
+      # ── Orchestration & Projet ───────────────────────────────────
+      - ODYSSEUS_LIVE_ORCHESTRATION=${ODYSSEUS_LIVE_ORCHESTRATION:-off}
+      - ODYSSEUS_PROJECT_MANIFEST=${ODYSSEUS_PROJECT_MANIFEST:-off}
+      - ODYSSEUS_N8N=${ODYSSEUS_N8N:-off}
+      # ── Vector Database Backend ──────────────────────────────────
+      - ODYSSEUS_QDRANT=${ODYSSEUS_QDRANT:-off}
+      # ── Meilisearch full-text search ────────────────────────────
+      - ODYSSEUS_MEILISEARCH=${ODYSSEUS_MEILISEARCH:-off}
+      # ── Prefect pipelines ─────────────────────────────────────────
+      - ODYSSEUS_PREFECT=${ODYSSEUS_PREFECT:-off}
+      - PREFECT_API_URL=${PREFECT_API_URL:-http://prefect-server:4200/api/}
+      # ── LocalAI (all-in-one: LLM + embeddings + TTS + STT) ──────────
+      - ODYSSEUS_LOCALAI=${ODYSSEUS_LOCALAI:-off}
+      - MEILI_HOST=${MEILI_HOST:-meilisearch}
+      - MEILI_PORT=${MEILI_PORT:-7700}
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:-odysseus-meili-key}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN  # required for Cookbook Docker socket (docker.sock mount)
+      - CHOWN      # entrypoint creates odysseus user
+      - SETUID     # gosu drops privileges
+      - SETGID     # gosu drops privileges
+      - DAC_OVERRIDE  # chown bind-mounted files on first boot
+    read_only: false  # Garder false car Odysseus écrit dans /app/data
+    tmpfs:
+      - /tmp:size=100m,mode=1777
     depends_on:
       searxng:
         condition: service_healthy
       chromadb:
         condition: service_started
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.odysseus.rule=Host(`${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.odysseus.entrypoints=websecure"
+      - "traefik.http.routers.odysseus.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.odysseus-web.rule=Host(`${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.odysseus-web.entrypoints=web"
+      - "traefik.http.routers.odysseus-web.middlewares=redirect-https"
+      - "traefik.http.middlewares.redirect-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.ratelimit.ratelimit.average=100"
+      - "traefik.http.middlewares.ratelimit.ratelimit.burst=50"
+      - "traefik.http.routers.odysseus.middlewares=ratelimit"
+      - "traefik.http.services.odysseus.loadbalancer.server.port=7000"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:7000/', timeout=5).read(1)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   chromadb:
     image: docker.io/chromadb/chroma:latest
@@ -95,7 +196,17 @@ services:
       - chromadb-data:/chroma/chroma
     environment:
       - ANONYMIZED_TELEMETRY=FALSE
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'timeout 5 bash -c \"echo > /dev/tcp/localhost/8000\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   searxng:
     # Pinned, not :latest — odysseus waits on searxng's healthcheck
@@ -125,13 +236,6 @@ services:
     environment:
       - SEARXNG_BASE_URL=http://localhost:8080/
       - SEARXNG_SECRET=${SEARXNG_SECRET:-}
-    # The official searxng image runs as the non-root `searxng` user, but its
-    # entrypoint still needs to chown /etc/searxng on first boot, drop privs via
-    # su-exec, and (with our wrapper above) write settings.yml into the named
-    # volume. Without these capabilities the wrapper aborts at the redirection
-    # with EACCES and the container fails its healthcheck with permission
-    # errors during setup. Mirrors the cap set recommended by the upstream
-    # searxng-docker compose file. See issue #721.
     cap_drop:
       - ALL
     cap_add:
@@ -146,6 +250,8 @@ services:
       retries: 20
       start_period: 10s
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   ntfy:
     image: docker.io/binwiederhier/ntfy
@@ -157,8 +263,778 @@ services:
     environment:
       - NTFY_BASE_URL=${NTFY_BASE_URL:-http://localhost:8091}
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:80/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  kroki:
+    image: yuzutech/kroki:latest
+    ports:
+      - "127.0.0.1:8700:8000"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      - KROKI_MERMAID_HOST=kroki-mermaid
+    depends_on:
+      - kroki-mermaid
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  kroki-mermaid:
+    image: yuzutech/kroki-mermaid:latest
+    expose:
+      - "8002"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8002/health || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  serena-mcp:
+    runtime: ${ODYSSEUS_GVISOR_RUNTIME:-runc}
+    image: python:3.12
+    command: >
+      bash -c "pip install uv -q && uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --project /workspace --transport sse --port 8765"
+    volumes:
+      - .:/workspace:ro
+    ports:
+      - "127.0.0.1:8765:8765"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    environment:
+      - SERENA_MODE=ide-assistant
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8765),5).close()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  acontext:
+    build:
+      context: ./services/acontext
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8029:8029"
+    volumes:
+      - ${APP_DATA_DIR:-./data}/acontext:/data/acontext:z
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8029),5).close()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Scrapling MCP — Web scraping with anti-bot bypass ──
+  # Uses official pyd4vinci/scrapling image with all browsers + MCP pre-installed.
+  scrapling-mcp:
+    image: pyd4vinci/scrapling:latest
+    command: mcp --http --host 0.0.0.0 --port 8800
+    ports:
+      - "127.0.0.1:8800:8800"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8800),5).close()\""]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+
+  localai:
+    image: localai/localai:latest
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      MODELS_PATH: /models
+      THREADS: ${LOCALAI_THREADS:-4}
+    volumes:
+      - localai-models:/models
+    profiles:
+      - localai
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/v1/models', timeout=5).read(1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "${QDRANT_BIND:-127.0.0.1}:6333:6333"
+      - "${QDRANT_BIND:-127.0.0.1}:6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    profiles:
+      - vectordb
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',6333),5).close()\""]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.14
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-odysseus-meili-key}
+      MEILI_ENV: development
+    ports:
+      - "127.0.0.1:7700:7700"
+    volumes:
+      - meilisearch-data:/meili_data
+    profiles:
+      - default
+      - ""
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/meilisearch --version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  codebase-memory:
+    runtime: ${ODYSSEUS_GVISOR_RUNTIME:-runc}
+    build:
+      context: .
+      dockerfile: docker/cbm/Dockerfile
+    ports:
+      - "127.0.0.1:9749:9749"
+    volumes:
+      - .:/workspace:ro
+      - ${APP_DATA_DIR:-./data}/cbm:/app/data
+    environment:
+      - REPO_PATH=/workspace
+      - MCP_PORT=9749
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  graphify:
+    build:
+      context: .
+      dockerfile: docker/graphify/Dockerfile
+    image: agentos-graphify:latest
+    volumes:
+      - .:/workspace:ro
+      - ${APP_DATA_DIR:-./data}/graphify:/data/graphify
+    environment:
+      - GRAPHIFY_WORKSPACE=/workspace
+      - PYTHONUNBUFFERED=1
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── LangFuse — LLM tracing & observability (profile: observability) ──
+  langfuse-postgres:
+    image: postgres:16-alpine
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=odysseus
+      - POSTGRES_PASSWORD=${LANGFUSE_DB_PASSWORD:-odysseus-langfuse}
+      - POSTGRES_DB=langfuse
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odysseus -d langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  langfuse-server:
+    image: ghcr.io/langfuse/langfuse:2
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://odysseus:${LANGFUSE_DB_PASSWORD:-odysseus-langfuse}@langfuse-postgres:5432/langfuse
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-odysseus-langfuse-nextauth-secret}
+      - SALT=${LANGFUSE_SALT:-odysseus-langfuse-salt}
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - N8N_SECURE_COOKIE=false
+      - N8N_HOST=localhost
+      - N8N_RUNNERS_ENABLED=true
+    volumes:
+      - n8n-data:/home/node/.n8n
+    profiles:
+      - automation
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5678/healthz', timeout=5).read(1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  decision-engine:
+    runtime: ${ODYSSEUS_GVISOR_RUNTIME:-runc}
+    build:
+      context: ${DECISION_ENGINE_PATH:-../ConfigOpenCodeNew/decision-engine}
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8001:8001"
+    environment:
+      - ODYSSEUS_URL=http://odysseus:7000
+      - PORT=8001
+    depends_on:
+      - odysseus
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    profiles:
+      - decision-engine
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8001),3).close()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  opa:
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "--log-level", "info", "/policies"]
+    ports:
+      - "127.0.0.1:8181:8181"
+    volumes:
+      - ./config/policies:/policies:ro,z
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    profiles:
+      - security
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8181/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  traefik:
+    image: traefik:latest
+    command:
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt-data:/letsencrypt
+    profiles:
+      - gateway
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  # ── PostgreSQL 16 + pgvector (production profile, Agent A20) ──────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: odysseus
+      POSTGRES_USER: odysseus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-odysseus}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    profiles:
+      - production
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - FOWNER
+      - DAC_OVERRIDE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odysseus -d odysseus"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ============================================================
+  # M8 — AgentOS Engine (OpenCode isole, PAS celui du dev)
+  # ============================================================
+  agentos-engine:
+    runtime: ${ODYSSEUS_GVISOR_RUNTIME:-runc}
+    build:
+      context: .
+      dockerfile: docker/agentos-engine/Dockerfile
+    image: agentos-engine:latest
+    container_name: agentos-engine
+    ports:
+      - "127.0.0.1:7001:7001"
+    volumes:
+      - agentos-engine-data:/home/agentos/data
+      - agentos-engine-workspace:/home/agentos/workspace
+      - agentos-engine-vault:/home/agentos/obsidian-vault
+    environment:
+      - OPENCODE_API_KEY=${AGENTOS_OPENCODE_API_KEY:-}
+      - AGENTOS_SANDBOX_HOST=agentos-sandbox
+    networks:
+      - agentos-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:7001/health', timeout=5).read(1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================
+  # M8 — AgentOS Sandbox (execution isolee des projets)
+  # ============================================================
+  agentos-sandbox:
+    runtime: ${ODYSSEUS_GVISOR_RUNTIME:-runc}
+    build:
+      context: .
+      dockerfile: docker/agentos-sandbox/Dockerfile
+    image: agentos-sandbox:latest
+    container_name: agentos-sandbox
+    volumes:
+      - agentos-sandbox-data:/home/sandbox/workspace
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - agentos-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============================================================
+  # M8 — WCAG Accessibility Scanner (pa11y)
+  # ============================================================
+  pa11y:
+    image: node:22-slim
+    profiles: [quality]
+    command: >
+      sh -c "npm install -g pa11y-ci && echo 'pa11y ready' && tail -f /dev/null"
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  # ============================================================
+  # M8 — Load Testing (k6)
+  # ============================================================
+  k6:
+    image: grafana/k6:latest
+    profiles: [quality]
+    command: >
+      sh -c "echo 'k6 ready' && tail -f /dev/null"
+    ports:
+      - "127.0.0.1:5665:5665"
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  # ============================================================
+  # Supabase MCP — local Supabase + MCP wrapper
+  # ============================================================
+  supabase:
+    build:
+      context: docker/supabase-mcp
+    ports:
+      - "127.0.0.1:54321:54321"
+    environment:
+      - SUPABASE_URL=http://localhost:54321
+      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+    volumes:
+      - supabase-data:/var/lib/postgresql/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:54321/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================
+  # Vaultwarden — password manager
+  # ============================================================
+  vaultwarden:
+    image: vaultwarden/server:latest
+    ports:
+      - "127.0.0.1:8087:80"
+    volumes:
+      - vaultwarden-data:/data
+    environment:
+      - ADMIN_TOKEN=${VAULTWARDEN_ADMIN_TOKEN:-}
+      - SIGNUPS_ALLOWED=false
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================
+  # Forgejo — self-hosted Git forge
+  # ============================================================
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:10
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - forgejo-data:/data
+    environment:
+      - FORGEJO__server__ROOT_URL=http://localhost:3001
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ============================================================
+  # Dockge — Docker compose stack manager
+  # ============================================================
+  dockge:
+    image: louislam/dockge:latest
+    ports:
+      - "127.0.0.1:5001:5001"
+    volumes:
+      - dockge-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOCKGE_STACKS_DIR=/app/data/stacks
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5001/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============================================================
+  # Uptime Kuma — status monitoring
+  # ============================================================
+  uptime-kuma:
+    image: louislam/uptime-kuma:latest
+    ports:
+      - "127.0.0.1:3002:3001"
+    volumes:
+      - uptime-kuma-data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3001/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================
+  # Gotify — push notification server
+  # ============================================================
+  gotify:
+    image: gotify/server:latest
+    ports:
+      - "127.0.0.1:8092:80"
+    volumes:
+      - gotify-data:/app/data
+    environment:
+      - GOTIFY_DEFAULTUSER_PASS=${GOTIFY_ADMIN_PASSWORD:-admin}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============================================================
+  # Playwright MCP — headless browser automation
+  # ============================================================
+  playwright-mcp:
+    image: mcr.microsoft.com/playwright:latest
+    command: sh -c "while true; do npx @playwright/mcp; sleep 1; done"
+    ports:
+      - "127.0.0.1:8931:8931"
+    environment:
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ============================================================
+  # Browser-Harness — Scrapling fallback web fetcher
+  # ============================================================
+  browser-harness:
+    image: python:3.12-slim
+    command:
+      - bash
+      - -c
+      - |
+        pip install httpx -q && exec python -c '
+        import http.server, json, httpx, urllib.parse
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                parsed = urllib.parse.urlparse(self.path)
+                qs = urllib.parse.parse_qs(parsed.query)
+                url = qs.get("url", [None])[0]
+                if url:
+                    try:
+                        r = httpx.get(url, timeout=30, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+                        self.send_response(r.status_code)
+                        self.send_header("Content-Type", r.headers.get("content-type", "text/html"))
+                        self.end_headers()
+                        self.wfile.write(r.content)
+                    except Exception as e:
+                        self.send_response(500)
+                        self.end_headers()
+                        self.wfile.write(str(e).encode())
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"service": "browser-harness", "status": "ok"}).encode())
+        http.server.HTTPServer(("0.0.0.0", 8801), H).serve_forever()
+        '
+    ports:
+      - "127.0.0.1:8801:8801"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8801),3).close()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
 volumes:
   searxng-data:
   chromadb-data:
+  qdrant-data:
   ntfy-cache:
+  meilisearch-data:
+  letsencrypt-data:
+  localai-models:
+  n8n-data:
+  langfuse-db-data:
+  postgres-data:
+  agentos-engine-data:
+  agentos-engine-workspace:
+  agentos-engine-vault:
+  agentos-sandbox-data:
+  vaultwarden-data:
+  forgejo-data:
+  dockge-data:
+  uptime-kuma-data:
+  gotify-data:
+  supabase-data:
+
+networks:
+  agentos-net:
+    driver: bridge

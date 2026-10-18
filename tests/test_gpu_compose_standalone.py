@@ -55,9 +55,7 @@ def _merge_overlay_into_base(base: dict, overlay: dict) -> dict:
     """Build the expected standalone config: base + overlay on odysseus only."""
     expected = copy.deepcopy(base)
     overlay_service = overlay["services"][SERVICE]
-    expected["services"][SERVICE] = _deep_merge(
-        expected["services"][SERVICE], overlay_service
-    )
+    expected["services"][SERVICE] = _deep_merge(expected["services"][SERVICE], overlay_service)
     return expected
 
 
@@ -120,9 +118,7 @@ def test_nvidia_odysseus_adds_only_overlay(base):
     # deploy block is new and matches the overlay's GPU reservation exactly.
     assert "deploy" not in base_svc
     devices = svc["deploy"]["resources"]["reservations"]["devices"]
-    assert devices == [
-        {"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}
-    ]
+    assert devices == [{"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}]
 
     # Base Docker socket group is preserved; no AMD-only keys leaked in.
     assert "devices" not in svc

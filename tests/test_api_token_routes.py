@@ -16,9 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
 from fastapi import HTTPException
-
 
 # ---------------------------------------------------------------------------
 # Fixture: install per-test stubs via monkeypatch so they are torn down
@@ -62,6 +60,7 @@ def token_routes_mod(monkeypatch):
     monkeypatch.delitem(sys.modules, "routes.api_token_routes", raising=False)
 
     import routes.api_token_routes as mod  # noqa: PLC0415
+
     return mod
 
 
@@ -354,8 +353,12 @@ def test_update_token_rename_preserves_scopes(monkeypatch, token_routes_mod):
     mod = token_routes_mod
 
     token = SimpleNamespace(
-        id="tok123", name="original", owner="alice",
-        token_prefix="ody_orig", scopes="email:read,email:draft", is_active=True,
+        id="tok123",
+        name="original",
+        owner="alice",
+        token_prefix="ody_orig",
+        scopes="email:read,email:draft",
+        is_active=True,
     )
     fake_session = MagicMock()
     fake_session.query.return_value.filter.return_value.first.return_value = token
@@ -378,8 +381,12 @@ def test_update_token_applies_explicit_scopes(monkeypatch, token_routes_mod):
     mod = token_routes_mod
 
     token = SimpleNamespace(
-        id="tok123", name="original", owner="alice",
-        token_prefix="ody_orig", scopes="email:read,email:draft", is_active=True,
+        id="tok123",
+        name="original",
+        owner="alice",
+        token_prefix="ody_orig",
+        scopes="email:read,email:draft",
+        is_active=True,
     )
     fake_session = MagicMock()
     fake_session.query.return_value.filter.return_value.first.return_value = token
@@ -430,8 +437,12 @@ def test_update_token_rejects_non_owner(monkeypatch, token_routes_mod):
     monkeypatch.setattr(mod, "get_current_user", lambda req: req.state.current_user)
 
     token = SimpleNamespace(
-        id="tok123", name="alice-token", owner="alice",
-        token_prefix="ody_alic", scopes="chat", is_active=True,
+        id="tok123",
+        name="alice-token",
+        owner="alice",
+        token_prefix="ody_alic",
+        scopes="chat",
+        is_active=True,
     )
     fake_session = MagicMock()
     fake_session.query.return_value.filter.return_value.first.return_value = token
@@ -472,8 +483,12 @@ def test_update_token_owner_check_skipped_when_auth_disabled(monkeypatch, token_
     monkeypatch.setattr(mod, "get_current_user", lambda req: None)
 
     token = SimpleNamespace(
-        id="tok123", name="original", owner="alice",
-        token_prefix="ody_alic", scopes="chat", is_active=True,
+        id="tok123",
+        name="original",
+        owner="alice",
+        token_prefix="ody_alic",
+        scopes="chat",
+        is_active=True,
     )
     fake_session = MagicMock()
     fake_session.query.return_value.filter.return_value.first.return_value = token
@@ -515,8 +530,12 @@ def test_update_token_with_array_body_does_not_500(monkeypatch, token_routes_mod
     mod = token_routes_mod
 
     token = SimpleNamespace(
-        id="tok123", name="original", owner="alice",
-        token_prefix="ody_orig", scopes="email:read", is_active=True,
+        id="tok123",
+        name="original",
+        owner="alice",
+        token_prefix="ody_orig",
+        scopes="email:read",
+        is_active=True,
     )
     fake_session = MagicMock()
     fake_session.query.return_value.filter.return_value.first.return_value = token
@@ -539,8 +558,12 @@ def test_update_token_with_null_body_does_not_500(monkeypatch, token_routes_mod)
     mod = token_routes_mod
 
     token = SimpleNamespace(
-        id="tok123", name="original", owner="alice",
-        token_prefix="ody_orig", scopes="chat", is_active=True,
+        id="tok123",
+        name="original",
+        owner="alice",
+        token_prefix="ody_orig",
+        scopes="chat",
+        is_active=True,
     )
     fake_session = MagicMock()
     fake_session.query.return_value.filter.return_value.first.return_value = token
@@ -561,8 +584,12 @@ def test_update_token_normal_object_still_works(monkeypatch, token_routes_mod):
     mod = token_routes_mod
 
     token = SimpleNamespace(
-        id="tok123", name="original", owner="alice",
-        token_prefix="ody_orig", scopes="email:read", is_active=True,
+        id="tok123",
+        name="original",
+        owner="alice",
+        token_prefix="ody_orig",
+        scopes="email:read",
+        is_active=True,
     )
     fake_session = MagicMock()
     fake_session.query.return_value.filter.return_value.first.return_value = token

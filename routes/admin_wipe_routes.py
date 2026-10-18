@@ -13,25 +13,30 @@ import json
 import logging
 import os
 import shutil
+
 from fastapi import APIRouter, HTTPException, Request
 
-from core.middleware import require_admin
 from core.database import (
-    SessionLocal,
-    Session as DbSession,
-    ChatMessage as DbChatMessage,
+    CalendarCal,
+    CalendarEvent,
+    Document,
+    DocumentVersion,
+    GalleryAlbum,
+    GalleryImage,
     Memory,
     Note,
     ScheduledTask,
+    SessionLocal,
     TaskRun,
-    Document,
-    DocumentVersion,
-    GalleryImage,
-    GalleryAlbum,
-    CalendarEvent,
-    CalendarCal,
 )
-from src.constants import DATA_DIR, SKILLS_DIR, SKILLS_FILE, GALLERY_DIR, GALLERY_UPLOADS_DIR
+from core.database import (
+    ChatMessage as DbChatMessage,
+)
+from core.database import (
+    Session as DbSession,
+)
+from core.middleware import require_admin
+from src.constants import DATA_DIR, GALLERY_DIR, GALLERY_UPLOADS_DIR, SKILLS_DIR, SKILLS_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +101,7 @@ def setup_admin_wipe_routes(session_manager):
                 # initialised in every deployment.
                 try:
                     from src.memory_vector import get_memory_vector_store
+
                     mv = get_memory_vector_store()
                     if mv and hasattr(mv, "clear"):
                         mv.clear()

@@ -6,7 +6,6 @@ so the HTML branch extracted nothing and web_fetch reported "no readable text
 content". The plain-text branch returns the body as-is. HTML stays on the
 parsing path.
 """
-import types
 
 import pytest
 
@@ -44,9 +43,7 @@ MARKDOWN = "# Title\n\nSome **docs** with a [link](https://example.com).\n"
 
 def test_markdown_text_plain_returns_body(monkeypatch, no_cache):
     _patch_fetch(monkeypatch, MARKDOWN, "text/plain; charset=utf-8")
-    r = content_mod.fetch_webpage_content(
-        "https://raw.githubusercontent.com/o/r/master/Documentation/Patterns.md"
-    )
+    r = content_mod.fetch_webpage_content("https://raw.githubusercontent.com/o/r/master/Documentation/Patterns.md")
     assert r["success"] is True
     assert r["content"] == MARKDOWN.strip()
     assert r["title"] == "patterns.md"

@@ -35,6 +35,20 @@ git grep -n -I -E "(sk-[A-Za-z0-9_-]{20,}|xox[baprs]-|AIza[0-9A-Za-z_-]{20,}|Bea
 
 Only `.env.example`, docs, source, tests, and static assets should be committed. Never commit live `.env` values, `data/` contents, local databases, uploaded files, generated media, logs, backups, auth/session files, API keys, model/provider tokens, password hashes, or personal documents.
 
+## gVisor Kernel Sandbox
+
+gVisor (Google, Apache 2.0) adds a user-space kernel that intercepts all syscalls from MCP containers, preventing container exploits from reaching the host kernel. This is an additional sandbox layer on top of the existing `cap_drop: ALL` + `no-new-privileges: true` Docker hardening.
+
+**Affected services:** serena-mcp, scrapling-mcp, codebase-memory, graphify, decision-engine.
+
+**Enable:** Install gVisor (`runsc`) on the host, then set `ODYSSEUS_GVISOR_RUNTIME=runsc` in `.env`.
+
+**Disable:** Set `ODYSSEUS_GVISOR_RUNTIME=runc` (default) or unset it. No configuration change needed when gVisor is not installed.
+
+**Performance:** gVisor adds ~5-15% I/O overhead. Not recommended for I/O-bound production workloads. Not required for local development.
+
+**Verify:** `docker inspect <service> | grep Runtime` should show `runsc`.
+
 ## Reporting
 
 Please report vulnerabilities privately via GitHub security advisories if available, or by opening a minimal issue that does not disclose exploit details.

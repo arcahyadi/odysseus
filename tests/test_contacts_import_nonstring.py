@@ -4,6 +4,7 @@
 in place, so the next `text.strip()` raised AttributeError -> HTTP 500. The
 handler now coerces with str() and degrades to a structured "no data" response.
 """
+
 import asyncio
 
 from routes.contacts_routes import setup_contacts_routes

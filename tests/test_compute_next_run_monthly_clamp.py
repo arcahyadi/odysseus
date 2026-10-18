@@ -29,28 +29,20 @@ def test_monthly_clamps_to_last_day_of_current_short_month(day, after, expected)
 
 
 def test_monthly_clamped_slot_already_passed_rolls_to_next_month():
-    out = compute_next_run(
-        "monthly", "09:00", scheduled_day=31, after=datetime(2026, 2, 28, 10, 0)
-    )
+    out = compute_next_run("monthly", "09:00", scheduled_day=31, after=datetime(2026, 2, 28, 10, 0))
     assert out == datetime(2026, 3, 31, 9, 0)
 
 
 def test_monthly_regular_day_still_fires_this_month():
-    out = compute_next_run(
-        "monthly", "09:00", scheduled_day=15, after=datetime(2026, 6, 10, 12, 0)
-    )
+    out = compute_next_run("monthly", "09:00", scheduled_day=15, after=datetime(2026, 6, 10, 12, 0))
     assert out == datetime(2026, 6, 15, 9, 0)
 
 
 def test_monthly_regular_day_passed_rolls_to_next_month():
-    out = compute_next_run(
-        "monthly", "09:00", scheduled_day=15, after=datetime(2026, 6, 20, 12, 0)
-    )
+    out = compute_next_run("monthly", "09:00", scheduled_day=15, after=datetime(2026, 6, 20, 12, 0))
     assert out == datetime(2026, 7, 15, 9, 0)
 
 
 def test_monthly_december_year_rollover():
-    out = compute_next_run(
-        "monthly", "09:00", scheduled_day=31, after=datetime(2026, 12, 31, 10, 0)
-    )
+    out = compute_next_run("monthly", "09:00", scheduled_day=31, after=datetime(2026, 12, 31, 10, 0))
     assert out == datetime(2027, 1, 31, 9, 0)

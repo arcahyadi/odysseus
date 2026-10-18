@@ -7,12 +7,11 @@ registered in TOOL_HANDLERS, (2) each handler runs the moved logic and threads
 session_id/owner from the ctx, and (3) tool_execution.py dispatches them
 through the registry rather than the legacy dispatch_ai_tool elif.
 """
+
 import asyncio
 from pathlib import Path
 
-import src.ai_interaction as ai_interaction
-import src.llm_core as llm_core
-import src.database as database
+from src import ai_interaction, database, llm_core
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_tools import model_interaction_tools as mit
 
@@ -39,8 +38,7 @@ def test_chat_with_model_threads_owner_and_returns(monkeypatch):
     monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve)
     monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
 
-    res = asyncio.run(mit.ChatWithModelTool().execute(
-        "model-x\nhello there", {"owner": "alice", "session_id": "s1"}))
+    res = asyncio.run(mit.ChatWithModelTool().execute("model-x\nhello there", {"owner": "alice", "session_id": "s1"}))
 
     assert res == {"model": "model-x", "response": "hi back"}
     assert seen["owner"] == "alice"
@@ -61,8 +59,7 @@ def test_ask_teacher_threads_owner_and_marks_teacher(monkeypatch):
     monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve)
     monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
 
-    res = asyncio.run(mit.AskTeacherTool().execute(
-        "teacher-x\nI am stuck", {"owner": "bob"}))
+    res = asyncio.run(mit.AskTeacherTool().execute("teacher-x\nI am stuck", {"owner": "bob"}))
 
     assert res["teacher"] is True
     assert res["response"] == "do this and that"

@@ -39,10 +39,7 @@ def test_build_models_url_inserts_v1_for_bare_host_port(monkeypatch):
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
     _neutralize_provider_detection(monkeypatch)
 
-    assert (
-        endpoint_resolver.build_models_url("http://localhost:1234")
-        == "http://localhost:1234/v1/models"
-    )
+    assert endpoint_resolver.build_models_url("http://localhost:1234") == "http://localhost:1234/v1/models"
 
 
 def test_build_models_url_accepts_v1_base(monkeypatch):
@@ -50,10 +47,7 @@ def test_build_models_url_accepts_v1_base(monkeypatch):
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
     _neutralize_provider_detection(monkeypatch)
 
-    assert (
-        endpoint_resolver.build_models_url("http://localhost:1234/v1")
-        == "http://localhost:1234/v1/models"
-    )
+    assert endpoint_resolver.build_models_url("http://localhost:1234/v1") == "http://localhost:1234/v1/models"
 
 
 def test_build_models_url_idempotent_for_explicit_models(monkeypatch):
@@ -61,10 +55,7 @@ def test_build_models_url_idempotent_for_explicit_models(monkeypatch):
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
     _neutralize_provider_detection(monkeypatch)
 
-    assert (
-        endpoint_resolver.build_models_url("http://localhost:1234/v1/models")
-        == "http://localhost:1234/v1/models"
-    )
+    assert endpoint_resolver.build_models_url("http://localhost:1234/v1/models") == "http://localhost:1234/v1/models"
 
 
 def test_build_models_url_strips_chat_completions(monkeypatch):
@@ -91,11 +82,14 @@ def test_build_models_url_preserves_explicit_non_v1_path(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("base_url", [
-    "http://localhost:1234?",
-    "http://localhost:1234#fragment",
-    "http://localhost:1234/v1?token=abc",
-])
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://localhost:1234?",
+        "http://localhost:1234#fragment",
+        "http://localhost:1234/v1?token=abc",
+    ],
+)
 def test_build_models_url_rejects_query_or_fragment_base(monkeypatch, base_url):
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
     _neutralize_provider_detection(monkeypatch)

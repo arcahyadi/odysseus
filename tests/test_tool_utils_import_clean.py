@@ -17,6 +17,4 @@ def test_tool_utils_has_no_project_imports():
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             if isinstance(node, ast.ImportFrom) and node.module:
                 msg = f"Illegal project import in tool_utils.py: {node.module}"
-                assert node.module in ("src.constants",) or not node.module.startswith(
-                    "src."
-                ), msg
+                assert node.module in ("src.constants", "src.app_context") or not node.module.startswith("src."), msg

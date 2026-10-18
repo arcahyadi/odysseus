@@ -21,10 +21,7 @@ class _ControlledResearcher(DeepResearcher):
         self.max_active = 0
 
     async def _search(self, query):
-        return [
-            {"url": f"https://example.test/{query}/{i}", "title": f"{query}-{i}"}
-            for i in range(4)
-        ]
+        return [{"url": f"https://example.test/{query}/{i}", "title": f"{query}-{i}"} for i in range(4)]
 
     async def _fetch_and_extract(self, url, question, title):
         self.active += 1
@@ -88,11 +85,13 @@ async def test_fetch_and_extract_uses_configured_timeout(monkeypatch):
 
     async def fake_llm(messages, temperature=0.3, max_tokens=4096, timeout=60):
         captured["timeout"] = timeout
-        return json.dumps({
-            "rational": "relevant",
-            "evidence": "evidence",
-            "summary": "useful page content",
-        })
+        return json.dumps(
+            {
+                "rational": "relevant",
+                "evidence": "evidence",
+                "summary": "useful page content",
+            }
+        )
 
     researcher._llm = fake_llm
 
@@ -125,11 +124,13 @@ async def test_planning_and_query_generation_use_configured_timeouts():
     async def fake_llm(messages, temperature=0.3, max_tokens=4096, timeout=60):
         captured.append(timeout)
         if max_tokens == 1024:
-            return json.dumps({
-                "sub_questions": ["one"],
-                "key_topics": ["topic"],
-                "success_criteria": "complete",
-            })
+            return json.dumps(
+                {
+                    "sub_questions": ["one"],
+                    "key_topics": ["topic"],
+                    "success_criteria": "complete",
+                }
+            )
         return json.dumps(["query one", "query two"])
 
     researcher._llm = fake_llm

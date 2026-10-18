@@ -1,0 +1,328 @@
+# ============================================================
+# Tool Decision Tree — Modular, composable tool assignments
+# ============================================================
+# Every phase maps to tools, gates, fallbacks, and priorities.
+# This is the single source of truth for the orchestrator.
+# ============================================================
+
+decision_tree:
+  phases:
+    CLASSIFY:
+      description: "Risk classification and budget enforcement before any action"
+      tools:
+        - constitution
+        - risk_classifier
+        - paperclip
+        - hexstrike
+      gates:
+        - risk_level_check
+        - budget_check
+      message: "Phase CLASSIFY: risk and budget assessment only"
+
+    KNOW:
+      description: "Retrieve codebase knowledge, semantic context, and search"
+      tools:
+        - cbm
+        - graphify
+        - serena
+        - meilisearch
+        - explore
+        - chromadb
+      priority:
+        - cbm
+        - graphify
+        - serena
+        - meilisearch
+      fallback:
+        - meilisearch
+      gates:
+        - provenance_check
+      message: "Phase KNOW: knowledge retrieval and context building"
+
+    PLAN:
+      description: "Decompose objectives into atomic tasks with architecture review"
+      tools:
+        - planner
+        - gsd_researcher
+        - omo_pattern
+        - caveman_pattern
+        - debate_5_personas
+      gates:
+        - architecture_review
+      message: "Phase PLAN: decomposition and architecture review"
+
+    BUILD:
+      description: "Implementation — write code, generate diagrams, scrape, test"
+      tools:
+        - executor
+        - scrapling
+        - kroki
+        - serena
+        - playwright
+        - supabase
+        - faker
+        - browser_harness
+      priority:
+        - kroki
+        - scrapling
+        - playwright
+      optional:
+        - faker
+        - supabase
+      gates:
+        - code_generation_gate
+      message: "Phase BUILD: full implementation access"
+
+    QUALITY:
+      description: "Quality assurance — review, audit, accessibility, load testing"
+      tools:
+        - reviewer
+        - security_audit
+        - codeburn
+        - agentseal
+        - debate_5_personas
+        - pa11y
+        - k6
+      gates:
+        - security_scan
+        - accessibility_check
+        - load_test
+      message: "Phase QUALITY: security, accessibility, and load validation"
+
+    AUTOEVAL:
+      description: "Auto-evaluation — test coverage, edge cases, verification"
+      tools:
+        - autoeval
+        - gsd_verifier
+        - edge_case_gen
+        - k6
+      gates:
+        - test_suite_pass
+        - coverage_threshold
+      message: "Phase AUTOEVAL: evaluation and coverage verification"
+
+    MEMORY_OBSERVE:
+      description: "Memory distillation, observability, provenance, and evolution"
+      tools:
+        - memory_writer
+        - observer
+        - acontext
+        - obsidian_mcp
+        - langfuse
+        - gsd_roadmapper
+        - auto_evolve
+      gates:
+        - provenance_check
+        - drift_monitor
+      message: "Phase MEMORY_OBSERVE: distillation, tracing, and self-evolution"
+
+  tool_capabilities:
+    cbm:
+      type: mcp
+      phase: KNOW
+      provides:
+        - codebase_graph
+        - dependency_analysis
+      requires:
+        - "codebase-memory:9749"
+    graphify:
+      type: mcp
+      phase: KNOW
+      provides:
+        - semantic_graph
+        - community_detection
+        - knowledge_graph
+      requires:
+        - "graphify:9750"
+
+    serena:
+      type: mcp
+      phase:
+        - KNOW
+        - BUILD
+      provides:
+        - references
+        - symbols
+        - semantic_edit
+        - code_navigation
+      requires:
+        - "serena-mcp:8765"
+
+    scrapling:
+      type: mcp
+      phase: BUILD
+      provides:
+        - web_scraping
+        - anti_bot_bypass
+      fallback:
+        - browser_harness
+        - searxng
+
+    browser_harness:
+      type: mcp
+      phase: BUILD
+      provides:
+        - headless_browser
+        - web_automation
+      requires:
+        - "browser-harness:8801"
+
+    kroki:
+      type: http
+      phase: BUILD
+      provides:
+        - diagram_rendering
+        - mermaid_rendering
+      requires:
+        - "kroki:8700"
+
+    playwright:
+      type: mcp
+      phase: BUILD
+      provides:
+        - browser_testing
+        - screenshots
+        - e2e_tests
+
+    supabase:
+      type: mcp
+      phase: BUILD
+      provides:
+        - database
+        - auth
+      optional: true
+      fallback:
+        - sqlite
+        - postgres
+
+    meilisearch:
+      type: http
+      phase: KNOW
+      provides:
+        - full_text_search
+        - document_indexing
+      requires:
+        - "meilisearch:7700"
+
+    chromadb:
+      type: http
+      phase: KNOW
+      provides:
+        - vector_search
+        - semantic_retrieval
+        - deduplication
+      requires:
+        - "chromadb:8100"
+      fallback:
+        - qdrant
+        - sqlite
+
+    searxng:
+      type: http
+      phase: KNOW
+      provides:
+        - web_search
+        - meta_search
+      requires:
+        - "searxng:8080"
+
+    ntfy:
+      type: http
+      phase: ALL
+      provides:
+        - notifications
+        - alerts
+        - push_notifications
+      requires:
+        - "ntfy:8091"
+
+    langfuse:
+      type: http
+      phase: MEMORY_OBSERVE
+      provides:
+        - tracing
+        - observability
+        - llm_analytics
+
+    vaultwarden:
+      type: http
+      phase: ALL
+      provides:
+        - secrets_management
+        - credential_storage
+
+    codeburn:
+      type: cli
+      phase: QUALITY
+      provides:
+        - code_quality_metrics
+        - technical_debt_tracking
+
+    agentseal:
+      type: python
+      phase: QUALITY
+      provides:
+        - injection_probes
+        - prompt_security
+
+    k6:
+      type: cli
+      phase:
+        - QUALITY
+        - AUTOEVAL
+      provides:
+        - load_testing
+        - performance_benchmarks
+
+    pa11y:
+      type: cli
+      phase: QUALITY
+      provides:
+        - accessibility_scan
+        - wcag_compliance
+
+    acontext:
+      type: mcp
+      phase: MEMORY_OBSERVE
+      provides:
+        - skill_generation
+        - context_generation
+
+    obsidian_mcp:
+      type: mcp
+      phase: MEMORY_OBSERVE
+      provides:
+        - vault_rw
+        - memory_persistence
+        - note_management
+
+  fallback_chains:
+    scrapling:
+      - browser_harness
+      - searxng
+    serena:
+      - cbm
+      - graphify
+    graphify:
+      - cbm
+    cbm:
+      - meilisearch
+    supabase:
+      - postgres
+      - sqlite
+    chromadb:
+      - qdrant
+      - sqlite
+    model_routing:
+      - strong
+      - reasoning
+      - standard
+      - fast
+      - code
+      - creative
+    embeddings:
+      - http_api
+      - fastembed_onnx
+    chromadb_vector:
+      - qdrant
+      - sqlite

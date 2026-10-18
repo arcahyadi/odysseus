@@ -5,15 +5,15 @@ routes/calendar_routes using the same stub-friendly import pattern
 as test_null_owner_gates.py. No live DB or FastAPI test client needed.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
 from tests.test_null_owner_gates import _import_calendar_helpers
 
-
 # ── _resolve_base_uid ──────────────────────────────────────────────────
+
 
 def test_resolve_base_uid_plain_passthrough():
     cal = _import_calendar_helpers()
@@ -103,8 +103,7 @@ def test_expand_yearly_old_dtstart_later_year_single_occurrence():
     results = cal._expand_rrule(ev, datetime(2028, 1, 1), datetime(2029, 1, 1))
 
     assert len(results) == 1, (
-        f"Expected exactly 1 yearly occurrence in 2028, got {len(results)}: "
-        f"{[r['uid'] for r in results]}"
+        f"Expected exactly 1 yearly occurrence in 2028, got {len(results)}: {[r['uid'] for r in results]}"
     )
     r = results[0]
     assert r["uid"] == "evt-bday-001::2028-04-15T10:00"
@@ -264,8 +263,8 @@ def test_expand_multi_day_crossing_range_start():
     ev = _make_event(
         uid="evt-weekly-multi",
         summary="Weekend Trip",
-        dtstart=datetime(2026, 5, 29, 18, 0),   # Friday evening
-        dtend=datetime(2026, 6, 1, 12, 0),       # Monday noon
+        dtstart=datetime(2026, 5, 29, 18, 0),  # Friday evening
+        dtend=datetime(2026, 6, 1, 12, 0),  # Monday noon
         rrule="FREQ=WEEKLY",
     )
     # Query the Monday window — the occurrence starts Fri but ends Mon,
@@ -276,8 +275,7 @@ def test_expand_multi_day_crossing_range_start():
     # The 2026-05-29 occurrence starts Fri May 29 and ends Mon Jun 1 —
     # occ_end=2026-06-01T12:00 > start=2026-06-01 → included.
     assert len(results) == 1, (
-        f"Expected 1 occurrence crossing into the window, got {len(results)}: "
-        f"{[r['uid'] for r in results]}"
+        f"Expected 1 occurrence crossing into the window, got {len(results)}: {[r['uid'] for r in results]}"
     )
     assert results[0]["uid"] == "evt-weekly-multi::2026-05-29T18:00"
 
@@ -289,7 +287,7 @@ def test_expand_multi_day_fully_before_window():
     ev = _make_event(
         uid="evt-multi",
         dtstart=datetime(2026, 5, 29, 18, 0),
-        dtend=datetime(2026, 6, 1, 0, 0),   # ends at midnight Jun 1
+        dtend=datetime(2026, 6, 1, 0, 0),  # ends at midnight Jun 1
         rrule="FREQ=WEEKLY",
     )
     # Query starting Jun 1 midnight — occ_end <= start, excluded

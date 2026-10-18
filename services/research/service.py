@@ -2,8 +2,8 @@
 """Research service — deep research with LLM-in-the-loop."""
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import List, Optional, Callable
 
 from .research_handler import ResearchHandler
 
@@ -15,6 +15,7 @@ _SOURCE_LINK_RE = re.compile(r"^\s*-\s*\[(?P<title>[^\]]*)\]\((?P<url>[^)]+)\)\s
 @dataclass
 class ResearchSource:
     """A source found during research."""
+
     url: str
     title: str
     snippet: str
@@ -24,10 +25,11 @@ class ResearchSource:
 @dataclass
 class ResearchResult:
     """Result of a deep research query."""
+
     query: str
     summary: str
-    sources: List[ResearchSource] = field(default_factory=list)
-    sections: List[str] = field(default_factory=list)
+    sources: list[ResearchSource] = field(default_factory=list)
+    sections: list[str] = field(default_factory=list)
     tokens_used: int = 0
     duration_seconds: float = 0.0
 
@@ -52,7 +54,7 @@ class ResearchService:
         llm_endpoint: str,
         llm_model: str,
         max_time: int = 300,
-        on_progress: Optional[Callable[[dict], None]] = None,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> ResearchResult:
         """
         Perform deep research on a topic.
@@ -68,6 +70,7 @@ class ResearchService:
             ResearchResult with findings
         """
         import time
+
         start = time.time()
 
         result = await self.handler.call_research_service(
@@ -112,7 +115,7 @@ class ResearchService:
         )
 
     @staticmethod
-    def _parse_sources(report: str) -> List[ResearchSource]:
+    def _parse_sources(report: str) -> list[ResearchSource]:
         """Extract sources from the markdown ### Sources section of a report.
 
         ResearchHandler emits one ``- [title](url)`` link per deduplicated
@@ -121,7 +124,7 @@ class ResearchService:
         """
         if not report:
             return []
-        sources: List[ResearchSource] = []
+        sources: list[ResearchSource] = []
         seen = set()
         in_sources = False
         for line in report.splitlines():
@@ -154,11 +157,9 @@ class ResearchService:
         max_time: int = 300,
     ) -> dict:
         """Start research in background. Returns task info."""
-        return self.handler.start_research(
-            session_id, topic, llm_endpoint, llm_model, max_time
-        )
+        return self.handler.start_research(session_id, topic, llm_endpoint, llm_model, max_time)
 
-    def get_status(self, session_id: str) -> Optional[dict]:
+    def get_status(self, session_id: str) -> dict | None:
         """Get status of background research."""
         return self.handler.get_status(session_id)
 

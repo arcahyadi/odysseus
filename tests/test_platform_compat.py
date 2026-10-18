@@ -5,7 +5,6 @@ import io
 import sys
 from pathlib import Path
 
-
 _MODULE_PATH = Path(__file__).resolve().parents[1] / "core" / "platform_compat.py"
 _SPEC = importlib.util.spec_from_file_location("platform_compat_under_test", _MODULE_PATH)
 platform_compat = importlib.util.module_from_spec(_SPEC)
@@ -154,6 +153,7 @@ def test_get_wsl_windows_user_profile_prefers_powershell(monkeypatch):
 
 def test_get_wsl_windows_user_profile_falls_back_to_users_dir(monkeypatch):
     import os
+
     monkeypatch.setattr(platform_compat, "is_wsl", lambda: True)
 
     def raise_run(*_a, **_k):
@@ -167,10 +167,7 @@ def test_get_wsl_windows_user_profile_falls_back_to_users_dir(monkeypatch):
     )
 
     def fake_isdir(path):
-        return os.path.normpath(path) in {
-            os.path.normpath("/mnt/c/Users"),
-            os.path.normpath("/mnt/c/Users/alice")
-        }
+        return os.path.normpath(path) in {os.path.normpath("/mnt/c/Users"), os.path.normpath("/mnt/c/Users/alice")}
 
     monkeypatch.setattr(platform_compat.os.path, "isdir", fake_isdir)
 
@@ -191,7 +188,7 @@ def test_get_wsl_windows_user_profile_returns_none_when_nothing_found(monkeypatc
 
 def test_nvidia_path_override_is_correct_string(monkeypatch):
     monkeypatch.setattr(platform_compat, "_SSH_PATH_MEMBERS", ["path1", "path2"])
-    assert platform_compat._ssh_path_override() == "export PATH=\"$PATH:path1:path2\"; "
+    assert platform_compat._ssh_path_override() == 'export PATH="$PATH:path1:path2"; '
 
 
 def test_windows_powershell_argv_defaults_include_no_profile_and_noninteractive():

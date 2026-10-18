@@ -75,8 +75,8 @@ import companion.routes as R  # noqa: E402
 from companion.routes import mint_pairing_token, setup_companion_routes  # noqa: E402
 from core.middleware import require_admin  # noqa: E402
 
-
 # --- token minting: shown once, hashed at rest -----------------------------
+
 
 def test_mint_token_returns_raw_once_and_stores_only_a_hash(monkeypatch):
     monkeypatch.setitem(sys.modules, "core.database", _db)
@@ -129,6 +129,7 @@ def test_find_admin_user_ignores_invalid_auth_shape(tmp_path, monkeypatch, paylo
 
 # --- admin-only gate: a bearer/non-admin caller is rejected ----------------
 
+
 def _admin_mgr(is_admin):
     return SimpleNamespace(is_admin=lambda u: is_admin, is_configured=True)
 
@@ -163,6 +164,7 @@ def test_admin_user_passes_the_gate(monkeypatch):
 
 
 # --- CSRF: minting is POST, never GET --------------------------------------
+
 
 def _pair_methods():
     router = setup_companion_routes()

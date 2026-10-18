@@ -10,6 +10,7 @@ filename itself as the sub-area.
 The categories mirror ``tests/TESTING_STANDARD.md``. This module imports nothing
 from the application - only the standard library - and changes no test behavior.
 """
+
 from __future__ import annotations
 
 import re
@@ -19,21 +20,52 @@ from pathlib import Path
 
 # Area keyword sets. Keep these small and explicit; prefer leaving a file
 # ``uncategorized`` over guessing. Matching is exact, token-by-token.
-SECURITY_KEYWORDS = frozenset({
-    "security", "auth", "owner", "scope",
-    "ssrf", "xss", "confinement", "permission", "redaction",
-})
+SECURITY_KEYWORDS = frozenset(
+    {
+        "security",
+        "auth",
+        "owner",
+        "scope",
+        "ssrf",
+        "xss",
+        "confinement",
+        "permission",
+        "redaction",
+    }
+)
 CLI_KEYWORDS = frozenset({"cli"})
 ROUTES_KEYWORDS = frozenset({"route", "routes", "api"})
-SERVICES_KEYWORDS = frozenset({
-    "llm", "provider", "cookbook", "session", "history", "email",
-    "calendar", "memory", "gallery", "document", "research", "mcp",
-    "scheduler", "webhook", "embedding",
-})
-UNIT_KEYWORDS = frozenset({
-    "parse", "parser", "parsing", "nonstring", "nondict",
-    "atomic", "regex", "tokenize",
-})
+SERVICES_KEYWORDS = frozenset(
+    {
+        "llm",
+        "provider",
+        "cookbook",
+        "session",
+        "history",
+        "email",
+        "calendar",
+        "memory",
+        "gallery",
+        "document",
+        "research",
+        "mcp",
+        "scheduler",
+        "webhook",
+        "embedding",
+    }
+)
+UNIT_KEYWORDS = frozenset(
+    {
+        "parse",
+        "parser",
+        "parsing",
+        "nonstring",
+        "nondict",
+        "atomic",
+        "regex",
+        "tokenize",
+    }
+)
 
 # Keyword-matched areas, in priority order (first match wins). Security is a
 # cross-cutting concern and intentionally outranks the feature areas, so e.g.
@@ -122,7 +154,7 @@ def _in_helpers_dir(path: str | Path) -> bool:
     unrelated ancestor directory merely named ``helpers`` does not count.
     """
     parts = Path(path).parent.parts
-    adjacent_pairs = list(zip(parts, parts[1:]))
+    adjacent_pairs = list(zip(parts, parts[1:], strict=False))
     return ("tests", "helpers") in adjacent_pairs
 
 

@@ -58,13 +58,15 @@ def test_library_returns_only_caller_owned_unarchived_reports(tmp_path, monkeypa
     router = setup_research_routes(_research_handler())
     target = _route(router, "/api/research/library", "GET")
 
-    out = asyncio.run(target(
-        request=_request("alice"),
-        search=None,
-        sort="recent",
-        limit=50,
-        archived=False,
-    ))
+    out = asyncio.run(
+        target(
+            request=_request("alice"),
+            search=None,
+            sort="recent",
+            limit=50,
+            archived=False,
+        )
+    )
 
     assert [item["id"] for item in out["research"]] == ["alice-live"]
     assert out["total"] == 1

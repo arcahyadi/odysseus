@@ -12,13 +12,20 @@ Presets are name → {name, temperature, system_prompt} in
 """
 
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
-import argparse, json, logging, os, sys
+import argparse
+import json
+import os
+import sys
 from pathlib import Path
 
 _PATH = _REPO_ROOT / "data" / "presets.json"
@@ -64,12 +71,14 @@ def cmd_list(args):
     for key, val in sorted(presets.items()):
         if not isinstance(val, dict):
             continue
-        rows.append({
-            "id": key,
-            "name": val.get("name") or key,
-            "temperature": val.get("temperature"),
-            "prompt_length": len(val.get("system_prompt") or ""),
-        })
+        rows.append(
+            {
+                "id": key,
+                "name": val.get("name") or key,
+                "temperature": val.get("temperature"),
+                "prompt_length": len(val.get("system_prompt") or ""),
+            }
+        )
     emit(rows, args)
 
 

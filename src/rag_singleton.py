@@ -1,18 +1,18 @@
 """
 RAG singleton instance for the application.
 """
-import os
+
 import logging
 import time
-from pathlib import Path
 
 from src.constants import RAG_DIR
-from src.runtime_paths import get_app_root
+from src.app_context import app_context
+
 
 logger = logging.getLogger(__name__)
 
-rag_instance = None
-_last_attempt = 0.0
+app_context.caches.rag_instance = None
+app_context.caches.rag_last_attempt = 0.0
 _RETRY_INTERVAL = 30  # seconds between re-init attempts
 
 
@@ -30,34 +30,33 @@ def get_rag_manager():
     That compat issue is resolved in current pinned versions
     (chromadb 1.5.x + pydantic 2.13.x), so the real initializer is back.
     """
-    global rag_instance, _last_attempt
 
-    if rag_instance is not None:
-        return rag_instance
+    if app_context.caches.rag_instance is not None:
+        return app_context.caches.rag_instance
 
     now = time.monotonic()
-    if now - _last_attempt < _RETRY_INTERVAL:
+    if now - app_context.caches.rag_last_attempt < _RETRY_INTERVAL:
         return None  # too soon to retry — last attempt failed
 
-    _last_attempt = now
+    app_context.caches.rag_last_attempt = now
 
     try:
         from src.rag_vector import VectorRAG
 
         persist_dir = RAG_DIR
 
-        rag_instance = VectorRAG(persist_directory=persist_dir)
-        if not rag_instance.healthy:
+        app_context.caches.rag_instance = VectorRAG(persist_directory=persist_dir)
+        if not app_context.caches.rag_instance.healthy:
             logger.warning("VectorRAG created but not healthy, will retry later")
-            rag_instance = None
+            app_context.caches.rag_instance = None
         else:
             logger.info("Initialized VectorRAG with ChromaDB")
 
     except ImportError as e:
         logger.warning(f"VectorRAG not available: {e}")
-        rag_instance = None
+        app_context.caches.rag_instance = None
     except Exception as e:
         logger.error(f"Failed to initialize RAG: {e}")
-        rag_instance = None
+        app_context.caches.rag_instance = None
 
-    return rag_instance
+    return app_context.caches.rag_instance

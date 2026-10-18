@@ -1,22 +1,24 @@
 import asyncio
+import collections
 import sys
 import time
-import collections
-from typing import Optional, Callable, Awaitable, Tuple, Dict
+from collections.abc import Awaitable, Callable
+
 from src.constants import MAX_OUTPUT_CHARS
 
-DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
+DEFAULT_BASH_TIMEOUT = 60 * 60  # 1 hour
 DEFAULT_PYTHON_TIMEOUT = 60 * 60
 
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
 
+
 async def _run_subprocess_streaming(
     proc: asyncio.subprocess.Process,
     *,
     timeout: float,
-    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
-) -> Tuple[str, str, Optional[int], bool]:
+    progress_cb: Callable[[dict], Awaitable[None]] | None = None,
+) -> tuple[str, str, int | None, bool]:
     started = time.time()
     stdout_full: list[str] = []
     stderr_full: list[str] = []
@@ -41,10 +43,12 @@ async def _run_subprocess_streaming(
         while True:
             if progress_cb:
                 try:
-                    await progress_cb({
-                        "elapsed_s": round(time.time() - started, 1),
-                        "tail": "\n".join(list(tail)),
-                    })
+                    await progress_cb(
+                        {
+                            "elapsed_s": round(time.time() - started, 1),
+                            "tail": "\n".join(list(tail)),
+                        }
+                    )
                 except Exception:
                     pass
             await asyncio.sleep(PROGRESS_INTERVAL_S)
@@ -56,7 +60,7 @@ async def _run_subprocess_streaming(
     timed_out = False
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         timed_out = True
         try:
             proc.kill()
@@ -100,9 +104,12 @@ async def _run_subprocess_streaming(
         timed_out,
     )
 
+
 class BashTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import agent_cwd, _truncate
+        from src.tool_execution import agent_cwd
+        from src.tool_utils import _truncate
+
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         proc = await asyncio.create_subprocess_shell(
@@ -118,7 +125,12 @@ class BashTool:
             progress_cb=progress_cb,
         )
         if timed_out:
-            return {"error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
+            return {
+                "error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed",
+                "exit_code": 124,
+                "stdout": _truncate(stdout, MAX_OUTPUT_CHARS),
+                "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),
+            }
         output = stdout.rstrip()
         err = stderr.rstrip()
         if err:
@@ -126,13 +138,19 @@ class BashTool:
         output = _truncate(output, MAX_OUTPUT_CHARS)
         return {"output": output or "(no output)", "exit_code": rc or 0}
 
+
 class PythonTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import agent_cwd, _truncate
+        from src.tool_execution import agent_cwd
+        from src.tool_utils import _truncate
+
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         proc = await asyncio.create_subprocess_exec(
-            (sys.executable or "python"), "-I", "-c", content,
+            (sys.executable or "python"),
+            "-I",
+            "-c",
+            content,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_subproc_env,
@@ -144,7 +162,12 @@ class PythonTool:
             progress_cb=progress_cb,
         )
         if timed_out:
-            return {"error": f"python: timed out after {DEFAULT_PYTHON_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
+            return {
+                "error": f"python: timed out after {DEFAULT_PYTHON_TIMEOUT}s — process killed",
+                "exit_code": 124,
+                "stdout": _truncate(stdout, MAX_OUTPUT_CHARS),
+                "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),
+            }
         output = stdout.rstrip()
         err = stderr.rstrip()
         if err:

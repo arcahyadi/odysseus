@@ -7,6 +7,7 @@ in isolation), so — per the repo's convention for DOM-coupled guards (cf. the
 document.js diff-discard and memory.js filter-guard tests) — this asserts the
 tracked-handler pattern in source.
 """
+
 from pathlib import Path
 
 SRC = Path("static/js/notes.js").read_text(encoding="utf-8")

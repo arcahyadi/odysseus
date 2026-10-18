@@ -1,0 +1,104 @@
+name: AgentOS E2E Full-Stack Tests
+
+on:
+  push:
+    branches: [main, dev, feat/*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - run: pip install ruff
+      - run: ruff check src/ tests/ --select E,F,W --ignore E501
+      - run: ruff format --check src/ tests/
+
+  unit-tests:
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        group:
+          - "tests/test_thought_bus.py tests/test_durable_execution.py"
+          - "tests/test_memory_provenance.py tests/test_preferences.py"
+          - "tests/test_visual_output.py tests/test_modules_6_5_6_7.py"
+          - "tests/test_sfd_100.py tests/test_integration_full.py"
+          - "tests/test_ui_pipeline.py tests/test_http_integration.py"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - run: pip install -r requirements.txt
+      - run: python -m pytest ${{ matrix.group }} -v --tb=short --timeout=60
+
+  e2e-http:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - run: pip install -r requirements.txt
+      - name: Start server in background
+        run: |
+          python -m uvicorn app:app --host 127.0.0.1 --port 7000 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7000/api/health && break
+            sleep 2
+          done
+      - name: E2E test script
+        run: bash scripts/test-e2e.sh --skip-docker
+      - name: Mode detector verification
+        run: |
+          python -c "
+          from src.mode_detector import detect_mode, InteractionMode
+          assert detect_mode('build a backup system') == InteractionMode.AGENT
+          assert detect_mode('hello') == InteractionMode.CHAT
+          assert detect_mode('refactor the auth module') == InteractionMode.AGENT
+          assert detect_mode('what is python') == InteractionMode.CHAT
+          print('Mode detector: OK')
+          "
+      - name: SFD 100% alignment check
+        run: python -m pytest tests/test_sfd_100.py tests/test_integration_full.py -v --tb=short
+
+  module-load:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - run: pip install -r requirements.txt
+      - name: Verify all 11 modules load
+        run: |
+          python -c "
+          modules = [
+              ('thought_bus', 'src.thought_bus'),
+              ('durable_execution', 'src.durable_execution'),
+              ('memory_provenance', 'src.memory_provenance'),
+              ('preferences', 'src.preferences'),
+              ('visual_output', 'src.visual_output'),
+              ('classification', 'src.classification'),
+              ('content_security', 'src.content_security'),
+              ('tool_discovery', 'src.tool_discovery'),
+              ('conversation_search', 'src.conversation_search'),
+              ('multi_agent_decision', 'src.multi_agent_decision'),
+              ('context_manager', 'src.context_manager'),
+          ]
+          failed = []
+          for name, path in modules:
+              try:
+                  __import__(path)
+                  print(f'  OK: {name}')
+              except Exception as e:
+                  print(f'  FAIL: {name} — {e}')
+                  failed.append(name)
+          if failed:
+              print(f'FAILED: {failed}')
+              exit(1)
+          print(f'All {len(modules)} modules loaded successfully')
+          "

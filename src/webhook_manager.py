@@ -7,8 +7,7 @@ import ipaddress
 import json
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -17,12 +16,14 @@ from src.database import SessionLocal, Webhook
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_EVENTS = frozenset({
-    "session.created",
-    "chat.completed",
-    "chat.message",
-    "webhook.test",
-})
+ALLOWED_EVENTS = frozenset(
+    {
+        "session.created",
+        "chat.completed",
+        "chat.message",
+        "webhook.test",
+    }
+)
 
 # Block requests to private/internal networks
 _PRIVATE_NETWORKS = [
@@ -39,7 +40,7 @@ _PRIVATE_NETWORKS = [
 
 def _utcnow() -> datetime:
     """Return naive UTC for existing DB columns while avoiding datetime.utcnow()."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _ip_is_private(addr: ipaddress._BaseAddress) -> bool:
@@ -63,6 +64,7 @@ def _ip_is_private(addr: ipaddress._BaseAddress) -> bool:
 def _resolve_hostname_ips(hostname: str) -> list:
     """Resolve a hostname to all its A/AAAA records. Empty list on failure."""
     import socket
+
     try:
         infos = socket.getaddrinfo(hostname, None)
     except Exception:
@@ -132,7 +134,9 @@ def validate_events(events_str: str) -> str:
         raise ValueError("At least one event is required")
     invalid = set(events) - ALLOWED_EVENTS
     if invalid:
-        raise ValueError(f"Invalid events: {', '.join(sorted(invalid))}. Allowed: {', '.join(sorted(ALLOWED_EVENTS - {'webhook.test'}))}")
+        raise ValueError(
+            f"Invalid events: {', '.join(sorted(invalid))}. Allowed: {', '.join(sorted(ALLOWED_EVENTS - {'webhook.test'}))}"
+        )
     return ",".join(events)
 
 
@@ -146,9 +150,9 @@ def validate_events(events_str: str) -> str:
 # greedy class or a repetition over a mandatory ':'/'.' delimiter, so there is no
 # nested-quantifier backtracking (ReDoS-safe).
 _IP_CANDIDATE = re.compile(
-    r'\[[^\[\]\s]*\](?::\d+)?'
-    r'|(?<![\w.:%])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,}'
-    r'(?:(?:\.[0-9]{1,3}){3})?(?:%[0-9A-Za-z._-]+)?'
+    r"\[[^\[\]\s]*\](?::\d+)?"
+    r"|(?<![\w.:%])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,}"
+    r"(?:(?:\.[0-9]{1,3}){3})?(?:%[0-9A-Za-z._-]+)?"
 )
 
 
@@ -161,23 +165,23 @@ def _redact_ip_candidate(match: re.Match) -> str:
     [redacted], never nested or partial) for scoped/mapped/ported forms.
     """
     token = match.group(0)
-    bracketed = token.startswith('[')
+    bracketed = token.startswith("[")
     candidate = token
     if bracketed:
         # Keep only what's inside [...]; the trailing :port is dropped.
-        candidate = candidate[1:candidate.index(']')]
+        candidate = candidate[1 : candidate.index("]")]
     # A zone id (fe80::1%eth0) is not part of the address ipaddress parses.
-    candidate = candidate.split('%', 1)[0]
+    candidate = candidate.split("%", 1)[0]
     # The loose bare pattern can trail one stray ':' (e.g. "::1:" in "host ::1:
     # down"); drop it unless it's the "::" compression marker.
-    if candidate.endswith(':') and not candidate.endswith('::'):
+    if candidate.endswith(":") and not candidate.endswith("::"):
         candidate = candidate[:-1]
     try:
         addr = ipaddress.ip_address(candidate)
     except ValueError:
         return token
     if bracketed or isinstance(addr, ipaddress.IPv6Address):
-        return '[redacted]'
+        return "[redacted]"
     return token
 
 
@@ -190,9 +194,9 @@ def sanitize_error(error: str, max_len: int = 200) -> str:
     # guards (clock times, MACs, C++ "::") come from the stdlib, not a regex.
     cleaned = _IP_CANDIDATE.sub(_redact_ip_candidate, error)
     # Remove remaining bare IPv4 addresses and ports.
-    cleaned = re.sub(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?', '[redacted]', cleaned)
+    cleaned = re.sub(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?", "[redacted]", cleaned)
     # Remove hostnames in URLs.
-    cleaned = re.sub(r'https?://[^\s/]+', '[redacted-url]', cleaned)
+    cleaned = re.sub(r"https?://[^\s/]+", "[redacted-url]", cleaned)
     return cleaned[:max_len]
 
 
@@ -200,7 +204,7 @@ class WebhookManager:
     def __init__(self, api_key_manager=None):
         # Disable redirects to prevent SSRF via redirect chains
         self._client = httpx.AsyncClient(timeout=10, follow_redirects=False)
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._api_key_manager = api_key_manager
         # Strong references to in-flight fire-and-forget tasks. asyncio only
         # keeps weak references to tasks, so without this the GC can collect a
@@ -218,7 +222,7 @@ class WebhookManager:
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
 
-    def _decrypt_secret(self, encrypted: Optional[str]) -> Optional[str]:
+    def _decrypt_secret(self, encrypted: str | None) -> str | None:
         """Decrypt a webhook signing secret from DB storage."""
         if not encrypted:
             return None
@@ -257,12 +261,12 @@ class WebhookManager:
             decrypted_secret = self._decrypt_secret(wh.secret)
             self._spawn_tracked(self._deliver(wh.id, wh.url, decrypted_secret, event, payload))
 
-    async def deliver_test(self, webhook_id: str, url: str, encrypted_secret: Optional[str]):
+    async def deliver_test(self, webhook_id: str, url: str, encrypted_secret: str | None):
         """Public method for the test-webhook route."""
         decrypted = self._decrypt_secret(encrypted_secret)
         await self._deliver(webhook_id, url, decrypted, "webhook.test", {"message": "Test ping from Odysseus"})
 
-    async def _deliver(self, webhook_id: str, url: str, secret: Optional[str], event: str, payload: dict):
+    async def _deliver(self, webhook_id: str, url: str, secret: str | None, event: str, payload: dict):
         """Internal delivery. Never call directly from outside this class (use deliver_test)."""
         # Re-validate URL at delivery time in case DB was tampered with
         try:
@@ -284,20 +288,24 @@ class WebhookManager:
         db = SessionLocal()
         try:
             resp = await self._client.post(url, content=body, headers=headers)
-            db.query(Webhook).filter(Webhook.id == webhook_id).update({
-                "last_triggered_at": _utcnow(),
-                "last_status_code": resp.status_code,
-                "last_error": None,
-            })
+            db.query(Webhook).filter(Webhook.id == webhook_id).update(
+                {
+                    "last_triggered_at": _utcnow(),
+                    "last_status_code": resp.status_code,
+                    "last_error": None,
+                }
+            )
             db.commit()
         except Exception as e:
             logger.warning(f"Webhook delivery failed for {webhook_id}")
             try:
-                db.query(Webhook).filter(Webhook.id == webhook_id).update({
-                    "last_triggered_at": _utcnow(),
-                    "last_status_code": None,
-                    "last_error": sanitize_error(str(e)),
-                })
+                db.query(Webhook).filter(Webhook.id == webhook_id).update(
+                    {
+                        "last_triggered_at": _utcnow(),
+                        "last_status_code": None,
+                        "last_error": sanitize_error(str(e)),
+                    }
+                )
                 db.commit()
             except Exception:
                 db.rollback()

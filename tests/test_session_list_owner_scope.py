@@ -3,13 +3,13 @@
 Regression for the enrichment query at routes/session_routes.py:265 which
 previously fetched rows for all owners on every GET /api/sessions call.
 """
+
 import sys
 import tempfile
 import types
 import uuid
 from datetime import timedelta
 
-import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
@@ -31,6 +31,7 @@ _TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
 def _stub_multipart_if_missing(monkeypatch):
     try:
         import python_multipart  # noqa: F401
+
         return
     except ImportError:
         pass
@@ -40,8 +41,9 @@ def _stub_multipart_if_missing(monkeypatch):
 
 
 def test_list_sessions_excludes_other_users_sessions(monkeypatch):
-    import routes.session_routes as sr
     from unittest.mock import MagicMock
+
+    import routes.session_routes as sr
 
     _stub_multipart_if_missing(monkeypatch)
     monkeypatch.setattr(sr, "SessionLocal", _TS)
@@ -52,23 +54,41 @@ def test_list_sessions_excludes_other_users_sessions(monkeypatch):
     db = _TS()
     try:
         db.query(DbSession).delete()
-        db.add(DbSession(id=alice_id, owner="alice", name="alice session",
-                         endpoint_url="http://localhost", model="gpt-4", archived=False))
-        db.add(DbSession(id=bob_id, owner="bob", name="bob session",
-                         endpoint_url="http://localhost", model="gpt-4", archived=False))
+        db.add(
+            DbSession(
+                id=alice_id,
+                owner="alice",
+                name="alice session",
+                endpoint_url="http://localhost",
+                model="gpt-4",
+                archived=False,
+            )
+        )
+        db.add(
+            DbSession(
+                id=bob_id,
+                owner="bob",
+                name="bob session",
+                endpoint_url="http://localhost",
+                model="gpt-4",
+                archived=False,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    alice_session = MagicMock(id=alice_id, name="alice session",
-                              model="gpt-4", endpoint_url="http://localhost",
-                              rag=False, archived=False)
+    alice_session = MagicMock(
+        id=alice_id, name="alice session", model="gpt-4", endpoint_url="http://localhost", rag=False, archived=False
+    )
     sm = MagicMock()
     sm.get_sessions_for_user.return_value = {alice_id: alice_session}
     router = sr.setup_session_routes(sm, {})
-    endpoint = next(r.endpoint for r in router.routes
-                    if getattr(r, "path", "") == "/api/sessions"
-                    and "GET" in getattr(r, "methods", set()))
+    endpoint = next(
+        r.endpoint
+        for r in router.routes
+        if getattr(r, "path", "") == "/api/sessions" and "GET" in getattr(r, "methods", set())
+    )
 
     result = endpoint(request=MagicMock())
     returned_ids = {s["id"] for s in result}
@@ -77,8 +97,9 @@ def test_list_sessions_excludes_other_users_sessions(monkeypatch):
 
 
 def test_auto_sort_skip_llm_cleans_owner_stamped_sessions_when_auth_disabled(monkeypatch):
-    import routes.session_routes as sr
     from unittest.mock import MagicMock
+
+    import routes.session_routes as sr
 
     _stub_multipart_if_missing(monkeypatch)
     monkeypatch.setenv("AUTH_ENABLED", "false")
@@ -91,37 +112,45 @@ def test_auto_sort_skip_llm_cleans_owner_stamped_sessions_when_auth_disabled(mon
     try:
         db.query(DbMessage).delete()
         db.query(DbSession).delete()
-        db.add(DbSession(
-            id=sid,
-            owner="alice",
-            name="New chat",
-            endpoint_url="http://localhost",
-            model="gpt-4",
-            archived=False,
-            message_count=1,
-            created_at=old_time,
-            updated_at=old_time,
-            last_message_at=old_time,
-            last_accessed=old_time,
-        ))
-        db.add(DbMessage(
-            id="m-" + uuid.uuid4().hex,
-            session_id=sid,
-            role="user",
-            content="hi",
-            timestamp=old_time,
-        ))
+        db.add(
+            DbSession(
+                id=sid,
+                owner="alice",
+                name="New chat",
+                endpoint_url="http://localhost",
+                model="gpt-4",
+                archived=False,
+                message_count=1,
+                created_at=old_time,
+                updated_at=old_time,
+                last_message_at=old_time,
+                last_accessed=old_time,
+            )
+        )
+        db.add(
+            DbMessage(
+                id="m-" + uuid.uuid4().hex,
+                session_id=sid,
+                role="user",
+                content="hi",
+                timestamp=old_time,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    session = MagicMock(id=sid, name="New chat", model="gpt-4", endpoint_url="http://localhost", rag=False, archived=False)
+    session = MagicMock(
+        id=sid, name="New chat", model="gpt-4", endpoint_url="http://localhost", rag=False, archived=False
+    )
     sm = MagicMock()
     sm.get_sessions_for_user.return_value = {sid: session}
     router = sr.setup_session_routes(sm, {})
-    endpoint = next(r.endpoint for r in router.routes
-                    if getattr(r, "path", "") == "/api/sessions/auto-sort"
-                    and "POST" in getattr(r, "methods", set()))
+    endpoint = next(
+        r.endpoint
+        for r in router.routes
+        if getattr(r, "path", "") == "/api/sessions/auto-sort" and "POST" in getattr(r, "methods", set())
+    )
 
     result = endpoint(request=MagicMock(), skip_llm=True)
 

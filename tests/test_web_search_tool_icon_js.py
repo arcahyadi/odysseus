@@ -70,6 +70,7 @@ def _run(cases: list) -> list:
         encoding="utf-8",
         cwd=str(_REPO),
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())

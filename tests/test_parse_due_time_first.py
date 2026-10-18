@@ -6,17 +6,19 @@ day-first format ('today at 11pm'), so time-first strings like '3pm today'
 raised ValueError, fell back to the raw string, and the ISO-only reminder
 scanner never fired the note. Fixes #3302.
 """
-from datetime import datetime, timezone
 
-import routes.calendar_routes as calendar_routes
+from datetime import UTC, datetime
+
+from routes import calendar_routes
 from src.user_time import clear_user_time_context, set_user_tz_name, set_user_tz_offset
 
 
 class _FixedNow(datetime):
     """Freeze server clock at 2026-06-07T10:00:00 UTC for deterministic tests."""
+
     @classmethod
     def now(cls, tz=None):
-        value = datetime(2026, 6, 7, 10, 0, 0, tzinfo=timezone.utc)
+        value = datetime(2026, 6, 7, 10, 0, 0, tzinfo=UTC)
         if tz is not None:
             return value.astimezone(tz)
         return value.replace(tzinfo=None)

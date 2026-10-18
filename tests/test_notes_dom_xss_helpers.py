@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 _REPO = Path(__file__).resolve().parent.parent
 
 

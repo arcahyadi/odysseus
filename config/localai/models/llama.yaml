@@ -1,0 +1,10 @@
+# LocalAI model config — LLM (llama.cpp backend)
+# Place model GGUF files in the localai-models volume before starting.
+# Download example: docker exec localai localai download-model llama-3.2-3b-instruct
+name: llama
+backend: llama-cpp
+parameters:
+  model: llama-3.2-3b-instruct.Q4_K_M.gguf
+  temperature: 0.7
+  top_p: 0.9
+  context_size: 4096

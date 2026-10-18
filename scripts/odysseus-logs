@@ -14,20 +14,22 @@ holds what.
     odysseus-logs cat NAME                # print full content
     odysseus-logs clean                   # delete tmux logs older than 7 days
 """
+
 from __future__ import annotations
 
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import REPO_ROOT as _REPO_ROOT
+from cli import common_parser, emit, fail, quiet_logs, run
 
 quiet_logs()
 
-import argparse, json, subprocess, time
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
-
 
 _APP_LOGS = _REPO_ROOT / "logs"
 _TMUX_LOGS = Path("/tmp/odysseus-tmux")
@@ -44,12 +46,14 @@ def _enumerate() -> list[dict]:
                 st = p.stat()
             except OSError:
                 continue
-            out.append({
-                "name": p.name,
-                "path": str(p),
-                "bytes": st.st_size,
-                "modified": datetime.fromtimestamp(st.st_mtime).isoformat(),
-            })
+            out.append(
+                {
+                    "name": p.name,
+                    "path": str(p),
+                    "bytes": st.st_size,
+                    "modified": datetime.fromtimestamp(st.st_mtime).isoformat(),
+                }
+            )
     out.sort(key=lambda r: r["modified"], reverse=True)
     return out
 
@@ -85,8 +89,7 @@ def cmd_tail(args):
         # Exec tail -f so signals + buffering are native.
         os.execvp("tail", ["tail", "-n", str(args.lines), "-f", str(p)])
     # Non-follow: print last N lines + exit.
-    proc = subprocess.run(["tail", "-n", str(args.lines), str(p)],
-                          capture_output=True, text=True)
+    proc = subprocess.run(["tail", "-n", str(args.lines), str(p)], capture_output=True, text=True, check=False)
     sys.stdout.write(proc.stdout)
     sys.exit(proc.returncode)
 
@@ -127,8 +130,7 @@ def _build_parser():
     pt = sub.add_parser("tail", parents=p._common_parents)
     pt.add_argument("name")
     pt.add_argument("-n", "--lines", type=int, default=80)
-    pt.add_argument("-f", "--follow", action="store_true",
-                    help="follow new lines (tail -f); omit for one-shot")
+    pt.add_argument("-f", "--follow", action="store_true", help="follow new lines (tail -f); omit for one-shot")
     pt.set_defaults(func=cmd_tail)
 
     pc = sub.add_parser("cat", parents=p._common_parents)
@@ -136,8 +138,7 @@ def _build_parser():
     pc.set_defaults(func=cmd_cat)
 
     pcl = sub.add_parser("clean", parents=p._common_parents)
-    pcl.add_argument("--days", type=int, default=7,
-                     help="delete tmux logs older than N days (default 7)")
+    pcl.add_argument("--days", type=int, default=7, help="delete tmux logs older than N days (default 7)")
     pcl.set_defaults(func=cmd_clean)
 
     return p

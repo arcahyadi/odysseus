@@ -7,8 +7,9 @@ The accumulator must give each parallel call its own slot (otherwise they
 collide into slot 0, overwriting the first call's name and concatenating —
 corrupting — its arguments) and must preserve extra_content per call.
 """
-import json
+
 import asyncio
+import json
 
 from src import llm_core
 
@@ -82,15 +83,31 @@ def test_parallel_calls_with_null_index_do_not_collide(monkeypatch):
     # (exactly what Gemini's OpenAI-compat layer emits). Only the first carries
     # a thought_signature.
     lines = [
-        _sse({"tool_calls": [{
-            "index": None, "id": "call_a", "type": "function",
-            "function": {"name": "get_memory", "arguments": "{}"},
-            "extra_content": {"google": {"thought_signature": "SIG0"}},
-        }]}),
-        _sse({"tool_calls": [{
-            "index": None, "id": "call_b", "type": "function",
-            "function": {"name": "bash", "arguments": '{"command":"echo hi"}'},
-        }]}),
+        _sse(
+            {
+                "tool_calls": [
+                    {
+                        "index": None,
+                        "id": "call_a",
+                        "type": "function",
+                        "function": {"name": "get_memory", "arguments": "{}"},
+                        "extra_content": {"google": {"thought_signature": "SIG0"}},
+                    }
+                ]
+            }
+        ),
+        _sse(
+            {
+                "tool_calls": [
+                    {
+                        "index": None,
+                        "id": "call_b",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"echo hi"}'},
+                    }
+                ]
+            }
+        ),
         "data: [DONE]",
     ]
     events = _drive(monkeypatch, lines)
@@ -109,8 +126,13 @@ def test_parallel_calls_with_null_index_do_not_collide(monkeypatch):
 def test_single_call_chunked_arguments_still_accumulate(monkeypatch):
     # Conformant OpenAI style: index present, arguments streamed in pieces.
     lines = [
-        _sse({"tool_calls": [{"index": 0, "id": "c", "type": "function",
-                              "function": {"name": "search", "arguments": '{"q":"'}}]}),
+        _sse(
+            {
+                "tool_calls": [
+                    {"index": 0, "id": "c", "type": "function", "function": {"name": "search", "arguments": '{"q":"'}}
+                ]
+            }
+        ),
         _sse({"tool_calls": [{"index": 0, "function": {"arguments": 'cats"}'}}]}),
         "data: [DONE]",
     ]
@@ -125,8 +147,13 @@ def test_null_index_chunked_arguments_attach_to_last_call(monkeypatch):
     # index=None where the name arrives first, then an arg-only continuation:
     # the continuation must attach to the just-started call, not open a new one.
     lines = [
-        _sse({"tool_calls": [{"index": None, "id": "c", "type": "function",
-                              "function": {"name": "search", "arguments": '{"q":'}}]}),
+        _sse(
+            {
+                "tool_calls": [
+                    {"index": None, "id": "c", "type": "function", "function": {"name": "search", "arguments": '{"q":'}}
+                ]
+            }
+        ),
         _sse({"tool_calls": [{"index": None, "function": {"arguments": '"dogs"}'}}]}),
         "data: [DONE]",
     ]
@@ -158,12 +185,14 @@ def test_null_arguments_delta_does_not_drop_sibling_calls(monkeypatch):
     # loop, silently dropping every LATER call in the same delta. Here the first
     # call has arguments: null; the second (same delta) must still survive.
     lines = [
-        _sse({"tool_calls": [
-            {"index": 0, "id": "a", "type": "function",
-             "function": {"name": "first", "arguments": None}},
-            {"index": 1, "id": "b", "type": "function",
-             "function": {"name": "second", "arguments": "{}"}},
-        ]}),
+        _sse(
+            {
+                "tool_calls": [
+                    {"index": 0, "id": "a", "type": "function", "function": {"name": "first", "arguments": None}},
+                    {"index": 1, "id": "b", "type": "function", "function": {"name": "second", "arguments": "{}"}},
+                ]
+            }
+        ),
         "data: [DONE]",
     ]
     events = _drive(monkeypatch, lines, model="gpt-4o-test")

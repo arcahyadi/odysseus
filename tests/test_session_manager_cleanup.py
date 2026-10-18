@@ -2,8 +2,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from core.session_manager import SessionManager
 import core.session_manager as SM
+from core.session_manager import SessionManager
 
 
 def _manager_with(sessions=None):

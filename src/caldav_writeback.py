@@ -18,7 +18,7 @@ network.
 
 import asyncio
 import logging
-from datetime import timezone
+from datetime import UTC
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 def _stable_cal_id(remote_url: str, owner: str = "", account_id: str = "") -> str:
     # Reuse the sync module's hashing so owner+account_id scoping stays consistent.
     from src.caldav_sync import _stable_cal_id as _sync_id
+
     return _sync_id(remote_url, owner=owner, account_id=account_id)
 
 
@@ -36,7 +37,8 @@ def build_event_ical(ev: dict) -> str:
     dtend (datetime), all_day (bool), is_utc (bool), rrule (str).
     Mirrors how the pull path interprets is_utc/all_day so a round-trip is stable.
     """
-    from icalendar import Calendar, Event as iEvent
+    from icalendar import Calendar
+    from icalendar import Event as iEvent
     from icalendar.prop import vRecur
 
     cal = Calendar()
@@ -58,8 +60,8 @@ def build_event_ical(ev: dict) -> str:
         ve.add("dtend", dtend.date())
     elif ev.get("is_utc"):
         # Stored as naive-UTC instants — re-attach UTC so the server gets a Z time.
-        ve.add("dtstart", dtstart.replace(tzinfo=timezone.utc))
-        ve.add("dtend", dtend.replace(tzinfo=timezone.utc))
+        ve.add("dtstart", dtstart.replace(tzinfo=UTC))
+        ve.add("dtend", dtend.replace(tzinfo=UTC))
     else:
         # Legacy naive-local ("floating") time — emit without a TZ.
         ve.add("dtstart", dtstart)
@@ -106,8 +108,9 @@ def _resource_etag(obj) -> str:
         return ""
 
 
-def push_event(calendars, local_cal_id: str, ev: dict, *, delete: bool = False,
-               owner: str = "", account_id: str = "") -> dict:
+def push_event(
+    calendars, local_cal_id: str, ev: dict, *, delete: bool = False, owner: str = "", account_id: str = ""
+) -> dict:
     """Create/update (or delete) ``ev`` on the matching remote calendar.
 
     Returns ``{"ok": bool, ...}``. ``calendars`` is the discovered caldav
@@ -165,6 +168,7 @@ def _discover_calendars(client):
     """Discover the principal's calendars, falling back to the URL itself —
     same strategy as the pull path."""
     from caldav.lib.error import AuthorizationError, NotFoundError
+
     try:
         return client.principal().calendars()
     except (AuthorizationError, NotFoundError):
@@ -176,17 +180,16 @@ def _discover_calendars(client):
             return []
 
 
-def _writeback_blocking(local_cal_id, ev, delete, url, username, password,
-                        owner="", account_id="") -> dict:
+def _writeback_blocking(local_cal_id, ev, delete, url, username, password, owner="", account_id="") -> dict:
     from src.caldav_sync import _build_dav_client
+
     # Redirects disabled here too: the write-back path opens its own DAVClient,
     # so it needs the same SSRF-via-redirect protection as the pull path.
     client = _build_dav_client(url, username, password)
     calendars = _discover_calendars(client)
     if not calendars:
         return {"ok": False, "error": "no remote calendars discovered"}
-    return push_event(calendars, local_cal_id, ev, delete=delete,
-                      owner=owner, account_id=account_id)
+    return push_event(calendars, local_cal_id, ev, delete=delete, owner=owner, account_id=account_id)
 
 
 def _persist_writeback_result(owner: str, calendar_id: str, uid: str, result: dict, *, delete: bool) -> None:
@@ -197,18 +200,26 @@ def _persist_writeback_result(owner: str, calendar_id: str, uid: str, result: di
 
     db = SessionLocal()
     try:
-        calendar = db.query(CalendarCal).filter(
-            CalendarCal.id == calendar_id,
-            CalendarCal.owner == owner,
-        ).first()
+        calendar = (
+            db.query(CalendarCal)
+            .filter(
+                CalendarCal.id == calendar_id,
+                CalendarCal.owner == owner,
+            )
+            .first()
+        )
         if calendar and result.get("calendar_url"):
             calendar.caldav_base_url = result.get("calendar_url")
 
         if delete:
-            tombstone = db.query(CalendarDeletedEvent).filter(
-                CalendarDeletedEvent.uid == uid,
-                CalendarDeletedEvent.owner == owner,
-            ).first()
+            tombstone = (
+                db.query(CalendarDeletedEvent)
+                .filter(
+                    CalendarDeletedEvent.uid == uid,
+                    CalendarDeletedEvent.owner == owner,
+                )
+                .first()
+            )
             if result.get("ok"):
                 if tombstone:
                     db.delete(tombstone)
@@ -237,8 +248,9 @@ def _persist_writeback_result(owner: str, calendar_id: str, uid: str, result: di
         db.close()
 
 
-async def writeback_event(owner: str, calendar_source: str, calendar_id: str,
-                          ev: dict, *, delete: bool = False) -> dict:
+async def writeback_event(
+    owner: str, calendar_source: str, calendar_id: str, ev: dict, *, delete: bool = False
+) -> dict:
     """Best-effort push of a local change to the remote CalDAV server.
 
     No-ops (``{"skipped": ...}``) when the calendar isn't CalDAV-backed or no
@@ -248,9 +260,9 @@ async def writeback_event(owner: str, calendar_source: str, calendar_id: str,
     if calendar_source != "caldav":
         return {"skipped": "not a caldav calendar"}
     try:
+        from core.database import CalendarCal, SessionLocal
         from src.caldav_sync import _load_caldav_accounts
         from src.secret_storage import decrypt
-        from core.database import CalendarCal, SessionLocal
 
         accounts = _load_caldav_accounts(owner)
         if not accounts:
@@ -278,15 +290,14 @@ async def writeback_event(owner: str, calendar_source: str, calendar_id: str,
         if not (url and user and pw):
             return {"skipped": "caldav account credentials incomplete"}
         from src.caldav_sync import validate_caldav_url
+
         try:
             url = validate_caldav_url(url)
         except ValueError as e:
             logger.warning("CalDAV write-back URL rejected: %s", e)
             return {"ok": False, "error": str(e)[:200]}
         acc_id = acc.get("id") or ""
-        result = await asyncio.to_thread(
-            _writeback_blocking, calendar_id, ev, delete, url, user, pw, owner, acc_id
-        )
+        result = await asyncio.to_thread(_writeback_blocking, calendar_id, ev, delete, url, user, pw, owner, acc_id)
         _persist_writeback_result(owner, calendar_id, (ev or {}).get("uid", ""), result, delete=delete)
         if not result.get("ok"):
             logger.warning("CalDAV write-back did not apply: %s", result.get("error") or result)

@@ -1,0 +1,87 @@
+name: "Memory Distillation"
+description: "Extract, deduplicate, and store learned knowledge after a memory phase exit."
+version: "1.0"
+enabled: true
+triggers:
+  - type: event
+    pattern: "phase_exit.MEMORY_OBSERVE"
+steps:
+  - id: "codeburn-metrics"
+    action: call_tool
+    params:
+      tool: codeburn
+      args:
+        action: extract_metrics
+        phase_id: "{{ trigger.payload.phase_id }}"
+    on_error: continue
+    timeout: 120s
+  - id: "graphify-concepts"
+    action: call_tool
+    params:
+      tool: graphify
+      args:
+        action: extract_concepts
+        source: "{{ steps.codeburn-metrics.output }}"
+    on_error: continue
+    timeout: 180s
+  - id: "acontext-lesson"
+    action: spawn_agent
+    params:
+      agent: context-agent
+      args:
+        action: generate_lesson
+        concepts: "{{ steps.graphify-concepts.output }}"
+    on_error: continue
+    timeout: 300s
+  - id: "chromadb-dedup"
+    action: call_tool
+    params:
+      tool: chromadb
+      args:
+        action: dedup_check
+        collection: lessons
+        content: "{{ steps.acontext-lesson.output }}"
+        threshold: 0.92
+    on_error: continue
+    timeout: 30s
+  - id: "obsidian-write"
+    action: call_tool
+    params:
+      tool: obsidian
+      args:
+        action: write_note
+        vault: "{{ trigger.payload.vault }}"
+        folder: "lessons"
+        content: "{{ steps.acontext-lesson.output }}"
+        skip_if_duplicate: "{{ steps.chromadb-dedup.output.is_duplicate }}"
+    on_error: continue
+    timeout: 30s
+    condition: "{{ steps.chromadb-dedup.output.is_duplicate }} != true"
+  - id: "meilisearch-index"
+    action: call_tool
+    params:
+      tool: meilisearch
+      args:
+        action: index_document
+        index: lessons
+        document: "{{ steps.acontext-lesson.output }}"
+    on_error: continue
+    timeout: 30s
+  - id: "notify-new-skill"
+    action: send_alert
+    params:
+      channel: ntfy
+      priority: normal
+      title: "New Skill Detected"
+      message: "Memory distillation found a new concept: {{ steps.graphify-concepts.output.top_concept }}. Stored in Obsidian and indexed in Meilisearch."
+    on_error: continue
+    timeout: 15s
+    condition: "{{ steps.graphify-concepts.output.is_novel }} == true"
+error_handling:
+  on_abort:
+    - action: send_alert
+      params:
+        channel: ntfy
+        priority: high
+        title: "Memory Distillation Failed"
+        message: "Step '{{ error.step }}' failed: {{ error.message }}"

@@ -9,6 +9,7 @@ the parity fix.
 ``_resolve_allowed_personal_dir`` is a closure inside ``setup_personal_routes``,
 so this is a source-level test, matching test_personal_dir_symlink_escape.py.
 """
+
 import ast
 from pathlib import Path
 
@@ -38,6 +39,4 @@ def test_confinement_runs_before_removal_sinks():
     resolve_idx = body.index("_resolve_allowed_personal_dir(")
     for sink in ("personal_docs_manager.remove_directory(", "rag.remove_directory("):
         assert sink in body, f"expected sink {sink} in remove_directory_from_rag"
-        assert body.index(sink) > resolve_idx, (
-            f"{sink} runs before _resolve_allowed_personal_dir — path not confined"
-        )
+        assert body.index(sink) > resolve_idx, f"{sink} runs before _resolve_allowed_personal_dir — path not confined"

@@ -91,11 +91,15 @@ tasks/
 scripts/compound/*.json
 research_data/
 **/search_analytics.json
+tests/prompts/eval-report.json
 
 # Internal dev/review notes — not for public repo
 dev-docs/
 # Windows-port working docs (local only, not for public repo)
 docs/windows-port/
+
+# OpenCode session metadata (run-continuation state)
+.omo/
 
 # Local config
 compound.config.json

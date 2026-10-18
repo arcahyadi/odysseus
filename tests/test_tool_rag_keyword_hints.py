@@ -12,18 +12,24 @@ These hints are deterministic string matching — no embeddings — so we can te
 `get_tools_for_query` directly with retrieval stubbed out (no ChromaDB needed).
 """
 
-from src.tool_index import ToolIndex, ALWAYS_AVAILABLE
+from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
 
 _EMAIL_TOOLS = {
-    "list_emails", "read_email", "send_email", "reply_to_email",
-    "bulk_email", "delete_email", "archive_email", "mark_email_read",
+    "list_emails",
+    "read_email",
+    "send_email",
+    "reply_to_email",
+    "bulk_email",
+    "delete_email",
+    "archive_email",
+    "mark_email_read",
 }
 
 
 def _index_without_embeddings():
     """A ToolIndex whose retrieval returns nothing, so get_tools_for_query
     exercises only the deterministic base + keyword-hint logic."""
-    ti = ToolIndex.__new__(ToolIndex)        # skip __init__ (no ChromaDB/fastembed)
+    ti = ToolIndex.__new__(ToolIndex)  # skip __init__ (no ChromaDB/fastembed)
     ti.retrieve = lambda query, k=8: []
     return ti
 

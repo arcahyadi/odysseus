@@ -6,6 +6,7 @@ application package, write to data/, call an LLM, or apply anything. It turns
 common agent export shapes into a portable JSON manifest that Odysseus can
 preview or import later.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -13,11 +14,11 @@ import hashlib
 import json
 import mimetypes
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 SCHEMA_VERSION = "agent-migration.v1"
 TEXT_EXTENSIONS = {
@@ -44,7 +45,7 @@ class InputWarning:
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def sha256_text(text: str) -> str:
@@ -153,12 +154,7 @@ def normalize_timestamp(value: Any) -> str | None:
         return None
     if isinstance(value, (int, float)):
         try:
-            return (
-                datetime.fromtimestamp(float(value), timezone.utc)
-                .replace(microsecond=0)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
+            return datetime.fromtimestamp(float(value), UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         except (OverflowError, OSError, ValueError):
             return str(value)
     return str(value)
@@ -620,8 +616,10 @@ def parse_args(argv: list[str] | None = None):
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     manifest = build_manifest(args)
-    text = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) if args.compact else (
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    text = (
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if args.compact
+        else (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

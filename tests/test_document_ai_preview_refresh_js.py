@@ -3,7 +3,6 @@
 import re
 from pathlib import Path
 
-
 SRC = Path(__file__).resolve().parent.parent / "static/js/document.js"
 
 

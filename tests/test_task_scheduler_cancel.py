@@ -44,13 +44,15 @@ def test_stop_task_cleans_up_queued_handle_and_run(tmp_path, monkeypatch):
     session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
 
     db = session_local()
-    db.add(ScheduledTask(
-        id="queued-task",
-        owner="alice",
-        name="Queued Task",
-        task_type="llm",
-        status="active",
-    ))
+    db.add(
+        ScheduledTask(
+            id="queued-task",
+            owner="alice",
+            name="Queued Task",
+            task_type="llm",
+            status="active",
+        )
+    )
     db.commit()
     db.close()
 

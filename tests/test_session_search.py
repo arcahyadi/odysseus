@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta
 import asyncio
 import sqlite3
+from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -178,7 +178,14 @@ def test_session_search_merges_like_substring_hits_with_fts_hits():
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "s1", owner="alice")
         _add_message(db, "s1", "m-token", "user", "The identifier token is standalone.", base)
-        _add_message(db, "s1", "m-substring", "assistant", "We also discussed customidentifier routing.", base + timedelta(minutes=1))
+        _add_message(
+            db,
+            "s1",
+            "m-substring",
+            "assistant",
+            "We also discussed customidentifier routing.",
+            base + timedelta(minutes=1),
+        )
         db.commit()
 
         results = search_session_messages("identifier", owner="alice", db=db)
@@ -283,7 +290,9 @@ def test_search_chats_formats_shared_results(monkeypatch):
                 content="We discussed session search.",
                 content_snippet="We discussed session search.",
                 timestamp="2026-01-01T12:00:00",
-                context_before=[{"message_id": "m1", "role": "user", "content": "Can you find old chats?", "timestamp": None}],
+                context_before=[
+                    {"message_id": "m1", "role": "user", "content": "Can you find old chats?", "timestamp": None}
+                ],
                 context_after=[{"message_id": "m3", "role": "user", "content": "That helps.", "timestamp": None}],
             )
         ]

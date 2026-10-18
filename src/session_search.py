@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import text
 
@@ -165,7 +166,9 @@ def _context_for_message(db, msg: DBChatMessage, count: int) -> tuple[list[dict[
     return before, after
 
 
-def _rows_to_results(db, rows: Iterable[tuple[DBChatMessage, str, str]], query: str, context_messages: int) -> list[SessionSearchResult]:
+def _rows_to_results(
+    db, rows: Iterable[tuple[DBChatMessage, str, str]], query: str, context_messages: int
+) -> list[SessionSearchResult]:
     results: list[SessionSearchResult] = []
     for msg, session_name, snippet in rows:
         before, after = _context_for_message(db, msg, context_messages)

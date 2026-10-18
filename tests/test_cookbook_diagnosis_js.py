@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 DIAGNOSIS_JS = ROOT / "static" / "js" / "cookbook-diagnosis.js"
 

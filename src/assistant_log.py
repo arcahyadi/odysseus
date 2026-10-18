@@ -6,22 +6,19 @@ Any part of the codebase can call log_to_assistant() to surface events,
 notifications, and results in the assistant's unified activity feed.
 """
 
-import json
-import re
-import uuid
 import logging
-from datetime import datetime
-from typing import Optional
+import re
+from src.app_context import app_context
+
 
 logger = logging.getLogger(__name__)
 
 # Session manager reference — set by app.py after initialization
-_session_manager = None
+app_context.caches.session_manager = None
 
 
 def set_session_manager(sm):
-    global _session_manager
-    _session_manager = sm
+    app_context.caches.session_manager = sm
 
 
 # Pattern callers use to embed a category in the content (legacy):
@@ -36,7 +33,7 @@ def log_to_assistant(
     content: str,
     role: str = "assistant",
     *,
-    category: Optional[str] = None,
+    category: str | None = None,
 ):
     """Legacy no-op.
 
@@ -45,4 +42,3 @@ def log_to_assistant(
     callers while preventing sidebar-log sessions from being created or filled.
     """
     logger.debug("log_to_assistant ignored legacy activity category=%r owner=%r", category, owner)
-    return

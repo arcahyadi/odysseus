@@ -17,6 +17,7 @@ the token-param quirk in `test_provider_classification_token_params.py`.
 conftest.py stubs the heavy deps (sqlalchemy, src.database), so importing the
 real module is side-effect free.
 """
+
 import pytest
 
 from src.llm_core import (
@@ -24,31 +25,34 @@ from src.llm_core import (
     _provider_label,
 )
 
-
 # ── _detect_provider ──
 # Matches on hostname (exact or subdomain), never substring, and falls back to
 # the OpenAI-compatible default for everything it doesn't special-case.
 
+
 class TestDetectProvider:
-    @pytest.mark.parametrize("url,expected", [
-        ("https://api.anthropic.com", "anthropic"),
-        ("https://api.anthropic.com/v1", "anthropic"),
-        ("https://anthropic.com/v1", "anthropic"),
-        ("https://openrouter.ai/api/v1", "openrouter"),
-        ("https://api.groq.com/openai/v1", "groq"),
-        ("https://integrate.api.nvidia.com/v1", "nvidia"),
-        ("http://localhost:11434/api", "ollama"),
-        ("https://ollama.com", "ollama"),
-        # xAI, DeepSeek and Gemini's OpenAI-compatible surface are NOT
-        # special-cased — they speak the OpenAI dialect, so the generic
-        # "openai" path is correct, not a missed provider.
-        ("https://api.openai.com/v1", "openai"),
-        ("https://api.x.ai/v1", "openai"),
-        ("https://api.deepseek.com", "openai"),
-        ("https://generativelanguage.googleapis.com/v1beta/openai", "openai"),
-        # Ollama's OpenAI-compatible /v1 surface is generic, not native ollama.
-        ("http://localhost:11434/v1", "openai"),
-    ])
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://api.anthropic.com", "anthropic"),
+            ("https://api.anthropic.com/v1", "anthropic"),
+            ("https://anthropic.com/v1", "anthropic"),
+            ("https://openrouter.ai/api/v1", "openrouter"),
+            ("https://api.groq.com/openai/v1", "groq"),
+            ("https://integrate.api.nvidia.com/v1", "nvidia"),
+            ("http://localhost:11434/api", "ollama"),
+            ("https://ollama.com", "ollama"),
+            # xAI, DeepSeek and Gemini's OpenAI-compatible surface are NOT
+            # special-cased — they speak the OpenAI dialect, so the generic
+            # "openai" path is correct, not a missed provider.
+            ("https://api.openai.com/v1", "openai"),
+            ("https://api.x.ai/v1", "openai"),
+            ("https://api.deepseek.com", "openai"),
+            ("https://generativelanguage.googleapis.com/v1beta/openai", "openai"),
+            # Ollama's OpenAI-compatible /v1 surface is generic, not native ollama.
+            ("http://localhost:11434/v1", "openai"),
+        ],
+    )
     def test_known_providers(self, url, expected):
         assert _detect_provider(url) == expected
 
@@ -73,30 +77,46 @@ class TestDetectProvider:
 # ── _provider_label ──
 # Human-friendly name used in error/degraded-state messages.
 
+
 class TestProviderLabel:
-    @pytest.mark.parametrize("url,expected", [
-        ("https://api.anthropic.com/v1", "Anthropic"),
-        ("https://ollama.com", "Ollama Cloud"),
-        ("https://api.x.ai/v1", "xAI"),
-        ("https://api.openai.com/v1", "OpenAI"),
-        ("https://openrouter.ai/api/v1", "OpenRouter"),
-        ("https://api.groq.com/openai/v1", "Groq"),
-        ("https://integrate.api.nvidia.com/v1", "NVIDIA"),
-        ("https://api.mistral.ai/v1", "Mistral"),
-        ("https://api.deepseek.com", "DeepSeek"),
-        ("https://generativelanguage.googleapis.com/v1beta/openai", "Google"),
-        ("https://api.together.xyz/v1", "Together"),
-        ("https://api.together.ai/v1", "Together"),
-        ("https://api.fireworks.ai/inference/v1", "Fireworks"),
-        ("http://localhost:11434/api", "Ollama"),
-    ])
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://api.anthropic.com/v1", "Anthropic"),
+            ("https://ollama.com", "Ollama Cloud"),
+            ("https://api.x.ai/v1", "xAI"),
+            ("https://api.openai.com/v1", "OpenAI"),
+            ("https://openrouter.ai/api/v1", "OpenRouter"),
+            ("https://api.groq.com/openai/v1", "Groq"),
+            ("https://integrate.api.nvidia.com/v1", "NVIDIA"),
+            ("https://api.mistral.ai/v1", "Mistral"),
+            ("https://api.deepseek.com", "DeepSeek"),
+            ("https://generativelanguage.googleapis.com/v1beta/openai", "Google"),
+            ("https://api.together.xyz/v1", "Together"),
+            ("https://api.together.ai/v1", "Together"),
+            ("https://api.fireworks.ai/inference/v1", "Fireworks"),
+            ("http://localhost:11434/api", "Ollama"),
+        ],
+    )
     def test_known_labels(self, url, expected):
         assert _provider_label(url) == expected
 
-    def test_local_non_ollama_endpoint(self):
-        # A loopback host that isn't on the native Ollama /api path is just a
-        # generic local endpoint (e.g. an OpenAI-compatible local server).
-        assert _provider_label("http://localhost:8080/v1") == "local endpoint"
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost:8080/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://localhost:8000/v1",
+            "http://localhost:1234/v1",
+            "http://localhost:9999/v1",
+        ],
+    )
+    def test_local_non_ollama_endpoint(self, url):
+        # The serving tool is NOT inferred from the port: vLLM, SGLang, llama.cpp
+        # and plain OpenAI-compatible servers all share 8000/8080, so a port-only
+        # label would mislabel real setups. The tool is identified by /props
+        # fingerprinting during discovery; this helper stays neutral.
+        assert _provider_label(url) == "local endpoint"
 
     def test_unknown_host_returns_host(self):
         assert _provider_label("https://api.unknown-llm.example/v1") == "api.unknown-llm.example"

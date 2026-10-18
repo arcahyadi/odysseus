@@ -6,6 +6,7 @@ injected fake ``pytest.main``. A small subprocess test then proves the seed is
 applied end to end (reproducible, seed visible) against a throwaway test file,
 never the real suite.
 """
+
 from __future__ import annotations
 
 import shlex
@@ -78,7 +79,7 @@ def test_plugin_hook_matches_shuffle_items():
 def test_pytest_args_after_separator_are_forwarded():
     fake = _FakePytestMain()
     run(["--seed", "123", "--", "tests/cli/", "-q"], pytest_main=fake)
-    (args, plugins), = fake.calls
+    ((args, plugins),) = fake.calls
     assert args == ["tests/cli/", "-q"]
     assert [type(p) for p in plugins] == [OrderShuffle]
 
@@ -86,7 +87,7 @@ def test_pytest_args_after_separator_are_forwarded():
 def test_explicit_seed_reaches_plugin():
     fake = _FakePytestMain()
     run(["--seed", "123", "--", "-q"], pytest_main=fake)
-    (_, plugins), = fake.calls
+    ((_, plugins),) = fake.calls
     assert plugins[0].seed == 123
 
 
@@ -145,7 +146,7 @@ def test_generated_seed_is_printed_and_used(capsys):
     seed_line = next(line for line in out.splitlines() if "with seed" in line)
     seed = int(seed_line.rsplit("seed ", 1)[1])
     assert 0 <= seed <= SEED_MAX
-    (_, plugins), = fake.calls
+    ((_, plugins),) = fake.calls
     assert plugins[0].seed == seed
 
 
@@ -187,6 +188,7 @@ def _collect_order(sample_suite: Path, seed: int) -> tuple[list[str], str]:
         cwd=sample_suite,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr or result.stdout
     ids = [line for line in result.stdout.splitlines() if "::" in line]
@@ -227,6 +229,7 @@ def test_subprocess_failure_exit_code_and_footer(tmp_path):
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert result.returncode == 1

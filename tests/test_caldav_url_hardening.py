@@ -15,10 +15,7 @@ def test_validate_caldav_url_normalizes_safe_url(monkeypatch):
         "_resolve_caldav_host_ips",
         lambda host: [ipaddress.ip_address("93.184.216.34")],
     )
-    assert (
-        caldav_sync.validate_caldav_url(" https://calendar.example.com/dav/ ")
-        == "https://calendar.example.com/dav"
-    )
+    assert caldav_sync.validate_caldav_url(" https://calendar.example.com/dav/ ") == "https://calendar.example.com/dav"
 
 
 @pytest.mark.parametrize(
@@ -170,8 +167,8 @@ def test_sync_caldav_decrypts_stored_password_and_validates_url(monkeypatch):
 def test_calendar_routes_use_hardened_caldav_client_and_secret_storage():
     text = Path("routes/calendar_routes.py").read_text(encoding="utf-8")
 
-    assert "validate_caldav_url(body.get(\"url\", \"\"))" in text
-    assert "encrypt(body[\"password\"])" in text
+    assert 'validate_caldav_url(body.get("url", ""))' in text
+    assert 'encrypt(body["password"])' in text
     assert "pw = decrypt(pw)" in text
     assert "follow_redirects=False, trust_env=False" in text
     assert "Redirects are not followed for CalDAV safety" in text

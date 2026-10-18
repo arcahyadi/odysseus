@@ -1,9 +1,8 @@
 """Search result ranking based on relevance, source quality, and recency."""
 
-import re
 import logging
-from datetime import datetime, timezone
-from typing import List, Optional
+import re
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -14,10 +13,10 @@ _AGE_FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
 def _utcnow_naive() -> datetime:
     """Naive UTC 'now'. Matches the naive, UTC-style published dates parsed below,
     and is safe on Python 3.14 where ``datetime.utcnow()`` is removed (#1116)."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
-def recency_score(age_str: Optional[str], now: Optional[datetime] = None) -> float:
+def recency_score(age_str: str | None, now: datetime | None = None) -> float:
     """Score how recent a result is: 1.0 for <=7 days old, 0.0 for >=30 days.
 
     The age is measured against UTC, not local time. The previous code used
@@ -47,25 +46,53 @@ def recency_score(age_str: Optional[str], now: Optional[datetime] = None) -> flo
 
 _NEWS_HINTS = {"news", "nyheter", "headlines", "breaking", "latest", "today", "idag"}
 _SPORTS_HINTS = {
-    "sport", "sports", "soccer", "football", "hockey", "nba", "nfl", "mlb",
-    "fifa", "world cup", "championship", "quarterfinal", "eliminates",
+    "sport",
+    "sports",
+    "soccer",
+    "football",
+    "hockey",
+    "nba",
+    "nfl",
+    "mlb",
+    "fifa",
+    "world cup",
+    "championship",
+    "quarterfinal",
+    "eliminates",
 }
 # Word-boundary match so "sport" does not fire inside "transport"/"passport"
 # and a domain like "transport.gov" is not mistaken for a sports site.
-_SPORTS_HINT_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(h) for h in _SPORTS_HINTS) + r")\b"
-)
+_SPORTS_HINT_RE = re.compile(r"\b(?:" + "|".join(re.escape(h) for h in _SPORTS_HINTS) + r")\b")
 _LOW_VALUE_NEWS_DOMAINS = {
-    "facebook.com", "www.facebook.com", "sports.yahoo.com", "yahoo.com",
-    "www.yahoo.com", "msn.com", "www.msn.com",
+    "facebook.com",
+    "www.facebook.com",
+    "sports.yahoo.com",
+    "yahoo.com",
+    "www.yahoo.com",
+    "msn.com",
+    "www.msn.com",
 }
 _TRUSTED_NEWS_DOMAINS = {
-    "apnews.com", "www.apnews.com", "reuters.com", "www.reuters.com",
-    "bbc.com", "www.bbc.com", "cbc.ca", "www.cbc.ca",
-    "ctvnews.ca", "www.ctvnews.ca", "globalnews.ca", "www.globalnews.ca",
+    "apnews.com",
+    "www.apnews.com",
+    "reuters.com",
+    "www.reuters.com",
+    "bbc.com",
+    "www.bbc.com",
+    "cbc.ca",
+    "www.cbc.ca",
+    "ctvnews.ca",
+    "www.ctvnews.ca",
+    "globalnews.ca",
+    "www.globalnews.ca",
     "theguardian.com",
-    "www.theguardian.com", "euronews.com", "www.euronews.com",
-    "dw.com", "www.dw.com", "government.se", "www.government.se",
+    "www.theguardian.com",
+    "euronews.com",
+    "www.euronews.com",
+    "dw.com",
+    "www.dw.com",
+    "government.se",
+    "www.government.se",
 }
 
 
@@ -89,7 +116,7 @@ def _has_word(text: str, term: str) -> bool:
     return re.search(rf"\b{re.escape(term)}\b", text) is not None
 
 
-def rank_search_results(query: str, results: List[dict]) -> List[dict]:
+def rank_search_results(query: str, results: list[dict]) -> list[dict]:
     """Rank search results by title relevance, snippet quality, domain authority, and recency."""
     query_terms = [t.lower() for t in re.findall(r"\b\w+\b", query)]
     query_lc = query.lower()

@@ -26,7 +26,6 @@ from types import SimpleNamespace
 
 from tests.test_null_owner_gates import _import_calendar_helpers
 
-
 _MOCK_CAL = SimpleNamespace(name="Personal", color="#5b8abf")
 
 
@@ -62,8 +61,7 @@ def test_expand_rrule_with_utc_until_keeps_all_occurrences():
 
     # Jan 1, 2, 3, 4, 5 — five daily occurrences up to and including UNTIL.
     assert len(results) == 5, (
-        f"Expected 5 daily occurrences bounded by UTC UNTIL, got "
-        f"{len(results)}: {[r['uid'] for r in results]}"
+        f"Expected 5 daily occurrences bounded by UTC UNTIL, got {len(results)}: {[r['uid'] for r in results]}"
     )
     assert all(r["is_recurrence"] is True for r in results), (
         "Occurrences must be flagged as recurrences, not silently downgraded "

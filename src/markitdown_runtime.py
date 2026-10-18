@@ -50,8 +50,8 @@ def _extract_docx_native(path: str) -> str | None:
     list bullets — keeps ~95% of "summarize this doc" content, which is the
     case people hit when markitdown isn't installed.
     """
-    import zipfile
     import xml.etree.ElementTree as ET
+    import zipfile
 
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     try:

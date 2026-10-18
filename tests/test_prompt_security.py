@@ -20,7 +20,6 @@ from src.prompt_security import (
     untrusted_context_message,
 )
 
-
 # ── _escape_guard_markers unit tests ────────────────────────────
 
 
@@ -109,9 +108,7 @@ def test_label_newline_injection_is_blocked():
 
     # The structural GUARD_CLOSE must appear exactly once (the template close).
     parts = msg["content"].split(GUARD_CLOSE)
-    assert len(parts) == 2, (
-        f"Label newline injection leaked a structural guard: {len(parts)} parts"
-    )
+    assert len(parts) == 2, f"Label newline injection leaked a structural guard: {len(parts)} parts"
     # No attacker-injected instruction text before GUARD_OPEN.
     pre_guard = msg["content"].split(GUARD_OPEN)[0]
     assert "IGNORE ALL" not in pre_guard
@@ -123,9 +120,7 @@ def test_delimiter_spoofing_is_neutralized():
     msg = untrusted_context_message("webpage", payload)
 
     parts = msg["content"].split(GUARD_CLOSE)
-    assert len(parts) == 2, (
-        f"Expected exactly 2 parts (1 structural close), got {len(parts)}"
-    )
+    assert len(parts) == 2, f"Expected exactly 2 parts (1 structural close), got {len(parts)}"
     assert "<<<_END_UNTRUSTED_DATA>>>" in msg["content"]
 
 
@@ -145,9 +140,7 @@ def test_label_guard_open_is_escaped():
     msg = untrusted_context_message(evil_label, "content")
 
     parts = msg["content"].split(GUARD_OPEN)
-    assert len(parts) == 2, (
-        f"GUARD_OPEN in label was not escaped: {len(parts)} parts"
-    )
+    assert len(parts) == 2, f"GUARD_OPEN in label was not escaped: {len(parts)} parts"
 
 
 def test_label_guard_close_is_escaped():
@@ -156,9 +149,7 @@ def test_label_guard_close_is_escaped():
     msg = untrusted_context_message(evil_label, "content")
 
     parts = msg["content"].split(GUARD_CLOSE)
-    assert len(parts) == 2, (
-        f"GUARD_CLOSE in label was not escaped: {len(parts)} parts"
-    )
+    assert len(parts) == 2, f"GUARD_CLOSE in label was not escaped: {len(parts)} parts"
 
 
 def test_exactly_one_structural_open_and_close():

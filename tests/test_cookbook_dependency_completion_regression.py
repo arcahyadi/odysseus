@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -11,9 +10,9 @@ def _read(rel_path: str) -> str:
 def test_backend_status_treats_download_exit_zero_as_completed():
     source = _read("routes/cookbook_routes.py")
 
-    assert "exit_match = re.search(r\"=== process exited with code\\s+(-?\\d+)\"" in source
-    assert "elif has_exit and task_type == \"download\":" in source
-    assert "status = \"completed\" if exit_code == 0 else \"error\"" in source
+    assert 'exit_match = re.search(r"=== process exited with code\\s+(-?\\d+)"' in source
+    assert 'elif has_exit and task_type == "download":' in source
+    assert 'status = "completed" if exit_code == 0 else "error"' in source
 
 
 def test_background_status_poll_reconciles_into_local_tasks():
@@ -34,7 +33,7 @@ def test_windows_session_commands_use_shared_powershell_wrapper_and_local_log_di
     assert "const host = task.remoteHost;" in source
     assert "host ? '$env:TEMP\\\\odysseus-sessions' : '$env:TEMP\\\\odysseus-tmux'" in source
     assert "function _winPowerShellCmd(task, ps)" in source
-    assert "const command = `powershell -Command \"${ps}\"`;" in source
+    assert 'const command = `powershell -Command "${ps}"`;' in source
     assert "if (!task.remoteHost) return command;" in source
     assert "return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} ${_shQuote(command)}`;" in source
 
@@ -62,10 +61,7 @@ def test_session_gone_heuristic_honors_dep_install_success():
     # still proving the invariant: a finished dependency install short-circuits
     # looksSuccessful ahead of the download/serve branch.
     normalized = " ".join(source.split())
-    assert (
-        "const looksSuccessful = depInstallSucceeded "
-        "|| (task.type === 'download'"
-    ) in normalized
+    assert ("const looksSuccessful = depInstallSucceeded || (task.type === 'download'") in normalized
 
 
 def test_background_poll_recovers_done_for_stopped_dependency_install():
@@ -90,8 +86,7 @@ def test_background_poll_recovers_done_for_completed_download():
 
     normalized = " ".join(source.split())
     assert (
-        "const downloadDone = task.type === 'download' "
-        "&& String(task.output || '').includes('DOWNLOAD_OK');"
+        "const downloadDone = task.type === 'download' && String(task.output || '').includes('DOWNLOAD_OK');"
     ) in normalized
 
 

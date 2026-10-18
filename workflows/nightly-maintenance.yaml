@@ -1,0 +1,95 @@
+name: "Nightly Maintenance"
+description: "Scheduled maintenance: prune, compact, backup, push, check updates, and report."
+version: "1.0"
+enabled: true
+triggers:
+  - type: cron
+    pattern: "0 4 * * *"
+steps:
+  - id: "docker-prune"
+    action: docker_action
+    params:
+      command: "system prune -af --volumes"
+    on_error: continue
+    timeout: 300s
+  - id: "chromadb-compact"
+    action: call_tool
+    params:
+      tool: chromadb
+      args:
+        action: compact
+        optimize: true
+    on_error: continue
+    timeout: 600s
+  - id: "postgres-backup"
+    action: docker_action
+    params:
+      command: "exec postgres pg_dump -U odysseus -d odysseus -Fc -f /tmp/backup_{{ workflow.started_at | date: '%Y%m%d' }}.dump"
+    on_error: continue
+    timeout: 600s
+  - id: "sqlite-backup"
+    action: call_tool
+    params:
+      tool: sqlite
+      args:
+        action: backup
+        source: "data/app.db"
+        output: "backups/sqlite_{{ workflow.started_at | date: '%Y%m%d' }}.db"
+    on_error: continue
+    timeout: 120s
+    condition: "{{ steps.postgres-backup.status }} != 'ok'"
+  - id: "obsidian-backup"
+    action: docker_action
+    params:
+      command: "run --rm -v obsidian-vault:/vault alpine tar -czf /tmp/vault_{{ workflow.started_at | date: '%Y%m%d' }}.tar.gz -C /vault ."
+    on_error: continue
+    timeout: 300s
+  - id: "encrypt-backup"
+    action: call_tool
+    params:
+      tool: cryptography
+      args:
+        action: encrypt_file
+        algorithm: aes-256-cbc
+        input: "/tmp/vault_{{ workflow.started_at | date: '%Y%m%d' }}.tar.gz"
+        output: "backups/vault_{{ workflow.started_at | date: '%Y%m%d' }}.tar.gz.enc"
+    on_error: continue
+    timeout: 120s
+    condition: "{{ steps.obsidian-backup.status }} == 'ok'"
+  - id: "git-push-backups"
+    action: docker_action
+    params:
+      command: "run --rm -v ./backups:/backups alpine/git add -A && git commit -m 'backup: nightly {{ workflow.started_at | date: '%Y-%m-%d' }}' && git push origin main"
+    on_error: continue
+    timeout: 300s
+  - id: "docker-compose-check"
+    action: docker_action
+    params:
+      command: "compose pull --dry-run"
+    on_error: continue
+    timeout: 120s
+  - id: "notify-ntfy-summary"
+    action: send_alert
+    params:
+      channel: ntfy
+      priority: normal
+      title: "Nightly Maintenance Complete"
+      message: >
+        Maintenance finished at {{ workflow.completed_at }}.
+        - Docker prune: {{ steps.docker-prune.status }}
+        - ChromaDB compact: {{ steps.chromadb-compact.status }}
+        - Postgres/SQLite backup: {{ steps.postgres-backup.status }}
+        - Obsidian backup: {{ steps.obsidian-backup.status }}
+        - Encryption: {{ steps.encrypt-backup.status }}
+        - Git push: {{ steps.git-push-backups.status }}
+        - Docker updates: {{ steps.docker-compose-check.status }}
+    on_error: continue
+    timeout: 15s
+error_handling:
+  on_abort:
+    - action: send_alert
+      params:
+        channel: ntfy
+        priority: high
+        title: "Nightly Maintenance Failed"
+        message: "Step '{{ error.step }}' failed: {{ error.message }}. Previous backups may be incomplete."

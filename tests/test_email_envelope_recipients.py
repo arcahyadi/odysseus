@@ -6,7 +6,8 @@ Outlook / corporate address-book form): it splits into `"Smith` and
 `John" <john@corp.com>`, so the broken fragments are handed to smtp.sendmail and
 delivery fails. `_envelope_recipients` uses email.utils.getaddresses instead.
 """
-import routes.email_routes as email_routes
+
+from routes import email_routes
 
 
 def test_display_name_with_comma_yields_one_address():

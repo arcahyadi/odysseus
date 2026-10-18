@@ -9,6 +9,7 @@ never actually sent to the model. api_call was missing exactly this way.
 Parsed with ast instead of importing, so the test does not pull in the
 embedding/ChromaDB stack.
 """
+
 import ast
 import os
 
@@ -49,8 +50,6 @@ def test_every_schema_tool_has_an_index_description():
 def test_api_call_is_indexed_with_a_real_description():
     src = open(os.path.join(ROOT, "src", "tool_index.py"), encoding="utf-8").read()
     value = _assigned_value(ast.parse(src), "BUILTIN_TOOL_DESCRIPTIONS")
-    descriptions = {
-        ast.literal_eval(k): ast.literal_eval(v) for k, v in zip(value.keys, value.values)
-    }
+    descriptions = {ast.literal_eval(k): ast.literal_eval(v) for k, v in zip(value.keys, value.values, strict=False)}
     assert "api_call" in descriptions
     assert len(descriptions["api_call"]) > 50

@@ -1,0 +1,143 @@
+{
+  "_doc": "AgentOS Model Router — OmO pattern, déclaratif. Modifié sans redémarrer (rechargé à chaque appel).",
+  "_version": "1.0.0",
+
+  "providers": {
+    "opencode_zen": {
+      "base_url": "https://opencode.ai/zen/go/v1/chat/completions",
+      "api_key_env": "OPENCODE_API_KEY",
+      "enabled": true,
+      "note": "Plan Go — endpoint /zen/go/v1 (différent de /zen/v1 qui est pay-per-use)"
+    },
+    "ollama": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key_env": null,
+      "enabled": true
+    },
+    "anthropic_claude": {
+      "base_url": "https://api.anthropic.com/v1",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "enabled": false
+    },
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "enabled": false
+    },
+    "localai": {
+      "base_url": "http://localai:8080/v1",
+      "api_key_env": null,
+      "enabled": false,
+      "note": "All-in-one local backend (LLM + embeddings + TTS + STT). Enable with ODYSSEUS_LOCALAI=on"
+    }
+  },
+
+  "_models_note": "Tous testés et confirmés sur /zen/go/v1 avec clé Go.",
+  "models": {
+    "strong": {
+      "provider": "opencode_zen",
+      "model_id": "deepseek-v4-pro",
+      "category": "deep",
+      "fallback": ["reasoning", "standard", "fast"]
+    },
+    "reasoning": {
+      "provider": "opencode_zen",
+      "model_id": "kimi-k2.6",
+      "category": "reasoning",
+      "fallback": ["strong", "standard"]
+    },
+    "standard": {
+      "provider": "opencode_zen",
+      "model_id": "deepseek-v4-flash",
+      "category": "utility",
+      "fallback": ["fast"]
+    },
+    "code": {
+      "provider": "opencode_zen",
+      "model_id": "kimi-k2.7-code",
+      "category": "code",
+      "fallback": ["standard"]
+    },
+    "creative": {
+      "provider": "opencode_zen",
+      "model_id": "qwen3.7-plus",
+      "category": "creative",
+      "fallback": ["standard"]
+    },
+    "fast": {
+      "provider": "opencode_zen",
+      "model_id": "glm-5.2",
+      "category": "quick",
+      "fallback": ["standard"]
+    }
+  },
+
+  "stages": {
+    "planning": "strong",
+    "execution": "standard",
+    "verification": "fast",
+    "utility": "fast",
+    "research": "reasoning",
+    "chat": "standard",
+    "coding": "code",
+    "creative": "creative"
+  },
+
+  "heuristic": {
+    "strong_signals": [
+      "implement", "architect", "design system", "refactor", "security",
+      "performance", "algorithm", "consensus", "distributed", "migration",
+      "implémenter", "architecturer", "concevoir", "refactoriser", "sécurité",
+      "performan", "algorithme", "distribué", "migration", "analyse profonde",
+      "explique en detail", "compare", "stratégie"
+    ],
+    "weak_signals": [
+      "hello", "bonjour", "hi", "merci", "thanks", "ok", "oui", "non",
+      "capital", "what is", "qu'est", "define", "list", "liste", "résume"
+    ],
+    "word_count_thresholds": {
+      "weak_max": 8,
+      "strong_min": 40
+    },
+    "score_thresholds": {
+      "strong": 0.6,
+      "standard": 0.35
+    }
+  },
+
+  "runtime_fallback": {
+    "retry_on_status": [400, 429, 500, 502, 503, 529],
+    "cooldown_seconds": 30,
+    "max_attempts": 3,
+    "blacklist_on_consecutive_failures": 2
+  },
+
+  "_intent_categories_note": "Mapping intent → tier utilisé par IntentGate + ModelRouter.",
+  "intent_categories": {
+    "quick": "fast",
+    "deep": "reasoning",
+    "utility": "standard",
+    "vision": "standard",
+    "code": "code",
+    "creative": "creative"
+  },
+
+  "_fallback_chains_note": "Chaînes de fallback explicites par tier (priorité sur models[].fallback).",
+  "fallback_chains": {
+    "strong": ["reasoning", "standard", "fast"],
+    "reasoning": ["strong", "standard", "fast"],
+    "code": ["strong", "standard", "fast"],
+    "standard": ["fast", "strong"],
+    "fast": ["standard"],
+    "creative": ["standard", "fast"]
+  },
+
+  "_providers_litellm_note": "Préfixes LiteLLM par provider. {model} est remplacé par model_id.",
+  "providers_litellm": {
+    "ollama": "ollama/{model}",
+    "opencode_zen": "openai/{model}",
+    "anthropic_claude": "anthropic/{model}",
+    "localai": "openai/{model}",
+    "openrouter": "openrouter/{model}"
+  }
+}

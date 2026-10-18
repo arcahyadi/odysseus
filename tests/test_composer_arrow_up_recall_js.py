@@ -9,6 +9,7 @@ untouched; multiline caret navigation is not hijacked; Shift/Alt/Ctrl/Meta+Arrow
 are ignored; IME composition does not trigger recall; last message is read from
 #chat-history (dataset.raw), not session sidebar metadata.
 """
+
 import json
 import shutil
 import subprocess
@@ -89,6 +90,7 @@ def _run(cases: list) -> list:
         encoding="utf-8",
         cwd=str(_REPO),
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
@@ -174,6 +176,7 @@ def test_wire_is_idempotent():
         encoding="utf-8",
         cwd=str(_REPO),
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout.strip()) == {"ok1": True, "ok2": True, "wired": True}
@@ -216,6 +219,7 @@ def test_get_last_user_message_from_chat_history():
         encoding="utf-8",
         cwd=str(_REPO),
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout.strip()) == {
@@ -272,6 +276,7 @@ def test_integration_recalls_from_chat_history_dom():
         encoding="utf-8",
         cwd=str(_REPO),
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout.strip()) == {"value": "stored prompt", "prevented": True}

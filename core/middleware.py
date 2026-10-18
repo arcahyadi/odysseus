@@ -8,7 +8,6 @@ from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
-
 # Per-process token that lets the in-app tool layer hit admin-gated
 # routes via HTTP loopback (the agent's tool calls don't carry the
 # admin user's session cookie). Set once at import; tools read the
@@ -78,10 +77,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(self), geolocation=()"
 
-        is_https = (
-            request.url.scheme == "https"
-            or request.headers.get("X-Forwarded-Proto") == "https"
-        )
+        is_https = request.url.scheme == "https" or request.headers.get("X-Forwarded-Proto") == "https"
         if is_https:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
@@ -100,10 +96,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             pass
         elif is_document_pdf_preview:
             response.headers["X-Frame-Options"] = "SAMEORIGIN"
-            response.headers["Content-Security-Policy"] = (
-                "default-src 'none'; "
-                "frame-ancestors 'self'"
-            )
+            response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'self'"
         else:
             response.headers["X-Frame-Options"] = "DENY"
             # NOTE: `style-src 'unsafe-inline'` is intentionally retained.

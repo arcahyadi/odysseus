@@ -1,4 +1,5 @@
 """Tests for extract_quotes (src/search/content.py)."""
+
 import pytest
 
 pytest.importorskip("bs4")  # content.py imports BeautifulSoup at module load
@@ -7,15 +8,11 @@ from src.search.content import extract_quotes
 
 
 def test_matched_double_quotes():
-    assert extract_quotes('She said "this is a proper long quote" today') == [
-        "this is a proper long quote"
-    ]
+    assert extract_quotes('She said "this is a proper long quote" today') == ["this is a proper long quote"]
 
 
 def test_matched_single_quotes():
-    assert extract_quotes("He wrote 'another sufficiently long quote' here") == [
-        "another sufficiently long quote"
-    ]
+    assert extract_quotes("He wrote 'another sufficiently long quote' here") == ["another sufficiently long quote"]
 
 
 def test_mismatched_quotes_are_not_extracted():

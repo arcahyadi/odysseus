@@ -11,6 +11,7 @@ def _resolver(mapping):
         if host in mapping:
             return mapping[host]
         raise OSError(f"unresolvable: {host}")
+
     return resolve
 
 

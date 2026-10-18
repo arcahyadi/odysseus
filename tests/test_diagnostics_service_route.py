@@ -8,6 +8,7 @@ is *not* installed). When the full app deps aren't present we skip rather than
 fail, so the suite stays green in minimal environments; CI installs
 requirements, so the tests run there.
 """
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -35,15 +36,16 @@ def _client_with_admin_gate(monkeypatch, gate):
     monkeypatch.setattr(sh, "collect_service_health", _fake_collect)
 
     app = FastAPI()
-    app.include_router(diag.setup_diagnostics_routes(
-        rag_manager=None, rag_available=False, research_handler=None,
-        memory_vector=None))
+    app.include_router(
+        diag.setup_diagnostics_routes(rag_manager=None, rag_available=False, research_handler=None, memory_vector=None)
+    )
     return TestClient(app, raise_server_exceptions=False)
 
 
 def test_unauthenticated_is_rejected(monkeypatch):
     def gate(_request: Request):
         raise HTTPException(401, "Not authenticated")
+
     client = _client_with_admin_gate(monkeypatch, gate)
     r = client.get("/api/diagnostics/services")
     assert r.status_code == 401
@@ -52,6 +54,7 @@ def test_unauthenticated_is_rejected(monkeypatch):
 def test_non_admin_is_forbidden(monkeypatch):
     def gate(_request: Request):
         raise HTTPException(403, "Admin only")
+
     client = _client_with_admin_gate(monkeypatch, gate)
     r = client.get("/api/diagnostics/services")
     assert r.status_code == 403
@@ -60,6 +63,7 @@ def test_non_admin_is_forbidden(monkeypatch):
 def test_admin_gets_report(monkeypatch):
     def gate(_request: Request):
         return None  # admin allowed
+
     client = _client_with_admin_gate(monkeypatch, gate)
     r = client.get("/api/diagnostics/services")
     assert r.status_code == 200

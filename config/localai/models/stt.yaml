@@ -1,0 +1,5 @@
+# LocalAI model config — Speech-to-Text (Whisper backend)
+name: whisper-1
+backend: whisper
+parameters:
+  model: whisper-1

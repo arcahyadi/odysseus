@@ -13,6 +13,7 @@ and ``services.youtube.youtube_handler`` — that silently drifted:
 These tests pin the two import paths to one module object and verify the shared
 state and the broadened URL parsing.
 """
+
 import sys
 import types
 
@@ -22,8 +23,8 @@ import pytest
 def test_src_and_service_youtube_are_same_module():
     """Both historical import paths must resolve to one module object so
     behavior and module-level state cannot diverge again."""
-    import src.youtube_handler as src_yt
     import services.youtube.youtube_handler as svc_yt
+    import src.youtube_handler as src_yt
 
     assert src_yt is svc_yt
 
@@ -97,7 +98,7 @@ def test_shorts_url_is_recognized_and_extractable():
     """A Shorts URL is treated as a YouTube link (so the chat pipeline excludes
     it from generic web-fetch). It must therefore yield an id, or the video is
     silently dropped — fetched by neither path."""
-    from src.youtube_handler import is_youtube_url, extract_youtube_id
+    from src.youtube_handler import extract_youtube_id, is_youtube_url
 
     url = "https://www.youtube.com/shorts/dQw4w9WgXcQ"
     assert is_youtube_url(url)

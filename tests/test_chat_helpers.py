@@ -4,16 +4,16 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-import routes.chat_helpers as chat_helpers
+from routes import chat_helpers
 from routes.chat_helpers import (
+    PreprocessedMessage,
+    PresetInfo,
     _enforce_chat_privileges,
     _session_is_research_spinoff,
     auto_name_session,
     build_chat_context,
     clean_thinking_for_save,
     needs_auto_name,
-    PreprocessedMessage,
-    PresetInfo,
     save_assistant_response,
 )
 
@@ -52,11 +52,13 @@ def test_allowed_models_explicit_empty_restricted_list_blocks_all_models(monkeyp
 
     with pytest.raises(HTTPException) as exc:
         _enforce_chat_privileges(
-            _Request({
-                "allowed_models": [],
-                "allowed_models_restricted": True,
-                "max_messages_per_day": 0,
-            }),
+            _Request(
+                {
+                    "allowed_models": [],
+                    "allowed_models_restricted": True,
+                    "max_messages_per_day": 0,
+                }
+            ),
             _Session("provider/model-a"),
         )
 
@@ -145,29 +147,29 @@ class _FakeSession:
         self.history.append(message)
 
 
-@pytest.mark.parametrize("name,expected", [
-    # 24h format (the bug this PR fixes)
-    ("deepseek-v4-flash 14:05:33", True),
-    ("qwq 17:46:02", True),
-    ("gemma3 23:59:59", True),
-    ("claude-sonnet 4 0:00:00", True),
-
-    # 12h format (was already working)
-    ("deepseek-v4-flash 2:05:33 PM", True),
-    ("qwq 06:46:02 AM", True),
-    ("claude-sonnet-4 8:05:17 am", True),
-
-    # empty / default
-    ("", True),
-    ("  ", False),
-    ("Chat: something", True),
-
-    # custom titles – should NOT trigger auto-naming
-    ("custom title", False),
-    ("CW Decoder for STM32", False),
-    ("my chat about python", False),
-    ("Fix the login bug", False),
-])
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        # 24h format (the bug this PR fixes)
+        ("deepseek-v4-flash 14:05:33", True),
+        ("qwq 17:46:02", True),
+        ("gemma3 23:59:59", True),
+        ("claude-sonnet 4 0:00:00", True),
+        # 12h format (was already working)
+        ("deepseek-v4-flash 2:05:33 PM", True),
+        ("qwq 06:46:02 AM", True),
+        ("claude-sonnet-4 8:05:17 am", True),
+        # empty / default
+        ("", True),
+        ("  ", False),
+        ("Chat: something", True),
+        # custom titles – should NOT trigger auto-naming
+        ("custom title", False),
+        ("CW Decoder for STM32", False),
+        ("my chat about python", False),
+        ("Fix the login bug", False),
+    ],
+)
 def test_needs_auto_name(name, expected):
     assert needs_auto_name(name) == expected, f"needs_auto_name({name!r}) should be {expected}"
 
@@ -236,16 +238,17 @@ class _SpinMsg:
 
 
 def test_spinoff_detected_from_chatmessage_history():
-    sess = SimpleNamespace(history=[
-        _SpinMsg("system", {"research_spinoff_from": "rp-1"}),
-        _SpinMsg("user", None),
-    ])
+    sess = SimpleNamespace(
+        history=[
+            _SpinMsg("system", {"research_spinoff_from": "rp-1"}),
+            _SpinMsg("user", None),
+        ]
+    )
     assert _session_is_research_spinoff(sess) is True
 
 
 def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch):
-    import src.llm_core as llm_core
-    import src.task_endpoint as task_endpoint
+    from src import llm_core, task_endpoint
 
     resolver_calls = []
     llm_calls = []
@@ -276,18 +279,18 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
         history=[SimpleNamespace(role="user", content="Please fix the endpoint fallback bug.")],
     )
     updates = []
-    session_manager = SimpleNamespace(
-        update_session_name=lambda session_id, title: updates.append((session_id, title))
-    )
+    session_manager = SimpleNamespace(update_session_name=lambda session_id, title: updates.append((session_id, title)))
 
     asyncio.run(auto_name_session(session_manager, sess))
 
-    assert resolver_calls == [(
-        "http://session.example/v1/chat/completions",
-        "session-model",
-        session_headers,
-        "alice",
-    )]
+    assert resolver_calls == [
+        (
+            "http://session.example/v1/chat/completions",
+            "session-model",
+            session_headers,
+            "alice",
+        )
+    ]
     assert llm_calls[0][0] == "http://session.example/v1/chat/completions"
     assert llm_calls[0][1] == "session-model"
     assert llm_calls[0][3]["headers"] == session_headers
@@ -295,18 +298,22 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
 
 
 def test_spinoff_detected_from_dict_history():
-    sess = SimpleNamespace(history=[
-        {"role": "system", "metadata": {"research_spinoff_from": "rp-2"}},
-        {"role": "user", "content": "hi"},
-    ])
+    sess = SimpleNamespace(
+        history=[
+            {"role": "system", "metadata": {"research_spinoff_from": "rp-2"}},
+            {"role": "user", "content": "hi"},
+        ]
+    )
     assert _session_is_research_spinoff(sess) is True
 
 
 def test_non_spinoff_plain_session_is_false():
-    sess = SimpleNamespace(history=[
-        _SpinMsg("system", {"compacted": True}),
-        _SpinMsg("user", None),
-    ])
+    sess = SimpleNamespace(
+        history=[
+            _SpinMsg("system", {"compacted": True}),
+            _SpinMsg("user", None),
+        ]
+    )
     assert _session_is_research_spinoff(sess) is False
 
 
@@ -368,7 +375,7 @@ async def _build_context_owner_probe(monkeypatch, request_state):
     monkeypatch.setattr(chat_helpers, "maybe_compact", fake_maybe_compact)
     monkeypatch.setattr(chat_helpers, "trim_for_context", lambda messages, context_length: messages)
 
-    import src.user_time as user_time
+    from src import user_time
 
     monkeypatch.setattr(
         user_time,

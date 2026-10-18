@@ -15,6 +15,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  doc-gates:
+    name: Doc & lint gates (kill-switchs, citations, budget lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: python -m pip install --disable-pip-version-check ruff
+
+      # Ces trois portes ne tournaient nulle part. Elles sont le seul endroit où
+      # une dérive entre le registre, la documentation et le code se voit tout
+      # seule ; laissées à la main, elles ne se voient qu'au prochain item, ce
+      # qui a déjà coûté deux items (les sources du registre n'étaient vérifiées
+      # par rien, et les citations de `docs/traceability/` non plus).
+      - name: Kill-switch tables and registry sources
+        run: python tools/gen_killswitch_tables.py --check
+
+      - name: Traceability citations
+        run: python tools/check_citations.py
+
+      # `ruff check .` échoue avec ~3708 signalements préexistants : une porte
+      # rouge dès le premier jour n'est pas une porte. Celle-ci échoue seulement
+      # en cas d'AUGMENTATION, ce qui est la seule contrainte tenable sur un
+      # code dont personne ne veut réécrire les 2659 imports paresseux.
+      - name: Lint budget (must not increase)
+        run: python tools/check_lint_budget.py
+
   python-syntax:
     name: Python syntax (compileall)
     runs-on: ubuntu-latest
@@ -92,3 +123,23 @@ jobs:
         if: steps.docs-check.outputs.docs_only != 'true'
       - run: python -m pytest -q
         if: steps.docs-check.outputs.docs_only != 'true'
+
+  llm-quality:
+    name: LLM quality (DeepEval)
+    runs-on: ubuntu-latest
+    # Only runs when explicitly enabled — costs LLM tokens.
+    # Set ODYSSEUS_DEEPEVAL=on in repo settings to activate.
+    if: env.DEEPEVAL_ENABLED == 'true'
+    env:
+      DEEPEVAL_ENABLED: ${{ vars.ODYSSEUS_DEEPEVAL }}
+      ODYSSEUS_DEEPEVAL: on
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-optional.txt
+      - run: python -m pytest tests/quality/ -v --tb=short

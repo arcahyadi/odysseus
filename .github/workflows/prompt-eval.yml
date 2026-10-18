@@ -1,0 +1,45 @@
+name: Prompt Evaluation
+
+on:
+  pull_request:
+    paths:
+      - "src/agent_loop.py"
+      - "tests/prompts/**"
+  workflow_dispatch:
+
+concurrency:
+  group: prompt-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prompt-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run prompt evaluation
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npx promptfoo eval --no-cache -c tests/prompts/promptfooconfig.yaml
+
+      - name: Generate report
+        if: always()
+        run: npx promptfoo eval -c tests/prompts/promptfooconfig.yaml --output tests/prompts/eval-report.json
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-eval-results
+          path: tests/prompts/eval-report.json
+          retention-days: 30

@@ -21,7 +21,7 @@ def _load_values():
         }}[key] ?? null;
       }},
     }};
-    const presets = await import('{_MODULE.as_posix()}');
+    const presets = await import('{_MODULE.as_uri()}');
     console.log(JSON.stringify({{
       brokenArray: presets.loadStoredArray('broken'),
       wrongArray: presets.loadStoredArray('object'),
@@ -35,8 +35,10 @@ def _load_values():
         input=js,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=str(_REPO),
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())

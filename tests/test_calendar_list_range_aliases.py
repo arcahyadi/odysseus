@@ -54,25 +54,40 @@ async def test_list_events_honors_range_aliases(start_key, end_key):
 
     owner = "calendar-alias-" + uuid.uuid4().hex[:8]
 
-    inside = await do_manage_calendar(json.dumps({
-        "action": "create_event",
-        "summary": "Late June planning",
-        "dtstart": "2126-06-25T10:00:00Z",
-    }), owner=owner)
+    inside = await do_manage_calendar(
+        json.dumps(
+            {
+                "action": "create_event",
+                "summary": "Late June planning",
+                "dtstart": "2126-06-25T10:00:00Z",
+            }
+        ),
+        owner=owner,
+    )
     assert inside.get("exit_code", 0) == 0, inside
 
-    outside = await do_manage_calendar(json.dumps({
-        "action": "create_event",
-        "summary": "Outside July planning",
-        "dtstart": "2126-07-10T10:00:00Z",
-    }), owner=owner)
+    outside = await do_manage_calendar(
+        json.dumps(
+            {
+                "action": "create_event",
+                "summary": "Outside July planning",
+                "dtstart": "2126-07-10T10:00:00Z",
+            }
+        ),
+        owner=owner,
+    )
     assert outside.get("exit_code", 0) == 0, outside
 
-    res = await do_manage_calendar(json.dumps({
-        "action": "list_events",
-        start_key: "2126-06-01T00:00:00Z",
-        end_key: "2126-07-01T00:00:00Z",
-    }), owner=owner)
+    res = await do_manage_calendar(
+        json.dumps(
+            {
+                "action": "list_events",
+                start_key: "2126-06-01T00:00:00Z",
+                end_key: "2126-07-01T00:00:00Z",
+            }
+        ),
+        owner=owner,
+    )
 
     assert res.get("exit_code", 0) == 0, res
     summaries = [event["summary"] for event in res["events"]]

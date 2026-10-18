@@ -9,9 +9,10 @@ write) raises KeyError and breaks comprehensive_web_search.
 
 Mirrors tests/test_search_analytics_defaults.py which covers the src copy.
 """
+
 import json
 
-import services.search.analytics as analytics
+from services.search import analytics
 
 
 def test_load_merges_defaults_for_partial_file(tmp_path, monkeypatch):

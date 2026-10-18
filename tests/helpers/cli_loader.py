@@ -1,8 +1,8 @@
 """Shared loader for CLI scripts under scripts/."""
+
 import importlib.machinery
 import importlib.util
 from pathlib import Path
-
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 

@@ -16,8 +16,7 @@ def test_tool_call_arguments_are_counted():
         "role": "assistant",
         "content": None,
         "tool_calls": [
-            {"id": "c1", "type": "function",
-             "function": {"name": "create_document", "arguments": big}},
+            {"id": "c1", "type": "function", "function": {"name": "create_document", "arguments": big}},
         ],
     }
     est = estimate_tokens([msg])

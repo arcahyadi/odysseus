@@ -11,6 +11,7 @@ pitfall already fixed in topic_analyzer.py.
 `retrieve` (which needs a chroma collection) is stubbed out so these tests
 exercise only the keyword-hint loop.
 """
+
 from src.tool_index import ToolIndex
 
 
@@ -43,9 +44,7 @@ def test_substring_inside_word_does_not_force_serve_tools():
     # "observe"/"reserve" contain "serve". serve_model/serve_preset are also in
     # ALWAYS_AVAILABLE, so pass a non-serve base to isolate the keyword loop (an
     # empty set falls back to ALWAYS_AVAILABLE). The "serve" hint must NOT fire.
-    tools = ti.get_tools_for_query(
-        "please observe the reserve levels", always_include={"__base__"}
-    )
+    tools = ti.get_tools_for_query("please observe the reserve levels", always_include={"__base__"})
     assert "serve_model" not in tools
     assert "serve_preset" not in tools
 

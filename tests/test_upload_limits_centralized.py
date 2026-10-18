@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-import src.upload_limits as upload_limits
+from src import upload_limits
 
 REPO = Path(__file__).resolve().parent.parent
 

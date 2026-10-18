@@ -6,6 +6,7 @@ leaves the file truncated or empty — the user loses every saved preset. The
 save now goes through core.atomic_io.atomic_write_json (tmp file + os.replace),
 which the rest of the codebase already uses for JSON state files.
 """
+
 import inspect
 import json
 

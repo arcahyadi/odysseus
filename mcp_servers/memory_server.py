@@ -13,7 +13,7 @@ from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -58,15 +58,9 @@ def _scope_entries() -> tuple[str | None, list[dict], list[dict], str | None]:
     if owner is None and _owner_scoped_store(entries):
         return None, entries, [], _OWNER_SCOPE_ERROR
     if owner is None:
-        visible = [
-            entry for entry in entries
-            if isinstance(entry, dict) and _entry_owner(entry) is None
-        ]
+        visible = [entry for entry in entries if isinstance(entry, dict) and _entry_owner(entry) is None]
     else:
-        visible = [
-            entry for entry in entries
-            if isinstance(entry, dict) and _entry_owner(entry) == owner
-        ]
+        visible = [entry for entry in entries if isinstance(entry, dict) and _entry_owner(entry) == owner]
     return owner, entries, visible, None
 
 
@@ -83,10 +77,12 @@ def _ensure_init():
 
     from src.constants import DATA_DIR
     from src.memory import MemoryManager
+
     _memory_manager = MemoryManager(DATA_DIR)
 
     try:
         from src.memory_vector import MemoryVectorStore
+
         _memory_vector = MemoryVectorStore(DATA_DIR)
         if not _memory_vector.healthy:
             _memory_vector = None
@@ -239,7 +235,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         _owner, _all_memories, memories, scope_error = _scope_entries()
         if scope_error:
             return _text_result(scope_error)
-        if hasattr(_memory_manager, 'get_relevant_memories'):
+        if hasattr(_memory_manager, "get_relevant_memories"):
             results = _memory_manager.get_relevant_memories(query, memories, threshold=0.05, max_items=20)
         else:
             query_lower = query.lower()

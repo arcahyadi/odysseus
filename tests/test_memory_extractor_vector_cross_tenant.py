@@ -9,13 +9,12 @@ without checking ownership, so user B's freshly-extracted fact was silently
 dropped when it was merely semantically similar to user A's memory. The text
 dedup fallback right below is already owner-scoped; the vector path must be too.
 """
+
 import asyncio
 import importlib.util
 import sys
 import types
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,14 +75,14 @@ class FakeMemoryManager:
 
     def add_entry(self, text, source="auto", category="fact", owner=None):
         self._n += 1
-        entry = {"id": f"new-{self._n}", "text": text, "owner": owner,
-                 "source": source, "category": category}
+        entry = {"id": f"new-{self._n}", "text": text, "owner": owner, "source": source, "category": category}
         self.rows.append(entry)
         return entry
 
 
 class FakeVector:
     """Healthy vector store whose find_similar always matches user A's memory."""
+
     def __init__(self, match_id):
         self.healthy = True
         self._match_id = match_id
@@ -94,19 +93,26 @@ class FakeVector:
 
 def test_vector_match_from_other_tenant_does_not_drop_users_fact(monkeypatch):
     # User A already owns a semantically-similar memory.
-    mm = FakeMemoryManager([
-        {"id": "a1", "text": "I live in Lisbon", "owner": "userA"},
-    ])
+    mm = FakeMemoryManager(
+        [
+            {"id": "a1", "text": "I live in Lisbon", "owner": "userA"},
+        ]
+    )
     # The vector store reports user B's new fact as a near-duplicate of a1.
     vec = FakeVector(match_id="a1")
     _install_llm_stub(monkeypatch, '["My home is in Lisbon"]')
 
     memory_extractor = _load_extractor()
 
-    asyncio.run(memory_extractor.extract_and_store(
-        FakeSession(owner="userB"), mm, vec,
-        endpoint_url="http://x", model="m",
-    ))
+    asyncio.run(
+        memory_extractor.extract_and_store(
+            FakeSession(owner="userB"),
+            mm,
+            vec,
+            endpoint_url="http://x",
+            model="m",
+        )
+    )
 
     b_texts = {r["text"] for r in mm.load(owner="userB")}
     assert "My home is in Lisbon" in b_texts, (

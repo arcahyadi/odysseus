@@ -38,27 +38,15 @@ def get_chat_upload_max_bytes() -> int:
 # ODYSSEUS_*_MAX_BYTES env var to an integer byte count to tune it; an invalid
 # value fails fast at import rather than crashing mid-request. Defaults match
 # the prior per-route values, so behavior is unchanged unless an env var is set.
-GALLERY_UPLOAD_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES", 100 * 1024 * 1024
-)
+GALLERY_UPLOAD_MAX_BYTES = read_byte_limit_env("ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES", 100 * 1024 * 1024)
 GALLERY_TRANSFORM_UPLOAD_MAX_BYTES = read_byte_limit_env(
     "ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
 )
-MEMORY_IMPORT_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_MEMORY_IMPORT_MAX_BYTES", 10 * 1024 * 1024
-)
-PERSONAL_UPLOAD_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
-)
-EMAIL_COMPOSE_UPLOAD_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_EMAIL_COMPOSE_UPLOAD_MAX_BYTES", 25 * 1024 * 1024
-)
-STT_MAX_AUDIO_BYTES = read_byte_limit_env(
-    "ODYSSEUS_STT_MAX_AUDIO_BYTES", 25 * 1024 * 1024
-)
-ICS_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_ICS_MAX_BYTES", 10 * 1024 * 1024
-)
+MEMORY_IMPORT_MAX_BYTES = read_byte_limit_env("ODYSSEUS_MEMORY_IMPORT_MAX_BYTES", 10 * 1024 * 1024)
+PERSONAL_UPLOAD_MAX_BYTES = read_byte_limit_env("ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)
+EMAIL_COMPOSE_UPLOAD_MAX_BYTES = read_byte_limit_env("ODYSSEUS_EMAIL_COMPOSE_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)
+STT_MAX_AUDIO_BYTES = read_byte_limit_env("ODYSSEUS_STT_MAX_AUDIO_BYTES", 25 * 1024 * 1024)
+ICS_MAX_BYTES = read_byte_limit_env("ODYSSEUS_ICS_MAX_BYTES", 10 * 1024 * 1024)
 
 
 async def read_upload_limited(upload: UploadFile, limit: int, label: str = "Upload") -> bytes:

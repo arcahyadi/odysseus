@@ -31,6 +31,7 @@ class _Request:
 
 def _upload_endpoints(upload_handler, monkeypatch):
     import fastapi.dependencies.utils as dependency_utils
+
     from routes.upload_routes import router, setup_upload_routes
 
     monkeypatch.setattr(dependency_utils, "ensure_multipart_is_installed", lambda: None)
@@ -41,8 +42,8 @@ def _upload_endpoints(upload_handler, monkeypatch):
 
 
 def _make_upload_store(tmp_path, monkeypatch):
-    from src.upload_handler import UploadHandler
     from src import constants
+    from src.upload_handler import UploadHandler
 
     upload_dir = tmp_path / "uploads"
     dated = upload_dir / "2026" / "06" / "02"
@@ -144,9 +145,7 @@ def test_download_file_allows_same_owner(tmp_path, monkeypatch):
     handler, alice_id, _bob_id, _upload_dir = _make_upload_store(tmp_path, monkeypatch)
     download_file = _upload_endpoints(handler, monkeypatch)["download_file"]
 
-    response = asyncio.run(
-        download_file(_Request(user="alice", auth_manager=_AuthManager()), alice_id)
-    )
+    response = asyncio.run(download_file(_Request(user="alice", auth_manager=_AuthManager()), alice_id))
 
     assert response.path.endswith(alice_id)
     assert response.media_type == "image/png"
@@ -310,6 +309,4 @@ def test_put_vision_text_allows_same_owner_to_write_cache(tmp_path, monkeypatch)
     )
 
     assert response == {"ok": True}
-    assert (upload_dir / ".vision" / f"{alice_id}.txt").read_text(
-        encoding="utf-8"
-    ) == "edited alice text"
+    assert (upload_dir / ".vision" / f"{alice_id}.txt").read_text(encoding="utf-8") == "edited alice text"

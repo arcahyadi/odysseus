@@ -20,13 +20,17 @@ def test_list_skips_non_object_research_records(tmp_path, monkeypatch):
 
     cli.cmd_list(SimpleNamespace(status=None, limit=50))
 
-    assert emitted == [[{
-        "id": "good",
-        "query": "hello",
-        "category": "",
-        "status": "complete",
-        "started_at": "",
-        "completed_at": "",
-        "sources": 0,
-        "stats": {},
-    }]]
+    assert emitted == [
+        [
+            {
+                "id": "good",
+                "query": "hello",
+                "category": "",
+                "status": "complete",
+                "started_at": "",
+                "completed_at": "",
+                "sources": 0,
+                "stats": {},
+            }
+        ]
+    ]

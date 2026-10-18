@@ -35,11 +35,7 @@ def test_service_searxng_json_sends_safesearch(monkeypatch):
             return None
 
         def json(self):
-            return {
-                "results": [
-                    {"title": "Result", "url": "https://example.com", "content": "Snippet"}
-                ]
-            }
+            return {"results": [{"title": "Result", "url": "https://example.com", "content": "Snippet"}]}
 
     def fake_get(url, **kwargs):
         seen["url"] = url
@@ -62,9 +58,10 @@ def test_service_ddg_redirect_ignores_lookalike_hosts():
         url = f"https://{host}/l/?uddg=https%3A%2F%2Fexample.com"
         assert providers._resolve_ddg_redirect(url) == url
 
-    assert providers._resolve_ddg_redirect(
-        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com"
-    ) == "https://example.com"
+    assert (
+        providers._resolve_ddg_redirect("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com")
+        == "https://example.com"
+    )
 
 
 def test_service_ddg_html_fallback_sends_safesearch(monkeypatch):

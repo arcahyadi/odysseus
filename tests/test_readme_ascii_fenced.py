@@ -7,6 +7,7 @@ whitespace and box-drawing rules and rendered it misaligned. The README refresh
 now pins the wordmark identity instead, while still catching the original failure
 mode if an un-fenced ASCII banner is ever reintroduced.
 """
+
 from pathlib import Path
 
 README = Path(__file__).resolve().parent.parent / "README.md"

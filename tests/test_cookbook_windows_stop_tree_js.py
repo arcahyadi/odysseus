@@ -1,7 +1,6 @@
 import shlex
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 RUNNING_JS = ROOT / "static" / "js" / "cookbookRunning.js"
 

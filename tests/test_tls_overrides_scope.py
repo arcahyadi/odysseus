@@ -36,10 +36,15 @@ REPO = Path(__file__).resolve().parents[1]
 # httpx calls because the URL is an LLM provider's API. Every caller here
 # is a discrete LLM HTTP entry point and intentional. Any addition must
 # come with its own justification in code review.
-ALLOWED_CALLERS = frozenset({
-    "src/llm_core.py",          # shared AsyncClient used by stream_llm
-    "routes/model_routes.py",   # _probe_endpoint + _ping_endpoint
-})
+ALLOWED_CALLERS = frozenset(
+    {
+        # The LLM dispatch code physically lives here; src/llm_core.py is a
+        # thin shim that exec's this file into its own namespace. The shared
+        # AsyncClient (and the Kimi Code UA probe) still live in this file.
+        "archive/legacy/llm_core.py",  # shared AsyncClient used by stream_llm
+        "routes/model_routes.py",  # _probe_endpoint + _ping_endpoint
+    }
+)
 
 
 def _grep_files(pattern: str) -> set[str]:
@@ -126,6 +131,7 @@ def test_llm_verify_default_is_true_when_env_unset():
     import importlib
 
     import src.tls_overrides as mod
+
     importlib.reload(mod)
     assert mod.llm_verify() is True, (
         f"Default llm_verify() must be True (httpx built-in trust store); "
@@ -143,6 +149,7 @@ def test_llm_verify_falls_back_to_true_for_missing_bundle_file():
         import importlib
 
         import src.tls_overrides as mod
+
         importlib.reload(mod)
         assert mod.llm_verify() is True
     finally:

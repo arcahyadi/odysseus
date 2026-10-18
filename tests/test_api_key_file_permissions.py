@@ -10,6 +10,7 @@ POSIX-only: ``core.platform_compat.safe_chmod`` is a documented no-op on Windows
 (files under the user profile are ACL-restricted), so the mode assertions are
 skipped there.
 """
+
 import os
 import stat
 import sys

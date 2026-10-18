@@ -1,0 +1,65 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/deepseek-v4-pro",
+  "plugin": [
+    "@agentos/sfd-eventbus"
+  ],
+  "permission": {
+    "edit": "ask",
+    "bash": "allow",
+    "task": "allow",
+    "skill": "allow"
+  },
+  "agent": {
+    "sfd-orchestrator": {
+      "mode": "primary",
+      "model": "opencode/deepseek-v4-pro",
+      "description": "SFD Orchestrator — 7-phase pipeline, decomposes projects, spawns agents per phase",
+      "permission": {
+        "task": { "*": "allow" },
+        "edit": "ask",
+        "bash": "allow"
+      }
+    },
+    "build": {
+      "mode": "primary",
+      "model": "opencode/minimax-m3",
+      "permission": {
+        "edit": "ask",
+        "bash": "allow"
+      }
+    },
+    "plan": {
+      "mode": "primary",
+      "model": "opencode/deepseek-v4-pro",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny"
+      }
+    },
+    "executor": {
+      "mode": "subagent",
+      "model": "opencode/minimax-m3",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow"
+      }
+    },
+    "planner": {
+      "mode": "subagent",
+      "model": "opencode/deepseek-v4-pro",
+      "permission": {
+        "edit": "allow",
+        "bash": "deny"
+      }
+    },
+    "reviewer": {
+      "mode": "subagent",
+      "model": "opencode/deepseek-v4-pro",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow"
+      }
+    }
+  }
+}

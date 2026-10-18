@@ -14,6 +14,7 @@ constants, so they would fail on the pre-fix code (empty domains -> low-signal -
 no api_call). They skip locally when the agent's heavy deps (httpx/embeddings)
 are absent, and run in CI where they are installed.
 """
+
 import pytest
 
 agent_loop = pytest.importorskip("src.agent_loop")

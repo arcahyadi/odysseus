@@ -6,18 +6,18 @@ Implements an iterative Think→Search→Extract→Synthesize loop where the LLM
 drives every decision: what to search, what's relevant, what's missing, and
 when to stop.  Inspired by Alibaba's IterResearch approach.
 """
+
 import asyncio
 import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Set
-
-from src.research_utils import strip_thinking, is_low_quality
 
 from src.goal_based_extractor import EXTRACTOR_SYSTEM
 from src.prompt_security import untrusted_context_message
+from src.research_utils import is_low_quality, strip_thinking
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ def current_date_context() -> str:
         f"'this year', use {now.strftime('%Y')} or relative wording — never a "
         f"year inferred from training data.\n\n"
     )
+
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -152,14 +153,12 @@ CATEGORY_PROMPTS = {
 - Start with a quick-compare markdown table of top picks (columns: Name, Price, Best For, Rating)
 - End with a ## Verdict section picking Best Overall and Best Value
 - Still include source citations inline""",
-
     "comparison": """IMPORTANT FORMAT OVERRIDE — this is a COMPARISON report:
 - Create a ## Comparison Table as a markdown table comparing ALL options across key criteria (rows = criteria, columns = options)
 - Use checkmarks, ratings, or short values in cells
 - Write a ## section per option with its strengths, weaknesses, and ideal use case
 - End with ## Best For verdicts (e.g., "**Best for small teams:** Option A because...")
 - Include a ## Shared Considerations section for things that apply to all options""",
-
     "howto": """IMPORTANT FORMAT OVERRIDE — this is a HOW-TO guide:
 - Start with ## Quick Guide — a super concise numbered list (one line per step, no details, just the action). Example: 1. Install X  2. Run Y  3. Configure Z
 - Then ## Prerequisites listing what's needed before starting
@@ -168,7 +167,6 @@ CATEGORY_PROMPTS = {
 - Use blockquotes (> ) for tips and warnings: > **Tip:** ... or > **Warning:** ...
 - End with ## Common Mistakes section
 - Add estimated time and difficulty level near the top""",
-
     "factcheck": """IMPORTANT FORMAT OVERRIDE — this is a FACT-CHECK report:
 - Start with ## The Claim restating what's being checked
 - Create ## Evidence For and ## Evidence Against sections
@@ -177,6 +175,7 @@ CATEGORY_PROMPTS = {
 - End with ## Nuance & Caveats for important context and limitations
 - Be balanced and cite sources for every claim""",
 }
+
 
 # ---------------------------------------------------------------------------
 # DeepResearcher
@@ -193,7 +192,7 @@ class DeepResearcher:
         self,
         llm_endpoint: str,
         llm_model: str,
-        llm_headers: Optional[Dict] = None,
+        llm_headers: dict | None = None,
         max_rounds: int = 8,
         max_time: int = 300,
         max_urls_per_round: int = 3,
@@ -206,9 +205,9 @@ class DeepResearcher:
         min_rounds: int = 2,
         max_empty_rounds: int = 2,
         synthesis_window: int = 10,
-        progress_callback: Optional[Callable] = None,
-        search_provider: Optional[str] = None,
-        category: Optional[str] = None,
+        progress_callback: Callable | None = None,
+        search_provider: str | None = None,
+        category: str | None = None,
     ):
         self.llm_endpoint = llm_endpoint
         self.llm_model = llm_model
@@ -230,15 +229,15 @@ class DeepResearcher:
         self._progress = progress_callback
         self._cancelled = False
         self._start_time: float = 0
-        self.queries_used: Set[str] = set()
-        self.urls_fetched: Set[str] = set()
-        self.analyzed_urls: List[Dict[str, str]] = []
+        self.queries_used: set[str] = set()
+        self.urls_fetched: set[str] = set()
+        self.analyzed_urls: list[dict[str, str]] = []
         self.round_count: int = 0
         # Track which search providers actually returned results during the
         # run, in arrival order — surfaced in the visual report so users can
         # see whether searxng / brave / tavily etc. carried the work.
-        self.providers_used: List[str] = []
-        self.findings: List[Dict] = []
+        self.providers_used: list[str] = []
+        self.findings: list[dict] = []
         self.evolving_report: str = ""
         self.research_plan: str = ""
 
@@ -253,8 +252,8 @@ class DeepResearcher:
         self,
         question: str,
         prior_report: str = "",
-        prior_findings: Optional[List[Dict]] = None,
-        prior_urls: Optional[Set[str]] = None,
+        prior_findings: list[dict] | None = None,
+        prior_urls: set[str] | None = None,
     ) -> str:
         """Run iterative research and return a final report.
 
@@ -265,7 +264,7 @@ class DeepResearcher:
             prior_urls: URLs already visited (won't be re-fetched).
         """
         self._start_time = time.time()
-        findings: List[Dict] = list(prior_findings) if prior_findings else []
+        findings: list[dict] = list(prior_findings) if prior_findings else []
         report = prior_report or ""
 
         # PLAN: Analyze the question and create a research strategy
@@ -306,9 +305,13 @@ class DeepResearcher:
                 logger.warning(f"Round {round_num}: no queries generated, stopping")
                 break
 
-            self._emit(phase="searching", round=round_num, queries=len(queries),
-                       query_preview=queries[0] if queries else "",
-                       total_sources=len(self.urls_fetched))
+            self._emit(
+                phase="searching",
+                round=round_num,
+                queries=len(queries),
+                query_preview=queries[0] if queries else "",
+                total_sources=len(self.urls_fetched),
+            )
 
             # SEARCH + EXTRACT
             round_findings = await self._search_and_extract(queries, question)
@@ -316,16 +319,21 @@ class DeepResearcher:
                 findings.extend(round_findings)
                 consecutive_empty_rounds = 0
                 logger.info(f"Round {round_num}: extracted {len(round_findings)} findings")
-                self._emit(phase="reading", round=round_num,
-                           new_sources=len(round_findings),
-                           total_sources=len(self.urls_fetched),
-                           total_findings=len(findings))
+                self._emit(
+                    phase="reading",
+                    round=round_num,
+                    new_sources=len(round_findings),
+                    total_sources=len(self.urls_fetched),
+                    total_findings=len(findings),
+                )
             else:
                 consecutive_empty_rounds += 1
                 logger.info(f"Round {round_num}: no new findings ({consecutive_empty_rounds} consecutive empty)")
                 if consecutive_empty_rounds >= self.max_empty_rounds:
-                    logger.warning(f"Search appears to be down — {self.max_empty_rounds} consecutive rounds with no results")
-                    err_detail = getattr(self, '_last_search_error', 'unknown error')
+                    logger.warning(
+                        f"Search appears to be down — {self.max_empty_rounds} consecutive rounds with no results"
+                    )
+                    err_detail = getattr(self, "_last_search_error", "unknown error")
                     self._emit(phase="error", message=f"Search engine unavailable: {err_detail}")
                     if not findings:
                         return (
@@ -337,9 +345,12 @@ class DeepResearcher:
 
             # SYNTHESIZE
             if findings:
-                self._emit(phase="analyzing", round=round_num,
-                           total_sources=len(self.urls_fetched),
-                           total_findings=len(findings))
+                self._emit(
+                    phase="analyzing",
+                    round=round_num,
+                    total_sources=len(self.urls_fetched),
+                    total_findings=len(findings),
+                )
                 report = await self._synthesize(question, findings, report)
 
             # DECIDE
@@ -350,8 +361,7 @@ class DeepResearcher:
                     break
 
         # FINAL REPORT
-        self._emit(phase="writing", total_sources=len(self.urls_fetched),
-                   total_findings=len(findings))
+        self._emit(phase="writing", total_sources=len(self.urls_fetched), total_findings=len(findings))
         if not report:
             # Synthesis can fail (e.g. the LLM timed out) even though the search
             # rounds did gather findings. Don't throw that work away — return the
@@ -359,8 +369,7 @@ class DeepResearcher:
             # nothing was found (#1551).
             if findings:
                 logger.warning(
-                    "Synthesis produced no report; returning %d gathered "
-                    "finding(s) as a fallback", len(findings)
+                    "Synthesis produced no report; returning %d gathered finding(s) as a fallback", len(findings)
                 )
                 return self._fallback_report(question, findings)
             return "No information could be gathered for this question."
@@ -378,10 +387,12 @@ class DeepResearcher:
     # ------------------------------------------------------------------
     # LLM helper
     # ------------------------------------------------------------------
-    async def _llm(self, messages: List[Dict], temperature: float = 0.3,
-                   max_tokens: int = 4096, timeout: int = 60) -> str:
+    async def _llm(
+        self, messages: list[dict], temperature: float = 0.3, max_tokens: int = 4096, timeout: int = 60
+    ) -> str:
         """Call the LLM asynchronously and strip thinking tags."""
         from src.llm_core import llm_call_async
+
         response = await llm_call_async(
             url=self.llm_endpoint,
             model=self.llm_model,
@@ -423,7 +434,7 @@ class DeepResearcher:
             self._emit(phase="warning", message="Planning step failed, proceeding with direct search")
             return ""
 
-    async def _classify_category(self, question: str) -> Optional[str]:
+    async def _classify_category(self, question: str) -> str | None:
         """Fast LLM call to classify the research question into a category."""
         valid = ", ".join(CATEGORY_PROMPTS.keys())
         prompt = (
@@ -436,7 +447,9 @@ class DeepResearcher:
         try:
             result = await self._llm(
                 [{"role": "user", "content": prompt}],
-                temperature=0, max_tokens=20, timeout=15,
+                temperature=0,
+                max_tokens=20,
+                timeout=15,
             )
             cat = (result or "").strip().lower()
             # Clean one-word answer first.
@@ -458,13 +471,11 @@ class DeepResearcher:
     # ------------------------------------------------------------------
     # THINK: generate search queries
     # ------------------------------------------------------------------
-    async def _generate_queries(self, question: str, report: str,
-                                round_num: int) -> List[str]:
+    async def _generate_queries(self, question: str, report: str, round_num: int) -> list[str]:
         if round_num == 1:
             num_queries = 4
             round_instruction = (
-                "This is the first round — generate broad, diverse queries "
-                "that explore the key facets of the question."
+                "This is the first round — generate broad, diverse queries that explore the key facets of the question."
             )
         else:
             num_queries = 3
@@ -504,10 +515,9 @@ class DeepResearcher:
     # ------------------------------------------------------------------
     # SEARCH + EXTRACT
     # ------------------------------------------------------------------
-    async def _search_and_extract(self, queries: List[str],
-                                  question: str) -> List[Dict]:
+    async def _search_and_extract(self, queries: list[str], question: str) -> list[dict]:
         """Search each query and extract relevant info from top results."""
-        all_findings: List[Dict] = []
+        all_findings: list[dict] = []
 
         # Search all queries in parallel
         search_tasks = [self._search(q) for q in queries]
@@ -526,10 +536,12 @@ class DeepResearcher:
                 if url and url not in self.urls_fetched:
                     urls_to_fetch.append(r)
                     self.urls_fetched.add(url)
-                    self.analyzed_urls.append({
-                        "url": url,
-                        "title": r.get("title", "") or url,
-                    })
+                    self.analyzed_urls.append(
+                        {
+                            "url": url,
+                            "title": r.get("title", "") or url,
+                        }
+                    )
                 if len(urls_to_fetch) >= self.max_urls_per_round * len(queries):
                     break
 
@@ -541,7 +553,7 @@ class DeepResearcher:
         # slower and can trip the extraction timeout.
         semaphore = asyncio.Semaphore(self.extraction_concurrency)
 
-        async def _bounded_extract(result: Dict) -> Optional[Dict]:
+        async def _bounded_extract(result: dict) -> dict | None:
             async with semaphore:
                 return await self._fetch_and_extract(result["url"], question, result.get("title", ""))
 
@@ -557,11 +569,11 @@ class DeepResearcher:
 
         return all_findings
 
-    async def _search(self, query: str) -> List[Dict]:
+    async def _search(self, query: str) -> list[dict]:
         """Run a search query using the configured research search provider."""
         try:
+            from src.search.core import _build_provider_chain, _call_provider
             from src.search.providers import _get_search_settings
-            from src.search.core import _call_provider, _build_provider_chain
 
             settings = _get_search_settings()
             provider = (self.search_provider_override or "").strip()
@@ -597,8 +609,7 @@ class DeepResearcher:
             # each provider returns [] without throwing.
             if not raised:
                 self._last_search_error = (
-                    f"no results from search provider(s): "
-                    f"{', '.join(chain) if chain else provider}"
+                    f"no results from search provider(s): {', '.join(chain) if chain else provider}"
                 )
             return []
         except Exception as e:
@@ -606,14 +617,13 @@ class DeepResearcher:
             self._last_search_error = str(e)
             return []
 
-    async def _fetch_and_extract(self, url: str, question: str,
-                                 title: str) -> Optional[Dict]:
+    async def _fetch_and_extract(self, url: str, question: str, title: str) -> dict | None:
         """Fetch a URL's content and use LLM to extract relevant info."""
         display = title or url
-        self._emit(phase="reading", url=url, title=display,
-                   total_sources=len(self.urls_fetched))
+        self._emit(phase="reading", url=url, title=display, total_sources=len(self.urls_fetched))
         try:
             from src.search import fetch_webpage_content
+
             page = await asyncio.to_thread(fetch_webpage_content, url, 10)
         except Exception as e:
             logger.warning(f"Failed to fetch {url}: {e}")
@@ -625,8 +635,8 @@ class DeepResearcher:
         content = page["content"]
         # Truncate to avoid blowing up context, preferring paragraph boundary
         if len(content) > self.max_content_chars:
-            truncated = content[:self.max_content_chars]
-            last_para = truncated.rfind('\n\n')
+            truncated = content[: self.max_content_chars]
+            last_para = truncated.rfind("\n\n")
             if last_para > self.max_content_chars * 0.8:
                 content = truncated[:last_para]
             else:
@@ -668,11 +678,10 @@ class DeepResearcher:
     # ------------------------------------------------------------------
     # SYNTHESIZE
     # ------------------------------------------------------------------
-    async def _synthesize(self, question: str, findings: List[Dict],
-                          current_report: str) -> str:
+    async def _synthesize(self, question: str, findings: list[dict], current_report: str) -> str:
         """LLM synthesizes all findings into an updated report."""
         # Format findings for the prompt
-        window = findings[-self.synthesis_window:]
+        window = findings[-self.synthesis_window :]
         if len(findings) > self.synthesis_window:
             logger.info(f"Synthesis using last {self.synthesis_window} of {len(findings)} findings")
         findings_text = self._format_findings(window)
@@ -702,8 +711,7 @@ class DeepResearcher:
     # ------------------------------------------------------------------
     # DECIDE
     # ------------------------------------------------------------------
-    async def _should_stop(self, question: str, report: str,
-                           round_num: int) -> bool:
+    async def _should_stop(self, question: str, report: str, round_num: int) -> bool:
         """Let the LLM decide whether the report is comprehensive enough."""
         prompt = STOP_PROMPT.format(
             question=question,
@@ -723,7 +731,7 @@ class DeepResearcher:
             # like it starts with "<THINK>" and the engine never stops.
             clean = strip_thinking(response).strip()
             # Tolerate "**YES**", "Yes.", quotes, etc.
-            answer = re.sub(r'^[\s*_`"\'>#\-]+', '', clean).upper()
+            answer = re.sub(r'^[\s*_`"\'>#\-]+', "", clean).upper()
             should_stop = answer.startswith("YES")
             logger.info(f"Stop decision (round {round_num}): {clean[:120]}")
             return should_stop
@@ -760,14 +768,15 @@ class DeepResearcher:
                     [
                         {"role": "user", "content": prompt},
                         {"role": "assistant", "content": result},
-                        {"role": "user", "content":
-                            "This report is too brief. Please expand it significantly:\n"
+                        {
+                            "role": "user",
+                            "content": "This report is too brief. Please expand it significantly:\n"
                             "- Add detailed paragraphs for each section (not just bullet points)\n"
                             "- Include specific data, numbers, and comparisons from the evidence\n"
                             "- Explain context and significance — don't just list facts\n"
                             "- Use ## headings and ### subheadings\n"
                             "- Target at least 1000 words\n"
-                            "Write the full expanded report now."
+                            "Write the full expanded report now.",
                         },
                     ],
                     temperature=0.4,
@@ -803,11 +812,11 @@ class DeepResearcher:
         """Strip markdown code-block fences (```json ... ```) if present."""
         text = text.strip()
         if text.startswith("```"):
-            text = re.sub(r'^```(?:json)?\s*', '', text)
-            text = re.sub(r'\s*```$', '', text)
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
         return text.strip()
 
-    def _parse_json_array(self, text: str) -> List[str]:
+    def _parse_json_array(self, text: str) -> list[str]:
         """Extract a JSON array of strings from LLM output."""
         text = self._strip_code_block(text)
         try:
@@ -820,8 +829,8 @@ class DeepResearcher:
         # Handle truncated arrays — e.g. '["query one", "query two", "query thr'
         # Repair from the LAST array start so an echoed example array earlier
         # in the reply is not harvested into the real query set.
-        last_start = text.rfind('[')
-        truncated = last_start != -1 and ']' not in text[last_start:]
+        last_start = text.rfind("[")
+        truncated = last_start != -1 and "]" not in text[last_start:]
         if truncated:
             complete_items = re.findall(r'"([^"]*)"', text[last_start:])
             if complete_items:
@@ -829,7 +838,7 @@ class DeepResearcher:
                 return complete_items
 
         # Greedy match to capture the full outermost array
-        match = re.search(r'\[[\s\S]*\]', text)
+        match = re.search(r"\[[\s\S]*\]", text)
         if match:
             try:
                 parsed = json.loads(match.group())
@@ -843,7 +852,7 @@ class DeepResearcher:
         # above spans them all and fails to parse, so scan non-greedily and
         # keep the LAST parseable array, which is the model's actual answer.
         last_parsed = None
-        for m in re.finditer(r'\[[\s\S]*?\]', text):
+        for m in re.finditer(r"\[[\s\S]*?\]", text):
             try:
                 parsed = json.loads(m.group())
                 if isinstance(parsed, list):
@@ -854,7 +863,7 @@ class DeepResearcher:
             return [str(item) for item in last_parsed]
 
         # Last resort: harvest quoted strings from the first array start
-        arr_start = text.find('[')
+        arr_start = text.find("[")
         if arr_start != -1:
             fragment = text[arr_start:]
             # Find the last complete quoted string
@@ -866,7 +875,7 @@ class DeepResearcher:
         logger.warning(f"Could not parse JSON array from: {text[:200]}")
         return []
 
-    def _parse_json_object(self, text: str) -> Optional[Dict]:
+    def _parse_json_object(self, text: str) -> dict | None:
         """Extract a JSON object from LLM output."""
         text = self._strip_code_block(text)
         try:
@@ -875,7 +884,7 @@ class DeepResearcher:
             pass
 
         # Greedy match to capture the full outermost object
-        match = re.search(r'\{[\s\S]*\}', text)
+        match = re.search(r"\{[\s\S]*\}", text)
         if match:
             try:
                 return json.loads(match.group())
@@ -884,7 +893,7 @@ class DeepResearcher:
 
         return None
 
-    def _format_findings(self, findings: List[Dict]) -> str:
+    def _format_findings(self, findings: list[dict]) -> str:
         """Format findings list into readable text for synthesis prompt."""
         parts = []
         for i, f in enumerate(findings, 1):
@@ -897,7 +906,7 @@ class DeepResearcher:
             parts.append(f"**Finding {i}** — [{title}]({url})\n{content}")
         return "\n\n".join(parts)
 
-    def _fallback_report(self, question: str, findings: List[Dict]) -> str:
+    def _fallback_report(self, question: str, findings: list[dict]) -> str:
         """Compile gathered findings into a basic report.
 
         Used when the LLM synthesis step produced no report (e.g. it timed out)
@@ -912,7 +921,7 @@ class DeepResearcher:
             f"{self._format_findings(findings)}"
         )
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """Return research statistics."""
         elapsed = time.time() - self._start_time if self._start_time else 0
         stats = {

@@ -2,10 +2,10 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import time
-import shlex
 
 from core.platform_compat import (
     NVIDIA_PATH_CANDIDATES,
@@ -14,8 +14,8 @@ from core.platform_compat import (
 )
 
 CACHE_TTL = 24 * 3600  # 24 h — hardware probes are user-initiated via the Rescan button; bumped
-                       # from 30 min so changing filters doesn't keep re-probing the rig every
-                       # half-hour during a long session.
+# from 30 min so changing filters doesn't keep re-probing the rig every
+# half-hour during a long session.
 
 
 _remote_host = None  # set by detect_system(host=...)
@@ -42,7 +42,7 @@ def _run(cmd):
                 text=True,
             )
         else:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
         if r.returncode == 0:
             return r.stdout.strip()
     except Exception:
@@ -92,8 +92,7 @@ def _detect_nvidia():
     # Retry through a login shell with the common CUDA bin dirs on PATH.
     if not out and _remote_host:
         out = _run(
-            f"bash -lc '{SSH_PATH_OVERRIDE}"
-            "nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits'"
+            f"bash -lc '{SSH_PATH_OVERRIDE}nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits'"
         )
     # Last resort: call nvidia-smi by absolute path. Some hosts have a login
     # shell that isn't bash (or a profile that errors), so the bash -lc retry
@@ -117,9 +116,13 @@ def _detect_nvidia():
     # without a reboot). It prints an error and no GPU rows — surface that as a
     # driver error rather than the misleading "No GPU".
     _low = out.lower()
-    if ("nvml" in _low or "driver/library version mismatch" in _low
-            or "couldn't communicate" in _low or "no devices were found" in _low
-            or "failed to initialize" in _low):
+    if (
+        "nvml" in _low
+        or "driver/library version mismatch" in _low
+        or "couldn't communicate" in _low
+        or "no devices were found" in _low
+        or "failed to initialize" in _low
+    ):
         _last_gpu_error = out.strip().split("\n")[0][:140] or "NVIDIA driver error"
         return None
 
@@ -206,6 +209,7 @@ def _detect_amd():
     """Detect AMD GPUs. Handles both discrete cards (with mem_info_vram_total)
     and APUs / unified-memory SoCs like Strix Halo (which expose
     mem_info_vis_vram_total instead, or only mem_info_gtt_total)."""
+
     def _read(path):
         if _remote_host:
             val = _run(["cat", path])
@@ -290,7 +294,8 @@ def _detect_amd():
             # host misleads downstream env-var pinning
             # (HIP_VISIBLE_DEVICES is a no-op there).
             "backend": (
-                "rocm" if (_run(["which", "rocminfo"]) or _run(["which", "hipconfig"]))
+                "rocm"
+                if (_run(["which", "rocminfo"]) or _run(["which", "hipconfig"]))
                 else ("vulkan" if _run(["which", "vulkaninfo"]) else "rocm")
             ),
             "unified_memory": is_apu,
@@ -539,6 +544,34 @@ def _powershell_exe():
     return shutil.which("pwsh") or shutil.which("powershell") or "powershell"
 
 
+def _powershell_encoded_for_ssh(script: str):
+    """Run a PowerShell script on a remote Windows host over SSH.
+
+    Nested quotes in powershell -Command break when passed through Windows
+    OpenSSH's cmd wrapper; -EncodedCommand avoids that.
+    """
+    import base64
+
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return _run(f"powershell -NoProfile -EncodedCommand {encoded}")
+
+
+def _probe_remote_platform():
+    """Best-effort OS detection over SSH when the caller didn't pass platform."""
+    out = _run("echo %OS%")
+    if out and "Windows_NT" in out:
+        return "windows"
+    uname = (_run(["uname", "-s"]) or "").strip().lower()
+    if uname == "darwin":
+        # Mac uses the linux detection path (_detect_apple_silicon over SSH).
+        return "linux"
+    if uname == "linux":
+        out = _run("test -d /data/data/com.termux && echo termux || echo linux")
+        if out and "termux" in out:
+            return "termux"
+    return "linux"
+
+
 def _detect_windows():
     """Detect Windows hardware via PowerShell/WMI.
 
@@ -547,8 +580,7 @@ def _detect_windows():
       * local   -> `_run` executes a list argv directly (no shell quoting hell).
     """
     # Single PowerShell command that gathers all hardware info at once
-    ps_cmd = (
-        """
+    ps_cmd = """
         $r = @{}
         $os = Get-CimInstance Win32_OperatingSystem
         $r.ram_gb = [math]::Round($os.TotalVisibleMemorySize / 1048576, 1)
@@ -559,22 +591,22 @@ def _detect_windows():
         $r.arch = $cpu.AddressWidth
         $r.cpu_arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
         # GPU detection via nvidia-smi (fastest) or WMI fallback
-        try { 
+        try {
             $nv = nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits 2>$null
-            if ($LASTEXITCODE -eq 0 -and $nv) { 
+            if ($LASTEXITCODE -eq 0 -and $nv) {
                 $gpus = @()
-                foreach ($line in $nv -split "`n") { 
+                foreach ($line in $nv -split "`n") {
                     $p = $line -split ','
-                    if ($p.Count -ge 2) { $gpus += [pscustomobject]@{name = $p[1].Trim(); vram_mb = [double]$p[0].Trim() } } 
+                    if ($p.Count -ge 2) { $gpus += [pscustomobject]@{name = $p[1].Trim(); vram_mb = [double]$p[0].Trim() } }
                 }
                 $r.gpu_name = $gpus[0].name
                 $r.gpu_vram_gb = [math]::Round(($gpus | Measure-Object -Property vram_mb -Sum).Sum / 1024, 1)
                 $r.gpu_count = $gpus.Count
                 $r.gpu_backend = 'cuda'
-            } 
+            }
         }
         catch {}
-        if (-not $r.gpu_name) { 
+        if (-not $r.gpu_name) {
             $wmiGpu = Get-CimInstance Win32_VideoController | Where-Object { $_.AdapterRAM -gt 0 } | Select-Object -First 1
             $GPUDriverKey = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0*"
             $GPUDeviceID = $wmiGpu.PNPDeviceID.Split('&')[0..1] -join '&'
@@ -582,7 +614,7 @@ def _detect_windows():
             Where-Object { $_.MatchingDeviceId -like "${GPUDeviceID}*" } |
             # Sometimes there happen to be multiple driver classes for the same gpu.
             Select-Object -ExpandProperty HardwareInformation.qwMemorySize -ErrorAction SilentlyContinue -First 1
-            if ($wmiGpu) { 
+            if ($wmiGpu) {
                 $r.gpu_name = $wmiGpu.Name
                 # Edge case: driver is broken, otherwise $wmiGpu.AdapterRAM is redundant
                 if ($VRAMfromRegistry -ge $wmiGpu.AdapterRAM) {
@@ -594,15 +626,13 @@ def _detect_windows():
                 $r.gpu_count = 1
                 # WMI doesn't tell us CUDA/ROCm
                 $r.gpu_backend = 'cpu_x86';
-            } 
+            }
         }
         $r | ConvertTo-Json -Compress
     """
-    )
     if _remote_host:
-        # Remote: ship a single command string over SSH. The remote shell parses
-        # the quoting; PowerShell on the far side runs the -Command payload.
-        out = _run(f'powershell -Command "{ps_cmd}"')
+        # Remote: use -EncodedCommand so OpenSSH/cmd quoting does not break the script.
+        out = _powershell_encoded_for_ssh(ps_cmd.strip())
     else:
         # Local: pass a LIST argv straight to subprocess so the OS hands ps_cmd
         # to PowerShell verbatim — no fragile string-level quote escaping. Prefer
@@ -611,8 +641,10 @@ def _detect_windows():
     if not out:
         return None
     import json as _json
+
     try:
         d = _json.loads(out)
+
         # PowerShell's Measure-Object .Sum / .Count come back as JSON numbers and
         # decode to float; the Linux path returns plain ints for these — coerce
         # so the dict shape (and downstream int math) matches across platforms.
@@ -621,7 +653,8 @@ def _detect_windows():
                 return int(v)
             except (TypeError, ValueError):
                 return default
-        _cpu_name = (d.get("cpu_name") or "unknown")
+
+        _cpu_name = d.get("cpu_name") or "unknown"
         if isinstance(_cpu_name, str):
             _cpu_name = _cpu_name.strip() or "unknown"
         result = {
@@ -645,16 +678,16 @@ def _detect_windows():
         _n = result["gpu_count"] or 0
         if result["has_gpu"] and _n > 0:
             _each = round((result["gpu_vram_gb"] or 0) / _n, 1)
-            result["gpus"] = [
-                {"index": i, "name": result["gpu_name"], "vram_gb": _each} for i in range(_n)
+            result["gpus"] = [{"index": i, "name": result["gpu_name"], "vram_gb": _each} for i in range(_n)]
+            result["gpu_groups"] = [
+                {
+                    "name": result["gpu_name"],
+                    "vram_each": _each,
+                    "count": _n,
+                    "indices": list(range(_n)),
+                    "vram_total": result["gpu_vram_gb"],
+                }
             ]
-            result["gpu_groups"] = [{
-                "name": result["gpu_name"],
-                "vram_each": _each,
-                "count": _n,
-                "indices": list(range(_n)),
-                "vram_total": result["gpu_vram_gb"],
-            }]
             result["homogeneous"] = True
         return result
     except Exception:
@@ -773,6 +806,13 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     """
     global _remote_host, _remote_port, _remote_platform
 
+    if host and not platform:
+        _remote_host = host
+        _remote_port = ssh_port or None
+        platform = _probe_remote_platform()
+        _remote_host = None
+        _remote_port = None
+
     cache_key = _cache_key(host, ssh_port, platform)
     now = time.time()
     if not fresh and cache_key in _cache_by_host:
@@ -793,8 +833,8 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
             _remote_platform = None
             _cache_by_host[cache_key] = (now, result)
             return result
-        # If Windows detection failed, return error
-        result = {"error": f"Cannot connect to {host}", "host": host}
+        # SSH may work while the PowerShell hardware probe still fails.
+        result = {"error": f"Windows hardware probe failed for {host}", "host": host}
         _remote_host = None
         _remote_platform = None
         _cache_by_host[cache_key] = (now, result)

@@ -7,16 +7,16 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from core.middleware import INTERNAL_TOOL_USER
-from src.endpoint_resolver import resolve_endpoint
-from src.auth_helpers import _auth_disabled, get_current_user
+
 from core.auth import RESERVED_USERNAMES
+from core.middleware import INTERNAL_TOOL_USER
+from src.auth_helpers import _auth_disabled, get_current_user
 from src.constants import DEEP_RESEARCH_DIR
+from src.endpoint_resolver import resolve_endpoint
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,128}$")
 
@@ -27,20 +27,28 @@ logger = logging.getLogger(__name__)
 # `text-embedding-ada-002` etc. first in its model list, which is why research
 # was failing with "Cannot reach model 'text-embedding-ada-002'".
 _NON_CHAT_MODEL = (
-    "text-embedding", "embedding", "tts-", "whisper", "dall-e",
-    "moderation", "rerank", "reranker", "clip", "stable-diffusion",
+    "text-embedding",
+    "embedding",
+    "tts-",
+    "whisper",
+    "dall-e",
+    "moderation",
+    "rerank",
+    "reranker",
+    "clip",
+    "stable-diffusion",
 )
 
 
 def _first_chat_model(models) -> str:
     """First model that isn't an embedding/tts/etc. — falls back to models[0]."""
-    for m in (models or []):
+    for m in models or []:
         if not any(p in str(m).lower() for p in _NON_CHAT_MODEL):
             return m
-    return (models[0] if models else "")
+    return models[0] if models else ""
 
 
-def _resolve_research_endpoint(sess, owner: Optional[str] = None) -> tuple:
+def _resolve_research_endpoint(sess, owner: str | None = None) -> tuple:
     """Return (endpoint_url, model, headers) for Deep Research, checking admin overrides."""
     owner = owner or getattr(sess, "owner", None) or None
     url, model, headers = resolve_endpoint(
@@ -69,15 +77,16 @@ def _owned_enabled_endpoint(db, owner, endpoint_id=None):
     session_routes._owned_endpoint. A null/empty owner is a no-op (single-user /
     legacy mode).
     """
-    from src.database import ModelEndpoint
     from src.auth_helpers import owner_filter
+    from src.database import ModelEndpoint
+
     q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
     if endpoint_id:
         q = q.filter(ModelEndpoint.id == endpoint_id)
     return owner_filter(q, ModelEndpoint, owner).first()
 
 
-def _resolve_endpoint_runtime(ep, owner=None, model: Optional[str] = None):
+def _resolve_endpoint_runtime(ep, owner=None, model: str | None = None):
     """Resolve a ModelEndpoint row into (chat_url, model, headers).
 
     Mirrors endpoint_resolver.resolve_endpoint's provider-auth handling for
@@ -87,6 +96,8 @@ def _resolve_endpoint_runtime(ep, owner=None, model: Optional[str] = None):
     from src.endpoint_resolver import (
         build_chat_url,
         build_headers,
+    )
+    from src.endpoint_resolver import (
         resolve_endpoint_runtime as resolve_model_endpoint_runtime,
     )
 
@@ -153,13 +164,15 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             if entry.get("owner", "") != user:
                 continue
             if entry.get("status") == "running":
-                active.append({
-                    "session_id": sid,
-                    "query": entry.get("query", ""),
-                    "status": "running",
-                    "progress": entry.get("progress", {}),
-                    "started_at": entry.get("started_at", 0),
-                })
+                active.append(
+                    {
+                        "session_id": sid,
+                        "query": entry.get("query", ""),
+                        "status": "running",
+                        "progress": entry.get("progress", {}),
+                        "started_at": entry.get("started_at", 0),
+                    }
+                )
         return {"active": active}
 
     @router.get("/api/research/status/{session_id}")
@@ -255,7 +268,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
     @router.get("/api/research/library")
     async def research_library(
         request: Request,
-        search: Optional[str] = Query(None),
+        search: str | None = Query(None),
         sort: str = Query("recent"),
         limit: int = Query(50),
         archived: bool = Query(False),
@@ -279,18 +292,20 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 if search and search.lower() not in query.lower():
                     continue
                 sources = d.get("sources", [])
-                items.append({
-                    "id": p.stem,
-                    "query": query,
-                    "category": d.get("category") or "",
-                    "source_count": len(sources),
-                    "status": d.get("status", "done"),
-                    "duration": d.get("stats", {}).get("Duration", ""),
-                    "rounds": d.get("stats", {}).get("Rounds", ""),
-                    "started_at": d.get("started_at", 0),
-                    "completed_at": d.get("completed_at", 0),
-                    "archived": bool(d.get("archived")),
-                })
+                items.append(
+                    {
+                        "id": p.stem,
+                        "query": query,
+                        "category": d.get("category") or "",
+                        "source_count": len(sources),
+                        "status": d.get("status", "done"),
+                        "duration": d.get("stats", {}).get("Duration", ""),
+                        "rounds": d.get("stats", {}).get("Rounds", ""),
+                        "started_at": d.get("started_at", 0),
+                        "completed_at": d.get("completed_at", 0),
+                        "archived": bool(d.get("archived")),
+                    }
+                )
             except Exception:
                 continue
 
@@ -374,18 +389,19 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         query: str
         # max_rounds=0 means "Auto" — let the AI decide when to stop, capped at 20.
         max_rounds: int = Field(default=0, ge=0, le=20)
-        search_provider: Optional[str] = None
-        endpoint_id: Optional[str] = None
-        model: Optional[str] = None
+        search_provider: str | None = None
+        endpoint_id: str | None = None
+        model: str | None = None
         max_time: int = Field(default=300, ge=60, le=1800)
-        extraction_timeout: Optional[int] = Field(default=None, ge=15, le=3600)
-        extraction_concurrency: Optional[int] = Field(default=None, ge=1, le=12)
-        category: Optional[str] = None
+        extraction_timeout: int | None = Field(default=None, ge=15, le=3600)
+        extraction_concurrency: int | None = Field(default=None, ge=1, le=12)
+        category: str | None = None
 
     @router.post("/api/research/start")
     async def research_start(body: ResearchStartRequest, request: Request):
         """Launch a research job from the dedicated panel."""
         from src.auth_helpers import require_privilege
+
         user = require_privilege(request, "can_use_research")
         if user == INTERNAL_TOOL_USER:
             tool_owner = (request.headers.get("X-Odysseus-Owner") or "").strip()
@@ -395,7 +411,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     try:
                         privs = auth_mgr.get_privileges(tool_owner) or {}
                         if not privs.get("can_use_research", True):
-                            raise HTTPException(403, f"Your account is not allowed to can use research.")
+                            raise HTTPException(403, "Your account is not allowed to can use research.")
                     except HTTPException:
                         raise
                     except Exception:
@@ -405,6 +421,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
 
         if body.endpoint_id:
             from src.database import SessionLocal
+
             db = SessionLocal()
             try:
                 # Owner-scoped: never resolve another user's private endpoint
@@ -433,6 +450,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 ep_url, ep_model, ep_headers = resolve_endpoint("chat", owner=user)
             if not ep_url:
                 from src.database import SessionLocal
+
                 db = SessionLocal()
                 try:
                     # Owner-scoped first-enabled fallback: the caller's own rows
@@ -476,6 +494,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         _validate_session_id(session_id)
         if not _owns_in_memory(session_id, user):
             raise HTTPException(404, "No research found for this session")
+
         async def _generate():
             last_progress = None
             while True:
@@ -489,10 +508,10 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     last_progress = progress
                     yield f"data: {json.dumps({**progress, 'status': st})}\n\n"
                 if st != "running":
-                    final = {'status': st, 'final': True}
+                    final = {"status": st, "final": True}
                     task = research_handler._active_tasks.get(session_id, {})
                     if st == "error" and task.get("result"):
-                        final['error'] = str(task["result"])[:500]
+                        final["error"] = str(task["result"])[:500]
                     yield f"data: {json.dumps(final)}\n\n"
                     return
                 await asyncio.sleep(1.5)
@@ -598,7 +617,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         if not ep_url or not ep_model:
             # Last resort: this user's enabled endpoint, plus legacy shared rows.
             from src.database import SessionLocal
-            from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
+            from src.endpoint_resolver import build_chat_url, build_headers, normalize_base
+
             db = SessionLocal()
             try:
                 ep = _owned_enabled_endpoint(db, user)
@@ -642,6 +662,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             session_manager.save_sessions()
         try:
             from src.event_bus import fire_event
+
             fire_event("session_created", user)
         except Exception:
             logger.debug("session_created event dispatch failed", exc_info=True)
@@ -662,11 +683,14 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         )
 
         from core.models import ChatMessage
-        new_sess.add_message(ChatMessage(
-            role="system",
-            content=primer,
-            metadata={"research_spinoff_from": session_id},
-        ))
+
+        new_sess.add_message(
+            ChatMessage(
+                role="system",
+                content=primer,
+                metadata={"research_spinoff_from": session_id},
+            )
+        )
         session_manager.save_sessions()
 
         return {

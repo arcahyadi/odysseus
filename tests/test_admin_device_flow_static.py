@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 _REPO = Path(__file__).resolve().parent.parent
 _INDEX = (_REPO / "static" / "index.html").read_text(encoding="utf-8")
 _ADMIN = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
@@ -16,13 +15,18 @@ def _between(src: str, start: str, end: str) -> str:
 
 def test_copilot_and_chatgpt_subscription_are_dropdown_device_auth_options():
     assert 'value="copilot" data-logo="github" data-auth-flow="copilot">GitHub Copilot' in _INDEX
-    assert 'value="chatgpt-subscription" data-logo="openai" data-auth-flow="chatgpt-subscription">ChatGPT Subscription' in _INDEX
+    assert (
+        'value="chatgpt-subscription" data-logo="openai" data-auth-flow="chatgpt-subscription">ChatGPT Subscription'
+        in _INDEX
+    )
     assert 'id="adm-deviceAuthStatus"' in _INDEX
 
 
 def test_provider_selection_is_inert_and_add_button_starts_device_flow():
     change_block = _between(_ADMIN, "provider.addEventListener('change'", "urlInput.addEventListener('input'")
-    add_block = _between(_ADMIN, "el('adm-epAddBtn').addEventListener('click'", "async function _startProviderDeviceAuth")
+    add_block = _between(
+        _ADMIN, "el('adm-epAddBtn').addEventListener('click'", "async function _startProviderDeviceAuth"
+    )
 
     assert "_startProviderDeviceAuth" not in change_block
     assert "_startProviderDeviceAuth(deviceAuthProvider" in add_block
@@ -40,7 +44,7 @@ def test_device_auth_selection_disables_and_dims_api_test_button():
 
 
 def test_device_auth_keeps_manual_auth_button_without_auto_opening_tab():
-    auth_block = _between(_ADMIN, "async function _startProviderDeviceAuth", "// Local \"Add\" button")
+    auth_block = _between(_ADMIN, "async function _startProviderDeviceAuth", '// Local "Add" button')
 
     assert "Authorize with OpenAI" in auth_block
     assert "Authorize on GitHub" in auth_block

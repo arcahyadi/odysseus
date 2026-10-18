@@ -6,11 +6,13 @@ All modules should import from here instead of accessing files directly.
 """
 
 import json
-import time
 import logging
+import time
 from typing import Any
 
-from src.constants import SETTINGS_FILE, FEATURES_FILE
+from src.constants import FEATURES_FILE, SETTINGS_FILE
+from src.app_context import app_context
+
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +20,14 @@ logger = logging.getLogger(__name__)
 # (every chat, every preprocess); without this it re-parses the JSON each call.
 # Picks up edits within _CACHE_TTL seconds, which is fine for human-edited config.
 _CACHE_TTL = 2.0
-_settings_cache: tuple[float, dict] | None = None
-_features_cache: tuple[float, dict] | None = None
+app_context.caches.settings_cache: tuple[float, dict] | None = None
+app_context.caches.features_cache: tuple[float, dict] | None = None
+
 
 def _invalidate_caches():
-    global _settings_cache, _features_cache
-    _settings_cache = None
-    _features_cache = None
+    app_context.caches.settings_cache = None
+    app_context.caches.features_cache = None
+
 
 # ── Default values ──
 
@@ -141,6 +144,10 @@ DEFAULT_SETTINGS = {
     # before producing output (endpoint offline / errors), the chat
     # dispatch retries the next entry in order.
     "default_model_fallbacks": [],
+    # When True, non-admin users inherit global default model/endpoint/fallbacks
+    # when they have no personal defaults. When False, users only use their
+    # personal defaults (no global fallback). Default is False.
+    "share_defaults_with_users": False,
     "utility_endpoint_id": "",
     "utility_model": "",
     # Ordered fallback chain for the Utility model (summarization, naming,
@@ -148,6 +155,7 @@ DEFAULT_SETTINGS = {
     "utility_model_fallbacks": [],
     "teacher_model": "",
     "teacher_enabled": False,
+    "teacher_tier2_enabled": False,
     # Skills: minimum self-reported confidence for an auto-written (LLM-authored)
     # DRAFT skill to be injected into the agent prompt. Published skills always
     # qualify. Keeps low-confidence auto-skills out of context until they're
@@ -157,7 +165,7 @@ DEFAULT_SETTINGS = {
     # library can grow beyond this; cleanup/retirement is an explicit review flow.
     "skill_max_injected": 3,
     # Reminders
-    "reminder_channel": "browser",   # "browser" | "email" | "ntfy" | "webhook"
+    "reminder_channel": "browser",  # "browser" | "email" | "ntfy" | "webhook"
     "reminder_llm_synthesis": False,
     "reminder_llm_persona": "",
     "reminder_ntfy_topic": "Reminders",
@@ -205,27 +213,28 @@ DEFAULT_FEATURES = {
 
 # ── Settings (data/settings.json) ──
 
+
 def load_settings() -> dict:
     """Load settings merged with defaults. Always returns a complete dict."""
-    global _settings_cache
     now = time.monotonic()
-    if _settings_cache and (now - _settings_cache[0]) < _CACHE_TTL:
-        return _settings_cache[1]
+    if app_context.caches.settings_cache and (now - app_context.caches.settings_cache[0]) < _CACHE_TTL:
+        return app_context.caches.settings_cache[1]
     try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
             saved = json.load(f)
         if not isinstance(saved, dict):
             raise ValueError("settings must be an object")
         merged = {**DEFAULT_SETTINGS, **saved}
     except (FileNotFoundError, PermissionError, json.JSONDecodeError, ValueError):
         merged = dict(DEFAULT_SETTINGS)
-    _settings_cache = (now, merged)
+    app_context.caches.settings_cache = (now, merged)
     return merged
 
 
 def save_settings(settings: dict):
     """Persist settings to disk (atomic; see core.atomic_io)."""
     from core.atomic_io import atomic_write_json
+
     atomic_write_json(SETTINGS_FILE, settings, indent=2)
     _invalidate_caches()
 
@@ -246,7 +255,7 @@ def is_setting_overridden(key: str) -> bool:
     ``context_budget.budget_is_explicit``.)
     """
     try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
             saved = json.load(f)
         return isinstance(saved, dict) and key in saved
     except (FileNotFoundError, json.JSONDecodeError):
@@ -258,14 +267,23 @@ def is_setting_overridden(key: str) -> bool:
 # model + image-generation model. The owner argument is the authed username
 # resolved by FastAPI deps; an empty/None owner falls through to the global.
 _PER_USER_KEYS = {
-    "vision_model", "vision_enabled", "vision_model_fallbacks",
-    "image_model", "image_gen_enabled", "image_quality",
+    "vision_model",
+    "vision_enabled",
+    "vision_model_fallbacks",
+    "image_model",
+    "image_gen_enabled",
+    "image_quality",
     # Default chat endpoint / model — without per-user resolution every new
     # account inherited whatever the most-recent admin picked, which then
     # got injected into the chat composer on first open.
-    "default_endpoint_id", "default_model", "default_model_fallbacks",
-    "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
-    "research_endpoint_id", "research_model",
+    "default_endpoint_id",
+    "default_model",
+    "default_model_fallbacks",
+    "utility_endpoint_id",
+    "utility_model",
+    "utility_model_fallbacks",
+    "research_endpoint_id",
+    "research_model",
 }
 
 
@@ -279,7 +297,8 @@ def get_user_setting(key: str, owner: str = "", default: Any = None) -> Any:
     """
     if owner and key in _PER_USER_KEYS:
         try:
-            from routes.prefs_routes import _load_for_user
+            _load_for_user = _get_action("_load_for_user")
+
             prefs = _load_for_user(owner) or {}
             if key in prefs and prefs[key] not in (None, ""):
                 return prefs[key]
@@ -290,26 +309,27 @@ def get_user_setting(key: str, owner: str = "", default: Any = None) -> Any:
 
 # ── Features (data/features.json) ──
 
+
 def load_features() -> dict:
     """Load feature flags merged with defaults."""
-    global _features_cache
     now = time.monotonic()
-    if _features_cache and (now - _features_cache[0]) < _CACHE_TTL:
-        return _features_cache[1]
+    if app_context.caches.features_cache and (now - app_context.caches.features_cache[0]) < _CACHE_TTL:
+        return app_context.caches.features_cache[1]
     try:
-        with open(FEATURES_FILE, "r", encoding="utf-8") as f:
+        with open(FEATURES_FILE, encoding="utf-8") as f:
             saved = json.load(f)
         if not isinstance(saved, dict):
             raise ValueError("features must be an object")
         merged = {**DEFAULT_FEATURES, **saved}
     except (FileNotFoundError, PermissionError, json.JSONDecodeError, ValueError):
         merged = dict(DEFAULT_FEATURES)
-    _features_cache = (now, merged)
+    app_context.caches.features_cache = (now, merged)
     return merged
 
 
 def save_features(features: dict):
     """Persist feature flags to disk (atomic)."""
     from core.atomic_io import atomic_write_json
+
     atomic_write_json(FEATURES_FILE, features, indent=2)
     _invalidate_caches()

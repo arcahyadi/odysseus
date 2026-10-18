@@ -2,6 +2,7 @@
 as a thinking chunk, while a `content` delta still streams as normal content. Also
 covers the older `reasoning_content` field name for backward compatibility.
 """
+
 import asyncio
 import json
 
@@ -186,6 +187,7 @@ def test_thinking_field_emits_thinking_chunk(monkeypatch):
     )
     assert any(d.get("thinking") and d["delta"] == "checking files" for d in deltas), deltas
     assert any((not d.get("thinking")) and d["delta"] == "visible answer" for d in deltas), deltas
+
 
 def test_harmony_analysis_channel_routes_to_thinking(monkeypatch):
     deltas = _run_stream(

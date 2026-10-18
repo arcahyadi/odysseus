@@ -65,9 +65,7 @@ def test_open_imap_connection_uses_shared_timeout_for_implicit_ssl(monkeypatch):
 
     conn = _open_imap_connection("imap.one.com", 993, starttls=False)
 
-    assert _FakeIMAP.calls == [
-        ("connect", "_FakeIMAPSSL", "imap.one.com", 993, _IMAP_TIMEOUT_SECONDS)
-    ]
+    assert _FakeIMAP.calls == [("connect", "_FakeIMAPSSL", "imap.one.com", 993, _IMAP_TIMEOUT_SECONDS)]
     assert conn.sock.timeout == _IMAP_TIMEOUT_SECONDS
 
 
@@ -88,7 +86,7 @@ def test_open_imap_connection_supports_starttls(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_account_config_uses_shared_imap_timeout(monkeypatch):
-    import routes.email_routes as email_routes
+    from routes import email_routes
 
     captured = {}
 

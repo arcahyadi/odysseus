@@ -4,6 +4,7 @@ _search_fts looked up each FTS hit's full row with its own
 db.query(...).filter(id == message_id).first(), an N+1 query. The lookup is now
 a single batched IN(...) query via _fetch_messages_by_id.
 """
+
 from src.session_search import _fetch_messages_by_id
 
 

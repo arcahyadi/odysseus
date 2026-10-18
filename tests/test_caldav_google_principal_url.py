@@ -13,12 +13,12 @@ events; the ``/events`` collection holds one VEVENT) and assert the sync now
 maps the principal URL to its events collection and pulls the event. No live
 Google account is required.
 """
+
 import sys
 import tempfile
 import types
 from datetime import datetime, timedelta
 
-import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool

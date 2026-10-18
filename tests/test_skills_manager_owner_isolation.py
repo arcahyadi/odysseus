@@ -21,14 +21,12 @@ silently mutates a file owned by a different user AND overwrites the
 `owner` field with an attacker's value.
 """
 
-import os
 import sys
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # ── module-load stubbing (matches other tests in this repo) ──────────
 # Stub heavy deps so importing the skills manager doesn't pull DB / FastAPI.
@@ -39,12 +37,11 @@ for _mod in ("sqlalchemy", "sqlalchemy.orm", "sqlalchemy.ext", "sqlalchemy.ext.d
         except ImportError:
             sys.modules[_mod] = MagicMock()
 
+from services.memory.skill_format import slugify  # noqa: E402
 from services.memory.skills import SkillsManager  # noqa: E402
-from services.memory.skill_format import Skill, slugify  # noqa: E402
 
 
-def _write_skill_md(skills_root: Path, category: str, name: str,
-                    owner: str, description: str) -> Path:
+def _write_skill_md(skills_root: Path, category: str, name: str, owner: str, description: str) -> Path:
     """Drop a real SKILL.md on disk for the given owner."""
     skill_dir = skills_root / slugify(category or "general", fallback="general") / name
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -87,12 +84,18 @@ def test_update_skill_does_not_mutate_foreign_owned_skill(tmp_path):
     # the same slug under different categories — exactly the situation
     # that triggers the first-match-wins bug in update_skill.)
     alice_path = _write_skill_md(
-        skills_root, category="alice-cat", name="login-flow",
-        owner="alice", description="alice original",
+        skills_root,
+        category="alice-cat",
+        name="login-flow",
+        owner="alice",
+        description="alice original",
     )
     bob_path = _write_skill_md(
-        skills_root, category="bob-cat", name="login-flow",
-        owner="bob", description="bob original",
+        skills_root,
+        category="bob-cat",
+        name="login-flow",
+        owner="bob",
+        description="bob original",
     )
     assert alice_path != bob_path
     assert alice_path.exists() and bob_path.exists()
@@ -114,9 +117,7 @@ def test_update_skill_does_not_mutate_foreign_owned_skill(tmp_path):
     except TypeError as e:
         # If the method were fixed to require an owner arg, this is
         # the desired (safe) behavior — the call refused.
-        pytest.skip(
-            f"update_skill raised TypeError (refused unsafe call): {e}"
-        )
+        pytest.skip(f"update_skill raised TypeError (refused unsafe call): {e}")
         return
 
     # After: read what each file now contains.
@@ -127,12 +128,10 @@ def test_update_skill_does_not_mutate_foreign_owned_skill(tmp_path):
     # NOT end up owned by `attacker` after the call. If it does, that's
     # the cross-user ownership reassignment bug.
     assert "owner: attacker" not in after_alice, (
-        "BUG: Alice's file was silently re-owned as 'attacker' by "
-        "update_skill (cross-user ownership reassignment)."
+        "BUG: Alice's file was silently re-owned as 'attacker' by update_skill (cross-user ownership reassignment)."
     )
     assert "owner: attacker" not in after_bob, (
-        "BUG: Bob's file was silently re-owned as 'attacker' by "
-        "update_skill (cross-user ownership reassignment)."
+        "BUG: Bob's file was silently re-owned as 'attacker' by update_skill (cross-user ownership reassignment)."
     )
 
     # Invariant 2: a file that was owned by `alice` and contained
@@ -140,14 +139,12 @@ def test_update_skill_does_not_mutate_foreign_owned_skill(tmp_path):
     # "pwned" by a caller that did not supply an owner.
     if "alice original" in before_alice:
         assert "alice original" in after_alice, (
-            "BUG: Alice's skill description was overwritten by a call "
-            "to update_skill that did not scope to her owner."
+            "BUG: Alice's skill description was overwritten by a call to update_skill that did not scope to her owner."
         )
 
     if "bob original" in before_bob:
         assert "bob original" in after_bob, (
-            "BUG: Bob's skill description was overwritten by a call "
-            "to update_skill that did not scope to his owner."
+            "BUG: Bob's skill description was overwritten by a call to update_skill that did not scope to his owner."
         )
 
     # The return value should not lie about success — if the manager
@@ -165,6 +162,7 @@ def test_update_skill_scalar_keys_exclude_owner():
     fix is in place."""
     src = Path("services/memory/skills.py").read_text(encoding="utf-8")
     import re
+
     m = re.search(
         r"def update_skill\(.*?scalar_keys\s*=\s*\((.*?)\)",
         src,
@@ -186,12 +184,18 @@ def test_read_skill_md_and_references_are_owner_scoped(tmp_path):
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
     alice_path = _write_skill_md(
-        skills_root, category="alice-cat", name="login-flow",
-        owner="alice", description="alice secret",
+        skills_root,
+        category="alice-cat",
+        name="login-flow",
+        owner="alice",
+        description="alice secret",
     )
     bob_path = _write_skill_md(
-        skills_root, category="bob-cat", name="login-flow",
-        owner="bob", description="bob secret",
+        skills_root,
+        category="bob-cat",
+        name="login-flow",
+        owner="bob",
+        description="bob secret",
     )
     refs = bob_path.parent / "references"
     refs.mkdir()
@@ -209,8 +213,7 @@ def test_read_skill_md_and_references_are_owner_scoped(tmp_path):
 
     no_owner_md = sm.read_skill_md("login-flow")
     assert no_owner_md is None, (
-        "read_skill_md without owner matched an owned skill — "
-        "default should only match ownerless skills."
+        "read_skill_md without owner matched an owned skill — default should only match ownerless skills."
     )
     assert sm.read_skill_md("login-flow", owner="charlie") is None
     assert sm.read_skill_reference("login-flow", "references/notes.txt", owner="bob") == "bob private notes"
@@ -224,12 +227,18 @@ def test_update_skill_positive_scoping(tmp_path):
     skills_root.mkdir(parents=True, exist_ok=True)
 
     alice_path = _write_skill_md(
-        skills_root, category="alice-cat", name="login-flow",
-        owner="alice", description="alice original",
+        skills_root,
+        category="alice-cat",
+        name="login-flow",
+        owner="alice",
+        description="alice original",
     )
     bob_path = _write_skill_md(
-        skills_root, category="bob-cat", name="login-flow",
-        owner="bob", description="bob original",
+        skills_root,
+        category="bob-cat",
+        name="login-flow",
+        owner="bob",
+        description="bob original",
     )
 
     sm = SkillsManager(str(tmp_path))
@@ -240,9 +249,7 @@ def test_update_skill_positive_scoping(tmp_path):
     after_alice = alice_path.read_text(encoding="utf-8")
     after_bob = bob_path.read_text(encoding="utf-8")
 
-    assert "alice updated" in after_alice, (
-        "Alice's file was not updated despite passing owner='alice'."
-    )
+    assert "alice updated" in after_alice, "Alice's file was not updated despite passing owner='alice'."
     assert "bob original" in after_bob and "alice updated" not in after_bob, (
         "Bob's file was mutated by Alice's update_skill call — cross-tenant leak."
     )
@@ -278,12 +285,18 @@ def test_usage_sidecar_is_owner_scoped(tmp_path):
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
     _write_skill_md(
-        skills_root, category="alice-cat", name="shared-flow",
-        owner="alice", description="alice secret",
+        skills_root,
+        category="alice-cat",
+        name="shared-flow",
+        owner="alice",
+        description="alice secret",
     )
     _write_skill_md(
-        skills_root, category="bob-cat", name="shared-flow",
-        owner="bob", description="bob secret",
+        skills_root,
+        category="bob-cat",
+        name="shared-flow",
+        owner="bob",
+        description="bob secret",
     )
 
     sm = SkillsManager(str(tmp_path))

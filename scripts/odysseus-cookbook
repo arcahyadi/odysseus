@@ -18,24 +18,26 @@ state stays in sync. Output is JSON on stdout, errors on stderr,
 non-zero exit on failure.
 """
 
-
 from __future__ import annotations
+
+import os
 import sys
-import os, sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
-from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from cli import REPO_ROOT as _REPO_ROOT
+from cli import emit, fail, quiet_logs, run
+
 quiet_logs()
 
 
 import argparse
 import json
-import logging
 import os
 import re
 import subprocess
 import sys
-import urllib.request
 import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -45,10 +47,10 @@ _STATE_PATH = _DATA_DIR / "cookbook_state.json"
 # Mirror routes/shell_routes.TMUX_LOG_DIR — don't import it because that pulls
 # the whole web app into the process. Match its definition instead.
 import tempfile
+
 _TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
 
 from core.platform_compat import NVIDIA_PATH_CANDIDATES, SSH_PATH_OVERRIDE
-
 
 
 def fail(msg: str, code: int = 1) -> None:
@@ -61,7 +63,10 @@ def _tmux_sessions() -> list[str]:
     try:
         out = subprocess.run(
             ["tmux", "list-sessions", "-F", "#S"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
         if out.returncode != 0:
             return []
@@ -83,20 +88,25 @@ def _read_state() -> dict:
 
 # ─── list ────────────────────────────────────────────────────────────
 
+
 def cmd_list(args) -> None:
     """Active tmux sessions + cookbook state, joined.
     Output: {state, sessions, cookbook_sessions} where cookbook_sessions
     is the subset of tmux sessions whose name starts with `cookbook-`."""
     sessions = _tmux_sessions()
     cookbook = [s for s in sessions if s.startswith("cookbook-")]
-    emit({
-        "state": _read_state(),
-        "all_tmux_sessions": sessions,
-        "cookbook_sessions": cookbook,
-    }, args)
+    emit(
+        {
+            "state": _read_state(),
+            "all_tmux_sessions": sessions,
+            "cookbook_sessions": cookbook,
+        },
+        args,
+    )
 
 
 # ─── gpus ────────────────────────────────────────────────────────────
+
 
 def _macos_metal_gpu() -> list | None:
     """Apple Silicon has no discrete VRAM — report total unified memory as the
@@ -108,7 +118,7 @@ def _macos_metal_gpu() -> list | None:
 
     def _sysctl(key: str) -> str | None:
         try:
-            r = subprocess.run(["sysctl", "-n", key], capture_output=True, text=True, timeout=5)
+            r = subprocess.run(["sysctl", "-n", key], capture_output=True, text=True, timeout=5, check=False)
             return r.stdout.strip() if r.returncode == 0 else None
         except Exception:
             return None
@@ -121,7 +131,7 @@ def _macos_metal_gpu() -> list | None:
 
     free_mb = total_mb
     try:
-        vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
+        vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5, check=False)
         if vm.returncode == 0:
             page_size, pages = 4096, {}
             for line in vm.stdout.splitlines():
@@ -134,24 +144,25 @@ def _macos_metal_gpu() -> list | None:
                     v = v.strip().rstrip(".")
                     if v.isdigit():
                         pages[k.strip()] = int(v)
-            free_pages = (pages.get("Pages free", 0) + pages.get("Pages inactive", 0)
-                          + pages.get("Pages speculative", 0))
+            free_pages = pages.get("Pages free", 0) + pages.get("Pages inactive", 0) + pages.get("Pages speculative", 0)
             if free_pages:
                 free_mb = (free_pages * page_size) // (1024 * 1024)
     except Exception:
         pass
 
-    return [{
-        "index": 0,
-        "name": name,
-        "free_mb": free_mb,
-        "total_mb": total_mb,
-        "used_mb": max(0, total_mb - free_mb),
-        "util_pct": 0,
-        "uuid": "apple-metal-0",
-        "unified_memory": True,
-        "busy": (free_mb / total_mb) < 0.5 if total_mb else False,
-    }]
+    return [
+        {
+            "index": 0,
+            "name": name,
+            "free_mb": free_mb,
+            "total_mb": total_mb,
+            "used_mb": max(0, total_mb - free_mb),
+            "util_pct": 0,
+            "uuid": "apple-metal-0",
+            "unified_memory": True,
+            "busy": (free_mb / total_mb) < 0.5 if total_mb else False,
+        }
+    ]
 
 
 def cmd_gpus(args) -> None:
@@ -165,24 +176,18 @@ def cmd_gpus(args) -> None:
     try:
         if prefix:
             candidates = [query]
-            args_part = query[len("nvidia-smi "):]
-            candidates.append(
-                "bash -lc "
-                + repr(
-                    f"{SSH_PATH_OVERRIDE}"
-                    f"nvidia-smi {args_part}"
-                )
-            )
+            args_part = query[len("nvidia-smi ") :]
+            candidates.append("bash -lc " + repr(f"{SSH_PATH_OVERRIDE}nvidia-smi {args_part}"))
             for nvidia_path in NVIDIA_PATH_CANDIDATES:
                 candidates.append(f"{nvidia_path} {args_part}")
 
             out = None
             for candidate in candidates:
-                out = subprocess.run(prefix + [candidate], capture_output=True, text=True, timeout=15)
+                out = subprocess.run(prefix + [candidate], capture_output=True, text=True, timeout=15, check=False)
                 if out.returncode == 0:
                     break
         else:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
     except FileNotFoundError:
         # No nvidia-smi locally → try the Metal fallback before giving up.
         if not prefix:
@@ -210,22 +215,25 @@ def cmd_gpus(args) -> None:
         try:
             idx, name, free_mb, total_mb, used_mb, util, gpu_uuid = parts[:7]
             total_i, free_i = int(total_mb), int(free_mb)
-            gpus.append({
-                "index": int(idx),
-                "name": name,
-                "free_mb": free_i,
-                "total_mb": total_i,
-                "used_mb": int(used_mb),
-                "util_pct": int(util),
-                "uuid": gpu_uuid,
-                "busy": (free_i / total_i) < 0.5 if total_i else False,
-            })
+            gpus.append(
+                {
+                    "index": int(idx),
+                    "name": name,
+                    "free_mb": free_i,
+                    "total_mb": total_i,
+                    "used_mb": int(used_mb),
+                    "util_pct": int(util),
+                    "uuid": gpu_uuid,
+                    "busy": (free_i / total_i) < 0.5 if total_i else False,
+                }
+            )
         except (ValueError, ZeroDivisionError):
             continue
     emit({"ok": True, "gpus": gpus}, args)
 
 
 # ─── cached ──────────────────────────────────────────────────────────
+
 
 def cmd_cached(args) -> None:
     """List cached HuggingFace models. Walks ~/.cache/huggingface/hub
@@ -243,9 +251,9 @@ def cmd_cached(args) -> None:
             continue
         # Hub layout: `models--<org>--<repo>` becomes `<org>/<repo>`.
         if entry.name.startswith("models--"):
-            repo = entry.name[len("models--"):].replace("--", "/")
+            repo = entry.name[len("models--") :].replace("--", "/")
         elif entry.name.startswith("datasets--"):
-            repo = "datasets/" + entry.name[len("datasets--"):].replace("--", "/")
+            repo = "datasets/" + entry.name[len("datasets--") :].replace("--", "/")
         else:
             repo = entry.name
         size = 0
@@ -260,6 +268,7 @@ def cmd_cached(args) -> None:
 
 
 # ─── hf-latest ───────────────────────────────────────────────────────
+
 
 def cmd_hf_latest(args) -> None:
     """Trending HF models, optionally filtered by VRAM-at-fp16 fit.
@@ -277,7 +286,7 @@ def cmd_hf_latest(args) -> None:
         fail(f"HF API request failed: {e}")
 
     def _est_vram_fp16(repo_id: str) -> float | None:
-        m = re.search(r'[-_/](\d+(?:\.\d+)?)\s*[Bb](?![a-zA-Z])', repo_id)
+        m = re.search(r"[-_/](\d+(?:\.\d+)?)\s*[Bb](?![a-zA-Z])", repo_id)
         if not m:
             return None
         params_b = float(m.group(1))
@@ -291,20 +300,23 @@ def cmd_hf_latest(args) -> None:
         vram = _est_vram_fp16(rid)
         if args.vram_gb > 0 and vram is not None and vram > args.vram_gb:
             continue
-        out.append({
-            "id": rid,
-            "downloads": m.get("downloads", 0),
-            "likes": m.get("likes", 0),
-            "trendingScore": m.get("trendingScore"),
-            "pipeline_tag": m.get("pipeline_tag", ""),
-            "est_vram_fp16_gb": vram,
-        })
+        out.append(
+            {
+                "id": rid,
+                "downloads": m.get("downloads", 0),
+                "likes": m.get("likes", 0),
+                "trendingScore": m.get("trendingScore"),
+                "pipeline_tag": m.get("pipeline_tag", ""),
+                "est_vram_fp16_gb": vram,
+            }
+        )
         if len(out) >= args.limit:
             break
     emit({"models": out, "vram_gb_filter": args.vram_gb}, args)
 
 
 # ─── download ────────────────────────────────────────────────────────
+
 
 def cmd_download(args) -> None:
     """Start `hf download <repo>` in a detached tmux session. Returns
@@ -334,20 +346,23 @@ def cmd_download(args) -> None:
         )
         ssh_argv = _ssh_prefix(args.host, args.ssh_port) + [remote_shell_cmd]
         try:
-            out = subprocess.run(ssh_argv, capture_output=True, text=True, timeout=20)
+            out = subprocess.run(ssh_argv, capture_output=True, text=True, timeout=20, check=False)
         except FileNotFoundError:
             fail("ssh not installed")
         if out.returncode != 0:
             fail(f"remote tmux launch failed: {out.stderr.strip() or out.stdout.strip()}")
-        emit({
-            "ok": True,
-            "session_id": session_id,
-            "repo": args.repo,
-            "host": args.host,
-            "remote_log_path": remote_log,
-            "tail_cmd": f"ssh {args.host} tail -f {remote_log}",
-            "kill_cmd": f"odysseus-cookbook kill {session_id} --host {args.host}",
-        }, args)
+        emit(
+            {
+                "ok": True,
+                "session_id": session_id,
+                "repo": args.repo,
+                "host": args.host,
+                "remote_log_path": remote_log,
+                "tail_cmd": f"ssh {args.host} tail -f {remote_log}",
+                "kill_cmd": f"odysseus-cookbook kill {session_id} --host {args.host}",
+            },
+            args,
+        )
         return
 
     _TMUX_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -356,21 +371,27 @@ def cmd_download(args) -> None:
     try:
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", session_id, "bash", "-lc", shell_cmd],
-            check=True, capture_output=True, text=True, timeout=10,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except FileNotFoundError:
         fail("tmux not installed — can't run background sessions from CLI")
     except subprocess.CalledProcessError as e:
         fail(f"tmux failed: {e.stderr or e.stdout}")
 
-    emit({
-        "ok": True,
-        "session_id": session_id,
-        "repo": args.repo,
-        "log_path": str(log_path),
-        "tail_cmd": f"tail -f {log_path}",
-        "kill_cmd": f"odysseus-cookbook kill {session_id}",
-    }, args)
+    emit(
+        {
+            "ok": True,
+            "session_id": session_id,
+            "repo": args.repo,
+            "log_path": str(log_path),
+            "tail_cmd": f"tail -f {log_path}",
+            "kill_cmd": f"odysseus-cookbook kill {session_id}",
+        },
+        args,
+    )
 
 
 def _shell_quote(s: str) -> str:
@@ -380,6 +401,7 @@ def _shell_quote(s: str) -> str:
 
 
 # ─── serve ───────────────────────────────────────────────────────────
+
 
 def cmd_serve(args) -> None:
     """Run an arbitrary serve command in a detached tmux session.
@@ -401,23 +423,30 @@ def cmd_serve(args) -> None:
     try:
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", session_id, "bash", "-lc", shell_cmd],
-            check=True, capture_output=True, text=True, timeout=10,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except FileNotFoundError:
         fail("tmux not installed")
     except subprocess.CalledProcessError as e:
         fail(f"tmux failed: {e.stderr or e.stdout}")
-    emit({
-        "ok": True,
-        "session_id": session_id,
-        "log_path": str(log_path),
-        "cmd": args.cmd,
-        "tail_cmd": f"tail -f {log_path}",
-        "kill_cmd": f"odysseus-cookbook kill {session_id}",
-    }, args)
+    emit(
+        {
+            "ok": True,
+            "session_id": session_id,
+            "log_path": str(log_path),
+            "cmd": args.cmd,
+            "tail_cmd": f"tail -f {log_path}",
+            "kill_cmd": f"odysseus-cookbook kill {session_id}",
+        },
+        args,
+    )
 
 
 # ─── state set ───────────────────────────────────────────────────────
+
 
 def cmd_state_set(args) -> None:
     """Write JSON from stdin to data/cookbook_state.json. Atomic via
@@ -451,6 +480,7 @@ def cmd_state_set(args) -> None:
 
 # ─── remote helpers ──────────────────────────────────────────────────
 
+
 def _ssh_prefix(host: str | None, port: str | None) -> list[str]:
     """Return the ssh argv prefix when --host is given, else []."""
     if not host:
@@ -464,6 +494,7 @@ def _ssh_prefix(host: str | None, port: str | None) -> list[str]:
 
 # ─── kill ────────────────────────────────────────────────────────────
 
+
 def cmd_kill(args) -> None:
     """Terminate a tmux session by name. Idempotent — exits 0 even if
     the session is already gone. Pass `--host user@box` to kill a
@@ -471,20 +502,24 @@ def cmd_kill(args) -> None:
     base = ["tmux", "kill-session", "-t", args.session]
     cmd = _ssh_prefix(args.host, args.ssh_port) + base if args.host else base
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
     except FileNotFoundError:
         fail("tmux not installed" if not args.host else "ssh not installed")
     already_gone = out.returncode != 0 and "can't find session" in (out.stderr or "").lower()
-    emit({
-        "ok": True,
-        "session": args.session,
-        "host": args.host or "local",
-        "was_running": out.returncode == 0,
-        "already_gone": already_gone,
-    }, args)
+    emit(
+        {
+            "ok": True,
+            "session": args.session,
+            "host": args.host or "local",
+            "was_running": out.returncode == 0,
+            "already_gone": already_gone,
+        },
+        args,
+    )
 
 
 # ─── state ───────────────────────────────────────────────────────────
+
 
 def cmd_state(args) -> None:
     """Dump the raw cookbook state file (the web UI's localStorage-y
@@ -493,6 +528,7 @@ def cmd_state(args) -> None:
 
 
 # ─── argparse ────────────────────────────────────────────────────────
+
 
 def _build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
@@ -519,8 +555,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ph = sub.add_parser("hf-latest", help="trending HF models, VRAM-filtered", parents=[common])
     ph.add_argument("--vram-gb", type=float, default=0, help="filter to models that fit (0 = all)")
     ph.add_argument("--limit", type=int, default=10)
-    ph.add_argument("--pipeline", default="text-generation",
-                    help="HF pipeline_tag (text-generation, text-to-image, etc.)")
+    ph.add_argument(
+        "--pipeline", default="text-generation", help="HF pipeline_tag (text-generation, text-to-image, etc.)"
+    )
     ph.set_defaults(func=cmd_hf_latest)
 
     pd = sub.add_parser("download", help="`hf download <repo>` in a tmux session", parents=[common])

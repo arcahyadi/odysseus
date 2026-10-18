@@ -1,0 +1,15 @@
+{
+  "name": "@agentos/sfd-visual",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SFD Visual Output — diagrams, reports, mockups via Kroki/SVG/PNG/HTML",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "latest"
+  }
+}

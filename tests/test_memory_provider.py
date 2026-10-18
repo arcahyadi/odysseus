@@ -33,13 +33,15 @@ def test_native_provider_remember_writes_native_memory_and_vector(tmp_path):
     vector = FakeVectorStore()
     provider = NativeMemoryProvider(manager, vector)
 
-    record = run(provider.remember(
-        "User prefers concise responses",
-        owner="alice",
-        session_id="session-1",
-        category="preference",
-        metadata={"confidence": 0.9},
-    ))
+    record = run(
+        provider.remember(
+            "User prefers concise responses",
+            owner="alice",
+            session_id="session-1",
+            category="preference",
+            metadata={"confidence": 0.9},
+        )
+    )
 
     stored = manager.load(owner="alice")
     assert len(stored) == 1
@@ -99,11 +101,13 @@ def test_native_provider_recall_falls_back_to_keyword_search(tmp_path):
 
     manager = MemoryManager(str(tmp_path))
     provider = NativeMemoryProvider(manager)
-    saved = run(provider.remember(
-        "Alice prefers markdown notes",
-        owner="alice",
-        category="preference",
-    ))
+    saved = run(
+        provider.remember(
+            "Alice prefers markdown notes",
+            owner="alice",
+            category="preference",
+        )
+    )
 
     hits = run(provider.recall("markdown preference", owner="alice", top_k=3))
 
@@ -135,14 +139,14 @@ def test_memory_provider_registry_exposes_only_active_provider_tools():
         def get_tool_schemas(self):
             return [{"name": f"{self.provider_id}_search", "description": "Search memory"}]
 
-    registry = MemoryProviderRegistry([
-        DummyProvider("active"),
-        DummyProvider("disabled", enabled=False),
-    ])
+    registry = MemoryProviderRegistry(
+        [
+            DummyProvider("active"),
+            DummyProvider("disabled", enabled=False),
+        ]
+    )
 
-    assert registry.get_tool_schemas() == [
-        {"name": "active_search", "description": "Search memory"}
-    ]
+    assert registry.get_tool_schemas() == [{"name": "active_search", "description": "Search memory"}]
 
 
 def test_memory_provider_registry_rejects_tool_name_conflicts():
@@ -168,10 +172,12 @@ def test_memory_provider_registry_rejects_tool_name_conflicts():
         def get_tool_schemas(self):
             return [{"name": "memory_search"}]
 
-    registry = MemoryProviderRegistry([
-        ConflictingProvider("first"),
-        ConflictingProvider("second"),
-    ])
+    registry = MemoryProviderRegistry(
+        [
+            ConflictingProvider("first"),
+            ConflictingProvider("second"),
+        ]
+    )
 
     try:
         registry.get_tool_schemas()

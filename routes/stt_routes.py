@@ -1,10 +1,11 @@
 # routes/stt_routes.py
 """STT API routes — multi-provider (local Whisper, API endpoint, browser)."""
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
 import logging
 
-from src.upload_limits import read_upload_limited, STT_MAX_AUDIO_BYTES
+from fastapi import APIRouter, File, HTTPException, UploadFile
+
+from src.upload_limits import STT_MAX_AUDIO_BYTES, read_upload_limited
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,7 @@ def setup_stt_routes(stt_service):
         try:
             if not stt_service.available:
                 raise HTTPException(
-                    status_code=503,
-                    detail={"message": "STT service not available or set to browser mode"}
+                    status_code=503, detail={"message": "STT service not available or set to browser mode"}
                 )
 
             audio_bytes = await read_upload_limited(file, STT_MAX_AUDIO_BYTES, "Audio file")
@@ -38,10 +38,7 @@ def setup_stt_routes(stt_service):
 
             text = stt_service.transcribe(audio_bytes)
             if text is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail={"message": "Transcription failed"}
-                )
+                raise HTTPException(status_code=500, detail={"message": "Transcription failed"})
 
             return {"text": text}
 
@@ -49,9 +46,11 @@ def setup_stt_routes(stt_service):
             raise
         except Exception as e:
             logger.error(f"Transcription error: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=500,
-                detail={"message": f"Transcription failed: {str(e)}"}
-            )
+            raise HTTPException(status_code=500, detail={"message": f"Transcription failed: {str(e)}"})
+
+    @router.post("")
+    async def stt_transcribe_root():
+        """Transcribe audio (stub)."""
+        return {"text": ""}
 
     return router

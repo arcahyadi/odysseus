@@ -14,7 +14,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 _TMP = Path(tempfile.mkdtemp(prefix="odysseus-imap-leak-fixes-"))
 os.environ.setdefault("DATA_DIR", str(_TMP))
@@ -28,9 +28,9 @@ if str(PROJECT_ROOT) not in sys.path:
 def _make_failing_conn(captured, *, raises_on="select"):
     """Return a mock IMAP connection that raises on the first call to `raises_on`."""
     conn = MagicMock()
-    conn.logout = MagicMock(side_effect=lambda: captured.__setitem__(
-        "logout_calls", captured.get("logout_calls", 0) + 1
-    ))
+    conn.logout = MagicMock(
+        side_effect=lambda: captured.__setitem__("logout_calls", captured.get("logout_calls", 0) + 1)
+    )
 
     def _raise(*a, **kw):
         raise RuntimeError("simulated IMAP failure")
@@ -40,6 +40,7 @@ def _make_failing_conn(captured, *, raises_on="select"):
 
 
 # ── email_helpers ──────────────────────────────────────────────────────────────
+
 
 def test_fetch_sender_thread_context_logs_out_on_select_failure(monkeypatch):
     import routes.email_helpers as helpers
@@ -51,8 +52,7 @@ def test_fetch_sender_thread_context_logs_out_on_select_failure(monkeypatch):
     result = helpers._fetch_sender_thread_context("user@example.com")
 
     assert captured.get("logout_calls", 0) == 1, (
-        f"conn.logout() must be called on select failure. "
-        f"Got logout_calls={captured.get('logout_calls')}"
+        f"conn.logout() must be called on select failure. Got logout_calls={captured.get('logout_calls')}"
     )
     assert result == "", "Should return empty string on failure"
 
@@ -75,23 +75,29 @@ def test_pre_retrieve_context_logs_out_on_search_failure(monkeypatch):
     captured = {}
     conn = MagicMock()
     conn.select.return_value = ("OK", [])
-    conn.logout = MagicMock(side_effect=lambda: captured.__setitem__(
-        "logout_calls", captured.get("logout_calls", 0) + 1
-    ))
+    conn.logout = MagicMock(
+        side_effect=lambda: captured.__setitem__("logout_calls", captured.get("logout_calls", 0) + 1)
+    )
     conn.search.side_effect = RuntimeError("simulated search failure")
 
     monkeypatch.setattr(helpers, "_imap_connect", lambda *a, **kw: conn)
 
     # Bypass the known-sender check and term extraction so we reach the IMAP block
-    monkeypatch.setattr(helpers, "_imap", MagicMock(
-        return_value=MagicMock(
-            __enter__=MagicMock(return_value=MagicMock(
-                select=MagicMock(return_value=("OK", [])),
-                search=MagicMock(return_value=("OK", [b"1"])),
-            )),
-            __exit__=MagicMock(return_value=False),
-        )
-    ))
+    monkeypatch.setattr(
+        helpers,
+        "_imap",
+        MagicMock(
+            return_value=MagicMock(
+                __enter__=MagicMock(
+                    return_value=MagicMock(
+                        select=MagicMock(return_value=("OK", [])),
+                        search=MagicMock(return_value=("OK", [b"1"])),
+                    )
+                ),
+                __exit__=MagicMock(return_value=False),
+            )
+        ),
+    )
 
     # Provide a body with a capitalised term so terms_list is non-empty
     snippets, terms = helpers._pre_retrieve_context(
@@ -101,12 +107,12 @@ def test_pre_retrieve_context_logs_out_on_search_failure(monkeypatch):
 
     # The function is best-effort and never raises; logout must have been called
     assert captured.get("logout_calls", 0) == 1, (
-        f"ctx_conn.logout() must be called even when search raises. "
-        f"Got logout_calls={captured.get('logout_calls')}"
+        f"ctx_conn.logout() must be called even when search raises. Got logout_calls={captured.get('logout_calls')}"
     )
 
 
 # ── email_server ───────────────────────────────────────────────────────────────
+
 
 def test_mcp_list_emails_logs_out_on_select_failure(monkeypatch):
     import mcp_servers.email_server as srv
@@ -121,8 +127,7 @@ def test_mcp_list_emails_logs_out_on_select_failure(monkeypatch):
         pass
 
     assert captured.get("logout_calls", 0) == 1, (
-        f"conn.logout() must be called after select raises. "
-        f"Got logout_calls={captured.get('logout_calls')}"
+        f"conn.logout() must be called after select raises. Got logout_calls={captured.get('logout_calls')}"
     )
 
 
@@ -133,9 +138,9 @@ def test_mcp_list_emails_logs_out_on_search_failure(monkeypatch):
     conn = MagicMock()
     conn.select.return_value = ("OK", [])
     conn.uid.side_effect = RuntimeError("simulated search failure")
-    conn.logout = MagicMock(side_effect=lambda: captured.__setitem__(
-        "logout_calls", captured.get("logout_calls", 0) + 1
-    ))
+    conn.logout = MagicMock(
+        side_effect=lambda: captured.__setitem__("logout_calls", captured.get("logout_calls", 0) + 1)
+    )
     monkeypatch.setattr(srv, "_imap_connect", lambda *a, **kw: conn)
 
     try:
@@ -144,8 +149,7 @@ def test_mcp_list_emails_logs_out_on_search_failure(monkeypatch):
         pass
 
     assert captured.get("logout_calls", 0) == 1, (
-        f"conn.logout() must be called after uid search raises. "
-        f"Got logout_calls={captured.get('logout_calls')}"
+        f"conn.logout() must be called after uid search raises. Got logout_calls={captured.get('logout_calls')}"
     )
 
 
@@ -165,8 +169,7 @@ def test_mcp_read_email_logs_out_on_select_failure(monkeypatch):
         pass
 
     assert captured.get("logout_calls", 0) == 1, (
-        f"conn.logout() must be called after select raises. "
-        f"Got logout_calls={captured.get('logout_calls')}"
+        f"conn.logout() must be called after select raises. Got logout_calls={captured.get('logout_calls')}"
     )
 
 
@@ -177,9 +180,9 @@ def test_mcp_read_email_logs_out_on_fetch_failure(monkeypatch):
     conn = MagicMock()
     conn.select.return_value = ("OK", [])
     conn.uid.side_effect = RuntimeError("simulated fetch failure")
-    conn.logout = MagicMock(side_effect=lambda: captured.__setitem__(
-        "logout_calls", captured.get("logout_calls", 0) + 1
-    ))
+    conn.logout = MagicMock(
+        side_effect=lambda: captured.__setitem__("logout_calls", captured.get("logout_calls", 0) + 1)
+    )
     monkeypatch.setattr(srv, "_imap_connect", lambda *a, **kw: conn)
     monkeypatch.setattr(srv, "_load_config", lambda *a, **kw: {})
 
@@ -189,8 +192,7 @@ def test_mcp_read_email_logs_out_on_fetch_failure(monkeypatch):
         pass
 
     assert captured.get("logout_calls", 0) == 1, (
-        f"conn.logout() must be called after uid fetch raises. "
-        f"Got logout_calls={captured.get('logout_calls')}"
+        f"conn.logout() must be called after uid fetch raises. Got logout_calls={captured.get('logout_calls')}"
     )
 
 
@@ -243,18 +245,22 @@ def test_imap_connect_shuts_down_socket_on_login_failure(monkeypatch):
 
     captured = {}
     conn = MagicMock()
-    conn.shutdown = MagicMock(side_effect=lambda: captured.__setitem__(
-        "shutdown_calls", captured.get("shutdown_calls", 0) + 1
-    ))
+    conn.shutdown = MagicMock(
+        side_effect=lambda: captured.__setitem__("shutdown_calls", captured.get("shutdown_calls", 0) + 1)
+    )
     conn.login = MagicMock(side_effect=imaplib.IMAP4.error(b"AUTHENTICATE failed."))
 
-    monkeypatch.setattr(helpers, "_get_email_config", lambda *a, **kw: {
-        "imap_host": "imap.example.com",
-        "imap_port": 993,
-        "imap_starttls": False,
-        "imap_user": "user@example.com",
-        "imap_password": "wrong",
-    })
+    monkeypatch.setattr(
+        helpers,
+        "_get_email_config",
+        lambda *a, **kw: {
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "imap_starttls": False,
+            "imap_user": "user@example.com",
+            "imap_password": "wrong",
+        },
+    )
     monkeypatch.setattr(helpers, "_open_imap_connection", lambda *a, **kw: conn)
 
     raised = False
@@ -276,9 +282,9 @@ def test_open_imap_connection_shuts_down_on_starttls_failure(monkeypatch):
 
     captured = {}
     conn = MagicMock()
-    conn.shutdown = MagicMock(side_effect=lambda: captured.__setitem__(
-        "shutdown_calls", captured.get("shutdown_calls", 0) + 1
-    ))
+    conn.shutdown = MagicMock(
+        side_effect=lambda: captured.__setitem__("shutdown_calls", captured.get("shutdown_calls", 0) + 1)
+    )
     conn.starttls = MagicMock(side_effect=RuntimeError("STARTTLS rejected"))
 
     monkeypatch.setattr(helpers.imaplib, "IMAP4", lambda *a, **kw: conn)
@@ -303,9 +309,12 @@ def test_open_imap_connection_shuts_down_on_starttls_failure(monkeypatch):
 
 def _cfg_imap(ssl=True, starttls=False):
     return {
-        "imap_ssl": ssl, "imap_starttls": starttls,
-        "imap_host": "imap.example.com", "imap_port": 993,
-        "imap_user": "user@example.com", "imap_password": "wrong",
+        "imap_ssl": ssl,
+        "imap_starttls": starttls,
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_user": "user@example.com",
+        "imap_password": "wrong",
     }
 
 
@@ -314,8 +323,9 @@ def test_mcp_imap_connect_shuts_down_on_login_failure(monkeypatch):
 
     captured = {}
     conn = MagicMock()
-    conn.shutdown = MagicMock(side_effect=lambda: captured.__setitem__(
-        "shutdown_calls", captured.get("shutdown_calls", 0) + 1))
+    conn.shutdown = MagicMock(
+        side_effect=lambda: captured.__setitem__("shutdown_calls", captured.get("shutdown_calls", 0) + 1)
+    )
     conn.login = MagicMock(side_effect=imaplib.IMAP4.error(b"AUTHENTICATE failed."))
     monkeypatch.setattr(srv, "_load_config", lambda *a, **kw: _cfg_imap(ssl=True))
     monkeypatch.setattr(srv.imaplib, "IMAP4_SSL", lambda *a, **kw: conn)
@@ -327,7 +337,8 @@ def test_mcp_imap_connect_shuts_down_on_login_failure(monkeypatch):
         raised = True
     assert raised, "login failure must propagate"
     assert captured.get("shutdown_calls", 0) == 1, (
-        f"shutdown() must be called once on MCP IMAP login failure. Got {captured.get('shutdown_calls')}")
+        f"shutdown() must be called once on MCP IMAP login failure. Got {captured.get('shutdown_calls')}"
+    )
 
 
 def test_mcp_imap_connect_shuts_down_on_starttls_failure(monkeypatch):
@@ -335,8 +346,9 @@ def test_mcp_imap_connect_shuts_down_on_starttls_failure(monkeypatch):
 
     captured = {}
     conn = MagicMock()
-    conn.shutdown = MagicMock(side_effect=lambda: captured.__setitem__(
-        "shutdown_calls", captured.get("shutdown_calls", 0) + 1))
+    conn.shutdown = MagicMock(
+        side_effect=lambda: captured.__setitem__("shutdown_calls", captured.get("shutdown_calls", 0) + 1)
+    )
     conn.starttls = MagicMock(side_effect=RuntimeError("STARTTLS rejected"))
     monkeypatch.setattr(srv, "_load_config", lambda *a, **kw: _cfg_imap(ssl=False, starttls=True))
     monkeypatch.setattr(srv.imaplib, "IMAP4", lambda *a, **kw: conn)
@@ -348,15 +360,18 @@ def test_mcp_imap_connect_shuts_down_on_starttls_failure(monkeypatch):
         raised = True
     assert raised, "starttls failure must propagate"
     assert captured.get("shutdown_calls", 0) == 1, (
-        f"shutdown() must be called once on MCP IMAP STARTTLS failure. Got {captured.get('shutdown_calls')}")
+        f"shutdown() must be called once on MCP IMAP STARTTLS failure. Got {captured.get('shutdown_calls')}"
+    )
 
 
 def _cfg_smtp(security):
     return {
         "smtp_host": "smtp.example.com",
         "smtp_port": 587 if security == "starttls" else 465,
-        "smtp_security": security, "smtp_user": "user@example.com",
-        "smtp_password": "wrong", "account_name": "test",
+        "smtp_security": security,
+        "smtp_user": "user@example.com",
+        "smtp_password": "wrong",
+        "account_name": "test",
     }
 
 
@@ -365,8 +380,7 @@ def test_mcp_smtp_connect_closes_on_login_failure(monkeypatch):
 
     captured = {}
     conn = MagicMock()
-    conn.close = MagicMock(side_effect=lambda: captured.__setitem__(
-        "close_calls", captured.get("close_calls", 0) + 1))
+    conn.close = MagicMock(side_effect=lambda: captured.__setitem__("close_calls", captured.get("close_calls", 0) + 1))
     conn.login = MagicMock(side_effect=Exception("SMTP auth failed"))
     monkeypatch.setattr(srv, "_load_config", lambda *a, **kw: _cfg_smtp("ssl"))
     monkeypatch.setattr(srv, "_smtp_ready", lambda cfg: True)
@@ -379,7 +393,8 @@ def test_mcp_smtp_connect_closes_on_login_failure(monkeypatch):
         raised = True
     assert raised, "login failure must propagate"
     assert captured.get("close_calls", 0) == 1, (
-        f"close() must be called once on MCP SMTP login failure. Got {captured.get('close_calls')}")
+        f"close() must be called once on MCP SMTP login failure. Got {captured.get('close_calls')}"
+    )
 
 
 def test_mcp_smtp_connect_closes_on_starttls_failure(monkeypatch):
@@ -387,8 +402,7 @@ def test_mcp_smtp_connect_closes_on_starttls_failure(monkeypatch):
 
     captured = {}
     conn = MagicMock()
-    conn.close = MagicMock(side_effect=lambda: captured.__setitem__(
-        "close_calls", captured.get("close_calls", 0) + 1))
+    conn.close = MagicMock(side_effect=lambda: captured.__setitem__("close_calls", captured.get("close_calls", 0) + 1))
     conn.starttls = MagicMock(side_effect=Exception("STARTTLS rejected"))
     monkeypatch.setattr(srv, "_load_config", lambda *a, **kw: _cfg_smtp("starttls"))
     monkeypatch.setattr(srv, "_smtp_ready", lambda cfg: True)
@@ -401,4 +415,5 @@ def test_mcp_smtp_connect_closes_on_starttls_failure(monkeypatch):
         raised = True
     assert raised, "starttls failure must propagate"
     assert captured.get("close_calls", 0) == 1, (
-        f"close() must be called once on MCP SMTP STARTTLS failure. Got {captured.get('close_calls')}")
+        f"close() must be called once on MCP SMTP STARTTLS failure. Got {captured.get('close_calls')}"
+    )

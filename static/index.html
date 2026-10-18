@@ -76,7 +76,7 @@
       }
       // Apply font early
       if (t && t.font) {
-        var fm = {mono:"'Fira Code', monospace",sans:"system-ui, -apple-system, 'Segoe UI', sans-serif",serif:"Georgia, 'Times New Roman', serif"};
+        var fm = {mono:"'Fira Code', monospace",sans:"system-ui, -apple-system, 'Segoe UI', sans-serif",serif:"Georgia, 'Times New Roman', serif",opendyslexic:"'OpenDyslexic', sans-serif"};
         if (fm[t.font]) { s.setProperty('--font-family', fm[t.font]); }
         else { s.setProperty('--font-family', "'" + t.font.replace(/'/g,'') + "', sans-serif"); }
       }
@@ -84,6 +84,12 @@
       if (t && t.density && t.density !== 'comfortable') {
         document.documentElement.classList.add('density-' + t.density);
       }
+      // Apply UI text-size scale early (global accessibility pref, independent
+      // of the active theme) so there's no flash on load.
+      try {
+        var _us = localStorage.getItem('odysseus-ui-scale');
+        if (_us && _us !== '100') document.documentElement.classList.add('ui-scale-' + _us);
+      } catch(e){}
       // Apply background pattern on body once available
       if (t && t.bgPattern && t.bgPattern !== 'none') {
         document.addEventListener('DOMContentLoaded', function() {
@@ -213,7 +219,10 @@
       }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/css/tokens.css?v=2">
+  <link rel="stylesheet" href="/static/css/style.purged.css?v=2">
+  <!-- Phase 1: Tailwind CSS coexists with legacy styles -->
+  <link rel="stylesheet" href="/static/css/style.tailwind.min.css?v=1">
   <link rel="modulepreload" href="/static/app.js">
   <link rel="modulepreload" href="/static/js/chat.js">
   <link rel="modulepreload" href="/static/js/ui.js">
@@ -581,6 +590,7 @@
               <option value="mono">Monospace</option>
               <option value="sans">Sans-serif</option>
               <option value="serif">Serif</option>
+              <option value="opendyslexic">OpenDyslexic (dyslexia-friendly)</option>
             </select>
           </div>
           <div class="theme-fd-group">
@@ -589,6 +599,13 @@
               <option value="compact">Compact</option>
               <option value="comfortable">Comfortable</option>
               <option value="spacious">Spacious</option>
+            </select>
+          </div>
+          <div class="theme-fd-group">
+            <label class="theme-fd-label">Text size</label>
+            <select id="theme-text-size-select" class="theme-fd-select" aria-label="Text size">
+              <option value="100">Default</option>
+              <option value="125">Larger</option>
             </select>
           </div>
           <div class="theme-fd-group" id="theme-frosted-group">
@@ -1020,6 +1037,14 @@
         </div>
       </div>
       <div id="pinned-tools-bar"></div>
+      <div id="run-cockpit" class="run-cockpit" aria-label="Run status">
+        <span id="cockpit-phase" class="cockpit-chip chip-muted"><span class="chip-label">phase</span><span class="chip-val">—</span></span>
+        <span id="cockpit-drift" class="cockpit-chip chip-muted"><span class="chip-label">drift</span><span class="chip-val">—</span></span>
+        <span id="cockpit-iters" class="cockpit-chip chip-muted"><span class="chip-label">iters</span><span class="chip-val">—</span></span>
+        <span id="cockpit-budget" class="cockpit-chip chip-muted"><span class="chip-label">budget</span><span class="chip-val">—</span></span>
+        <span id="cockpit-health" class="cockpit-chip chip-muted"><span class="chip-label">health</span><span class="chip-val">—</span></span>
+        <span id="cockpit-phase-bar" class="cockpit-phase-bar"></span>
+      </div>
       <div class="chat-input-bottom" style="visibility:hidden">
         <div class="chat-input-left">
           <!-- Overflow menu (+) — always first/left -->
@@ -1318,7 +1343,7 @@
 
   <!-- Cookbook Modal -->
   <div id="cookbook-modal" class="modal hidden">
-    <div class="modal-content" role="dialog" aria-label="Cookbook" style="width: min(780px, 92vw); height: 94vh; max-height: 94vh; background: var(--bg);">
+    <div class="modal-content" role="dialog" aria-label="Cookbook" style="width: min(780px, 92vw); background: var(--bg);">
       <div class="modal-header">
         <h4 style="margin:0;margin-right:auto"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>Cookbook</h4>
         <button class="close-btn" id="close-cookbook-modal" aria-label="Close cookbook">✖</button>
@@ -1807,6 +1832,11 @@
                 <input type="checkbox" checked data-ui-key="chat-meta"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16"/><path d="M4 10h8"/></svg></span>
+                <span class="vis-label">Full-width chat <span class="vis-hint">Use the full window width (desktop)</span></span>
+                <input type="checkbox" data-ui-key="chat-fullwidth"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v2m0 14v2m-7-9H3m18 0h-2m-1.5-6.5L16 7m-8-1.5L6.5 7m11 11l-1.5-1.5M8 18l-1.5 1.5"/><circle cx="12" cy="12" r="4"/></svg></span>
                 <span class="vis-label">Welcome Message <span class="vis-hint">Logo &amp; tips on empty chat</span></span>
                 <input type="checkbox" checked data-ui-key="welcome-text"><span class="vis-switch"></span>
@@ -2044,6 +2074,16 @@
                 <div class="admin-toggle-sub">Allow anyone to create an account from the login page</div>
               </div>
               <label class="admin-switch"><input type="checkbox" id="adm-signupToggle"><span class="admin-slider"></span></label>
+            </div>
+          </div>
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M12 15v3m-3-3h6M12 3v2m0 16v-2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M3 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/><circle cx="12" cy="12" r="3"/></svg>Model Defaults</h2>
+            <div class="admin-toggle-row">
+              <div>
+                <div class="admin-toggle-label">Share defaults with users</div>
+                <div class="admin-toggle-sub">When on, users without a personal default inherit the global default model (only if those models are allowed for them).</div>
+              </div>
+              <label class="admin-switch"><input type="checkbox" id="adm-shareDefaultsToggle"><span class="admin-slider"></span></label>
             </div>
           </div>
           <div class="admin-card">
@@ -2318,6 +2358,78 @@
               </div>
             </div>
           </div>
+          <div class="admin-card" id="settings-killswitches-card">
+            <h2>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6">
+                <path d="M12 2v6m0 0a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"/><line x1="12" y1="16" x2="12" y2="22"/>
+              </svg>
+              Kill-switches
+            </h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Etat reel des modules dormants (lecture seule). "defaut" = valeur si la variable d'environnement n'est pas definie.</div>
+            <div class="settings-system-logs-controls" style="margin-bottom:8px">
+              <button type="button" class="admin-btn-sm" id="killswitches-refresh-btn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Refresh
+              </button>
+            </div>
+            <div id="killswitches-container">
+              <div class="settings-system-logs-placeholder">Chargement…</div>
+            </div>
+          </div>
+          <div class="admin-card" id="settings-knowledge-card">
+            <h2>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6">
+                <path d="M12 3l9 4.5v9L12 21l-9-4.5v-9L12 3z"/><path d="M12 3v18M3 7.5l9 4.5 9-4.5"/>
+              </svg>
+              Trinité — Connaissance
+            </h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Santé des trois jambes de connaissance (lecture seule) : CBM (code), VectorRAG (sémantique), Obsidian (mémoire).</div>
+            <div class="settings-system-logs-controls" style="margin-bottom:8px">
+              <button type="button" class="admin-btn-sm" id="knowledge-refresh-btn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Refresh
+              </button>
+            </div>
+            <div id="knowledge-container">
+              <div class="settings-system-logs-placeholder">Chargement…</div>
+            </div>
+          </div>
+          <div class="admin-card" id="settings-drift-card">
+            <h2>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6">
+                <path d="M3 12h4l3 8 4-16 3 8h4"/>
+              </svg>
+              Drift — Observateur
+            </h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Dérive comportementale calculée en direct (lecture seule) : niveau réel, fichiers harness touchés, taux one-shot du dernier CodeBurn.</div>
+            <div class="settings-system-logs-controls" style="margin-bottom:8px">
+              <button type="button" class="admin-btn-sm" id="drift-refresh-btn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Refresh
+              </button>
+            </div>
+            <div id="drift-container">
+              <div class="settings-system-logs-placeholder">Chargement…</div>
+            </div>
+          </div>
+          <div class="admin-card" id="settings-budgets-card">
+            <h2>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6">
+                <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>
+              </svg>
+              Budgets — Gouvernance
+            </h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Budgets agents réels (lecture seule) : usage/limite en tokens, coût $ et itérations, avec statut. "aucun budget actif" si la table est vide.</div>
+            <div class="settings-system-logs-controls" style="margin-bottom:8px">
+              <button type="button" class="admin-btn-sm" id="budgets-refresh-btn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Refresh
+              </button>
+            </div>
+            <div id="budgets-container">
+              <div class="settings-system-logs-placeholder">Chargement…</div>
+            </div>
+          </div>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Data Backup</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Export or import your user data (memories, presets, settings, skills, preferences) as a JSON file.</div>
@@ -2426,6 +2538,10 @@
 
 
 
+<!-- HTMX + Alpine.js — progressive enhancement, loaded after DOM -->
+<script defer src="/static/lib/htmx.min.js"></script>
+<script defer src="/static/lib/alpine.min.js"></script>
+
 <!-- Load modules in this order -->
 <script type="module" src="/static/js/storage.js"></script>
 <script type="module" src="/static/js/ui.js"></script>
@@ -2449,6 +2565,7 @@
 <script type="module" src="/static/js/chatRenderer.js"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js"></script>
+<script src="/static/js/cockpit.js"></script>
 <script type="module" src="/static/js/chat.js?v=20260609ws"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>

@@ -8,7 +8,6 @@ the PDF auto-doc pattern in `src.pdf_form_doc`.
 
 import logging
 import uuid
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +16,8 @@ def create_office_document(
     session_id: str,
     upload_id: str,
     title: str,
-    body_text: Optional[str] = None,
-) -> Optional[str]:
+    body_text: str | None = None,
+) -> str | None:
     """Create a markdown Document for an Office attachment and set it active.
 
     Returns the new doc_id, or None on failure / empty body. The full
@@ -26,13 +25,15 @@ def create_office_document(
     arbitrary windows via `manage_documents action=read` even when the
     inline chat copy was truncated.
     """
+    from src.agent_tools.document_tools import set_active_document
     from src.database import (
-        SessionLocal,
         Document,
         DocumentVersion,
+        SessionLocal,
+    )
+    from src.database import (
         Session as DbSession,
     )
-    from src.agent_tools.document_tools import set_active_document
 
     if not body_text or not body_text.strip():
         return None

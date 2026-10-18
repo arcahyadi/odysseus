@@ -6,6 +6,7 @@ stream_llm gated on line.startswith("data: ") (trailing space) in both the
 OpenAI-compatible and Anthropic branches, so those providers\' ENTIRE
 stream — content and usage — was silently dropped.
 """
+
 import asyncio
 import json
 
@@ -54,7 +55,9 @@ def _drive(monkeypatch, url, lines, model):
     async def run():
         out = []
         async for chunk in llm_core.stream_llm(
-            url, model, [{"role": "user", "content": "hi"}],
+            url,
+            model,
+            [{"role": "user", "content": "hi"}],
             headers={"Authorization": "Bearer k"},
         ):
             out.append(chunk)
@@ -79,9 +82,9 @@ def _deltas(blob):
 
 def test_openai_compat_no_space_data_is_parsed(monkeypatch):
     lines = [
-        'data:' + json.dumps({"choices": [{"delta": {"content": "Hi"}}]}),
-        'data:' + json.dumps({"choices": [{"delta": {"content": " there"}}]}),
-        'data:[DONE]',
+        "data:" + json.dumps({"choices": [{"delta": {"content": "Hi"}}]}),
+        "data:" + json.dumps({"choices": [{"delta": {"content": " there"}}]}),
+        "data:[DONE]",
     ]
     blob = _drive(
         monkeypatch,
@@ -94,8 +97,8 @@ def test_openai_compat_no_space_data_is_parsed(monkeypatch):
 
 def test_openai_compat_with_space_still_works(monkeypatch):
     lines = [
-        'data: ' + json.dumps({"choices": [{"delta": {"content": "Yo"}}]}),
-        'data: [DONE]',
+        "data: " + json.dumps({"choices": [{"delta": {"content": "Yo"}}]}),
+        "data: [DONE]",
     ]
     blob = _drive(
         monkeypatch,
@@ -108,9 +111,8 @@ def test_openai_compat_with_space_still_works(monkeypatch):
 
 def test_anthropic_no_space_data_is_parsed(monkeypatch):
     lines = [
-        'data:' + json.dumps({"type": "content_block_delta",
-                              "delta": {"type": "text_delta", "text": "Hi"}}),
-        'data:' + json.dumps({"type": "message_stop"}),
+        "data:" + json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hi"}}),
+        "data:" + json.dumps({"type": "message_stop"}),
     ]
     blob = _drive(
         monkeypatch,

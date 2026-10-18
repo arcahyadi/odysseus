@@ -6,16 +6,19 @@ from services.search import content as service_content
 
 
 @pytest.mark.parametrize("module", [service_content])
-@pytest.mark.parametrize("url", [
-    "http://printer.local/",
-    "http://nas.lan/",
-    "http://admin.internal/",
-    "http://service.intranet/",
-    "http://[::ffff:169.254.169.254]/latest/meta-data/",
-    "http://224.0.0.1/",
-    "http://[ff02::1]/",
-    "http://[::]/",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://printer.local/",
+        "http://nas.lan/",
+        "http://admin.internal/",
+        "http://service.intranet/",
+        "http://[::ffff:169.254.169.254]/latest/meta-data/",
+        "http://224.0.0.1/",
+        "http://[ff02::1]/",
+        "http://[::]/",
+    ],
+)
 def test_search_content_url_guard_blocks_internal_names_and_address_classes(module, url):
     assert module._public_http_url(url) is False
 

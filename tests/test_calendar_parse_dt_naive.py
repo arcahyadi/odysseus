@@ -11,6 +11,7 @@ bounds and raises "can't compare offset-naive and offset-aware datetimes".
 
 The fallback now normalizes to UTC and strips tz, exactly like the ISO path.
 """
+
 import pytest
 
 from tests.test_null_owner_gates import _import_calendar_helpers

@@ -30,7 +30,7 @@ def test_gb10_unified_memory_detected_not_dropped(monkeypatch):
     assert info["backend"] == "cuda"
     assert info["gpu_count"] == 1
     assert info["unified_memory"] is True
-    assert info["gpu_vram_gb"] == 128.0          # backed by the unified RAM pool
+    assert info["gpu_vram_gb"] == 128.0  # backed by the unified RAM pool
     assert hardware._last_gpu_error is None
 
 

@@ -8,11 +8,11 @@ TOOL_HANDLERS, (2) the moved logic runs and threads owner/session from ctx
 (3) tool_execution.py dispatches them through the registry rather than the
 legacy dispatch_ai_tool elif.
 """
+
 import asyncio
 from pathlib import Path
 
-import src.ai_interaction as ai_interaction
-import src.database as database
+from src import ai_interaction, database
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_tools import session_tools as st
 

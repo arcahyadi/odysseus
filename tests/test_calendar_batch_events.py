@@ -118,8 +118,6 @@ async def test_batch_events_partial_failure():
 
     # Verify only valid events were created
     db = _TS()
-    events = db.query(CalendarEvent).filter(
-        CalendarEvent.summary.in_(["Valid Event 1", "Valid Event 2"])
-    ).all()
+    events = db.query(CalendarEvent).filter(CalendarEvent.summary.in_(["Valid Event 1", "Valid Event 2"])).all()
     assert len(events) == 2
     db.close()

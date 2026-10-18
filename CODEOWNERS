@@ -1,0 +1,63 @@
+# CODEOWNERS — Odysseus AgentOS
+#
+# Les propriétaires de code sont automatiquement ajoutés comme reviewers
+# sur les PRs modifiant les chemins correspondants.
+#
+# Ordre de priorité : la dernière règle qui matche est appliquée.
+#
+# @equipe-core représente le mainteneur principal.
+# Ajouter des @github-username supplémentaires quand le bus factor > 1.
+
+# ── Cœur du système ──────────────────────────────────────────
+/src/orchestrator/          @equipe-core
+/src/opencode_bridge.py     @equipe-core
+/src/event_bus.py           @equipe-core
+/src/killswitch_registry.py @equipe-core
+/src/budget_enforcer.py     @equipe-core
+
+# ── Infrastructure Docker ────────────────────────────────────
+/docker/                    @equipe-core
+/docker-compose.yml          @equipe-core
+/docker-compose.gpu-amd.yml  @equipe-core
+/docker-compose.gpu-nvidia.yml @equipe-core
+/docker-compose.isolated.yml @equipe-core
+/Dockerfile                  @equipe-core
+
+# ── Plugins npm SFD ──────────────────────────────────────────
+/packages/                  @equipe-core
+/package.json               @equipe-core
+/package-lock.json          @equipe-core
+
+# ── Agents OpenCode ─────────────────────────────────────────
+/.opencode/                 @equipe-core
+/opencode.json              @equipe-core
+
+# ── CI/CD et Workflows ──────────────────────────────────────
+/.github/workflows/         @equipe-core
+/workflows/                 @equipe-core
+
+# ── Configuration ────────────────────────────────────────────
+/pyproject.toml             @equipe-core
+/requirements.txt           @equipe-core
+/requirements-optional.txt  @equipe-core
+/model-routing.json         @equipe-core
+
+# ── Documentation ────────────────────────────────────────────
+/docs/                      @equipe-core
+/SFD.md                     @equipe-core
+/ROADMAP.md                 @equipe-core
+/SECURITY.md                @equipe-core
+/THREAT_MODEL.md            @equipe-core
+/CONTRIBUTING.md            @equipe-core
+/CHANGELOG.md               @equipe-core
+
+# ── Frontend ─────────────────────────────────────────────────
+/static/                    @equipe-core
+/tailwind.config.js         @equipe-core
+
+# ── Tests ────────────────────────────────────────────────────
+/tests/                     @equipe-core
+
+# ── Sécurité ─────────────────────────────────────────────────
+/.env.example               @equipe-core
+/config/policies/           @equipe-core

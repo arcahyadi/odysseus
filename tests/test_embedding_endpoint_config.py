@@ -1,6 +1,6 @@
 import json
 
-import routes.embedding_routes as embedding_routes
+from routes import embedding_routes
 
 
 def test_load_custom_endpoint_ignores_non_object_json(tmp_path, monkeypatch):

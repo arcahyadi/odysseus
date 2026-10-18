@@ -1,0 +1,98 @@
+name: "Deploy and Verify"
+description: "Full deployment pipeline: pull, build, health-check, test, notify, and log."
+version: "1.0"
+enabled: true
+triggers:
+  - type: event
+    pattern: "system.deploy_triggered"
+  - type: cron
+    pattern: "0 2 * * *"
+steps:
+  - id: "git-pull"
+    action: docker_action
+    params:
+      command: "git pull origin main"
+    on_error: abort
+    timeout: 60s
+  - id: "docker-build-core"
+    action: docker_action
+    params:
+      command: "compose --profile core up -d --build"
+    on_error: abort
+    timeout: 300s
+  - id: "docker-build-obs"
+    action: docker_action
+    params:
+      command: "compose --profile observability up -d --build"
+    on_error: abort
+    timeout: 300s
+  - id: "health-core"
+    action: webhook
+    params:
+      method: GET
+      url: "http://localhost:8080/health"
+      expect_status: 200
+    on_error: retry(3, 10s)
+    timeout: 30s
+  - id: "health-obs"
+    action: webhook
+    params:
+      method: GET
+      url: "http://localhost:9090/health"
+      expect_status: 200
+    on_error: retry(3, 10s)
+    timeout: 30s
+  - id: "health-all"
+    action: webhook
+    params:
+      method: GET
+      url: "http://localhost:8080/api/services/health"
+      expect_status: 200
+    on_error: abort
+    timeout: 60s
+  - id: "run-tests"
+    action: spawn_agent
+    params:
+      agent: test-engineer
+      args:
+        suite: full
+        timeout: 600
+    on_error: continue
+    timeout: 900s
+  - id: "notify-ntfy"
+    action: send_alert
+    params:
+      channel: ntfy
+      priority: normal
+      title: "Deploy Complete"
+      message: "All services deployed and verified. Tests: {{ steps.run-tests.status }}."
+    on_error: continue
+    timeout: 15s
+  - id: "log-deployment"
+    action: write_db
+    params:
+      target: sqlite
+      table: deployments
+      data:
+        timestamp: "{{ workflow.started_at }}"
+        status: "{{ workflow.status }}"
+        test_result: "{{ steps.run-tests.output }}"
+        services: ["core", "observability"]
+    on_error: continue
+    timeout: 15s
+error_handling:
+  on_abort:
+    - action: send_alert
+      params:
+        channel: ntfy
+        priority: high
+        title: "Deploy Failed"
+        message: "Step '{{ error.step }}' failed: {{ error.message }}"
+    - action: write_db
+      params:
+        target: sqlite
+        table: deployments
+        data:
+          timestamp: "{{ workflow.started_at }}"
+          status: failed
+          error: "{{ error.message }}"

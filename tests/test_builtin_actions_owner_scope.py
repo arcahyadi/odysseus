@@ -184,8 +184,7 @@ async def test_learn_sender_signatures_writes_owner_scoped_cache(monkeypatch, tm
                         b"Thanks for the update.\r\n\r\n"
                         b"Regards,\r\n"
                         b"Writer Example\r\n"
-                        b"Example Co.\r\n"
-                        + str(uid).encode()
+                        b"Example Co.\r\n" + str(uid).encode()
                     ),
                 )
             ]

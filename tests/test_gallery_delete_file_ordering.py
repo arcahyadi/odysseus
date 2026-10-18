@@ -7,6 +7,7 @@ stayed active but its file was already gone — a broken, unviewable image (data
 loss). The file is now removed only after the soft-delete commit succeeds, and
 best-effort so a missing/locked file can't fail an otherwise-successful delete.
 """
+
 import asyncio
 
 import pytest
@@ -15,7 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.database import Base, GalleryImage
-import routes.gallery_routes as gallery_routes
+from routes import gallery_routes
 
 
 def _delete_endpoint():

@@ -1,8 +1,9 @@
 """Tests for analytics default-merge on load (src/search/analytics.py)."""
+
 import json
 
-import src.search.analytics as analytics
 import services.search.analytics as live_analytics
+from src.search import analytics
 
 
 def test_src_search_analytics_is_services_shim():

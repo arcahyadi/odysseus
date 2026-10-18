@@ -60,6 +60,7 @@ def _find_npx() -> str:
             return npx_candidate
     return "npx"  # fallback, will fail with a clear error
 
+
 # Server definitions: id -> (script path relative to project root, display name)
 #
 # bash / python / filesystem / web_search were folded into native in-process
@@ -70,10 +71,10 @@ def _find_npx() -> str:
 # carries hundreds of LOC of unique IMAP / HTTP / manager logic not worth
 # duplicating into the native path right now.
 _BUILTIN_SERVERS = {
-    "image_gen":  ("mcp_servers/image_gen_server.py",  "Built-in: Image Generation"),
-    "memory":     ("mcp_servers/memory_server.py",     "Built-in: Memory"),
-    "rag":        ("mcp_servers/rag_server.py",        "Built-in: RAG"),
-    "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
+    "image_gen": ("mcp_servers/image_gen_server.py", "Built-in: Image Generation"),
+    "memory": ("mcp_servers/memory_server.py", "Built-in: Memory"),
+    "rag": ("mcp_servers/rag_server.py", "Built-in: RAG"),
+    "email": ("mcp_servers/email_server.py", "Built-in: Email"),
 }
 
 # NPX-based built-in servers (run via npx, not Python)
@@ -87,6 +88,38 @@ _BUILTIN_NPX_SERVERS = {
 
 # Global flag to disable MCP if there are compatibility issues
 MCP_DISABLED = os.environ.get("ODYSSEUS_DISABLE_MCP", "").lower() in ("1", "true", "yes")
+
+
+def _obsidian_mcp_enabled() -> bool:
+    """OFF unless ODYSSEUS_OBSIDIAN_MCP is truthy.
+
+    Gates registration of the Obsidian read/search stdio MCP server. OFF (the
+    default) keeps startup byte-identical: the server is never launched.
+    """
+    return os.environ.get("ODYSSEUS_OBSIDIAN_MCP", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _graphify_mcp_enabled() -> bool:
+    """OFF unless ODYSSEUS_GRAPHIFY is truthy.
+
+    Gates registration of the Graphify semantic knowledge graph MCP server.
+    OFF (default) keeps startup byte-identical.
+    """
+    return os.environ.get("ODYSSEUS_GRAPHIFY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _optional_python_servers() -> dict:
+    """Kill-switched Python stdio servers, included only when their gate is ON.
+
+    Kept separate from _BUILTIN_SERVERS (always-on) so that adding a gated server
+    cannot change default startup behaviour.
+    """
+    optional = {}
+    if _obsidian_mcp_enabled():
+        optional["obsidian"] = ("mcp_servers/obsidian_mcp.py", "Built-in: Obsidian (read/search)")
+    if _graphify_mcp_enabled():
+        optional["graphify"] = ("mcp_servers/graphify_mcp.py", "Built-in: Graphify (semantic knowledge graph)")
+    return optional
 
 
 async def register_builtin_servers(mcp_manager):
@@ -118,7 +151,7 @@ async def register_builtin_servers(mcp_manager):
         except BaseException as e:
             logger.warning(f"Built-in MCP server {name} error: {type(e).__name__}: {e}")
 
-    for server_id, (script, name) in _BUILTIN_SERVERS.items():
+    for server_id, (script, name) in {**_BUILTIN_SERVERS, **_optional_python_servers()}.items():
         script_path = os.path.join(base_dir, script)
         if not os.path.exists(script_path):
             logger.warning(f"Built-in MCP server script not found: {script_path}")
@@ -208,7 +241,10 @@ async def _is_npx_package_cached(npx_path, package_spec, timeout_s=5):
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            npx_path, "--no-install", package_spec, "--version",
+            npx_path,
+            "--no-install",
+            package_spec,
+            "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -218,6 +254,7 @@ async def _is_npx_package_cached(npx_path, package_spec, timeout_s=5):
                 [npx_path, "--no-install", package_spec, "--version"],
                 capture_output=True,
                 timeout=timeout_s,
+                check=False,
             )
         except (subprocess.TimeoutExpired, OSError, ValueError):
             return False
@@ -226,7 +263,7 @@ async def _is_npx_package_cached(npx_path, package_spec, timeout_s=5):
         return False
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             proc.kill()
             await proc.wait()

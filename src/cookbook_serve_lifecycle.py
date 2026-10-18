@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import httpx
+
 from core.constants import internal_api_base
 from src.constants import COOKBOOK_STATE_FILE
 
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 def _internal_headers() -> dict:
     from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+
     return {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
 
 
@@ -38,6 +40,7 @@ async def _delete_endpoint_for_task(task: dict) -> None:
     the user has to delete it by hand in Settings -> Endpoints.
     """
     import re as _re
+
     payload = task.get("payload") or {}
     cmd = str(payload.get("_cmd") or "")
     remote = task.get("remoteHost") or ""
@@ -98,6 +101,7 @@ async def _stop_serve(session_id: str, remote_host: str = "", ssh_port: str = ""
     returned 404 and the result was logged as "failed").
     """
     import shlex
+
     if remote_host:
         port_flag = f"-p {shlex.quote(str(ssh_port))} " if ssh_port and str(ssh_port) != "22" else ""
         cmd = (
@@ -181,6 +185,7 @@ async def _tick() -> None:
     if stopped_any:
         try:
             from core.atomic_io import atomic_write_json
+
             # Re-read the state file so concurrent UI writes (task adds,
             # status flips, config edits) are not silently overwritten.
             # Apply only our stop mutations to the fresh snapshot.

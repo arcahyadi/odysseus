@@ -5,13 +5,14 @@ isolation even under concurrent access patterns.
 """
 
 import asyncio
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-from core.models import Session, ChatMessage
+from core.models import ChatMessage, Session
 from core.session_manager import SessionManager
 
 

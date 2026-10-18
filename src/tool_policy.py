@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Iterable, Mapping, Optional, Set, Tuple
-
 
 GUIDE_ONLY_DIRECTIVE = (
     "## GUIDE-ONLY MODE - TOOL POLICY\n"
@@ -89,7 +88,7 @@ _COMMON_TOOL_NAMES = {
 }
 
 
-_GUIDE_ONLY_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = tuple(
+_GUIDE_ONLY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), reason)
     for pattern, reason in (
         (r"\bguide[-\s]?only mode\b", "guide-only mode requested"),
@@ -114,15 +113,15 @@ class ToolPolicy:
     block_all_tool_calls: bool = False
     disable_mcp: bool = False
 
-    def all_disabled_names(self) -> Set[str]:
+    def all_disabled_names(self) -> set[str]:
         return set(self.disabled_tools) | set(self.hidden_tools)
 
-    def blocks(self, tool_name: Optional[str]) -> bool:
+    def blocks(self, tool_name: str | None) -> bool:
         if not tool_name:
             return False
         return self.block_all_tool_calls or tool_name in self.disabled_tools or tool_name in self.hidden_tools
 
-    def reason_for(self, tool_name: Optional[str]) -> str:
+    def reason_for(self, tool_name: str | None) -> str:
         if tool_name and tool_name in self.reasons:
             return self.reasons[tool_name]
         if self.block_all_tool_calls and self.mode == "guide_only":
@@ -130,7 +129,7 @@ class ToolPolicy:
         return "Tool use is disabled for this turn."
 
 
-def detect_guide_only_turn(message: object) -> Optional[str]:
+def detect_guide_only_turn(message: object) -> str | None:
     """Return a reason when the latest user turn strongly requests no tools."""
 
     if not isinstance(message, str) or not message.strip():
@@ -142,7 +141,7 @@ def detect_guide_only_turn(message: object) -> Optional[str]:
     return None
 
 
-def known_tool_names() -> Set[str]:
+def known_tool_names() -> set[str]:
     """Best-effort set of native tool names for prompt hiding and denylisting."""
 
     names = set(_COMMON_TOOL_NAMES)
@@ -162,7 +161,7 @@ def known_tool_names() -> Set[str]:
     except Exception:
         pass
     try:
-        from src.tool_security import PLAN_MODE_READONLY_TOOLS, _PLAN_MODE_KNOWN_MUTATORS
+        from src.tool_security import _PLAN_MODE_KNOWN_MUTATORS, PLAN_MODE_READONLY_TOOLS
 
         names.update(PLAN_MODE_READONLY_TOOLS)
         names.update(_PLAN_MODE_KNOWN_MUTATORS)
@@ -173,7 +172,7 @@ def known_tool_names() -> Set[str]:
 
 def build_effective_tool_policy(
     *,
-    disabled_tools: Optional[Iterable[str]] = None,
+    disabled_tools: Iterable[str] | None = None,
     last_user_message: object = "",
 ) -> ToolPolicy:
     """Compose the effective policy for one agent turn.
@@ -184,15 +183,15 @@ def build_effective_tool_policy(
     """
 
     disabled = {str(t) for t in (disabled_tools or []) if t}
-    hidden: Set[str] = set()
-    reasons = {tool: "Tool is disabled for this request." for tool in disabled}
+    hidden: set[str] = set()
+    reasons = dict.fromkeys(disabled, "Tool is disabled for this request.")
 
     guide_reason = detect_guide_only_turn(last_user_message)
     if guide_reason:
         all_tools = known_tool_names()
         disabled.update(all_tools)
         hidden.update(all_tools)
-        reasons.update({tool: f"{guide_reason}." for tool in all_tools})
+        reasons.update(dict.fromkeys(all_tools, f"{guide_reason}."))
         return ToolPolicy(
             disabled_tools=frozenset(disabled),
             hidden_tools=frozenset(hidden),

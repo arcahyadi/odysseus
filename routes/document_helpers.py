@@ -5,39 +5,43 @@
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 from core.database import Document, DocumentVersion
 from core.database import Session as DbSession
-from src.upload_handler import UploadHandler
+from src.auth_helpers import _auth_disabled
 
 logger = logging.getLogger(__name__)
 
 
 # ---- Request schemas ----
 
+
 class DocumentCreate(BaseModel):
-    session_id: Optional[str] = None
+    session_id: str | None = None
     title: str = "Untitled"
-    language: Optional[str] = None
+    language: str | None = None
     content: str = ""
+
 
 class DocumentUpdate(BaseModel):
     content: str
-    summary: Optional[str] = None
+    summary: str | None = None
+
 
 class DocumentPatch(BaseModel):
-    title: Optional[str] = None
-    language: Optional[str] = None
-    session_id: Optional[str] = None  # link/unlink document to a session
+    title: str | None = None
+    language: str | None = None
+    session_id: str | None = None  # link/unlink document to a session
 
 
 # ---- Helpers ----
 
-def _doc_to_dict(doc: Document) -> Dict[str, Any]:
+
+def _doc_to_dict(doc: Document) -> dict[str, Any]:
     return {
         "id": doc.id,
         "session_id": doc.session_id,
@@ -51,13 +55,14 @@ def _doc_to_dict(doc: Document) -> Dict[str, Any]:
         "updated_at": (doc.updated_at.isoformat() + "Z") if doc.updated_at else None,
         # Source-email provenance (set when doc was created from an email
         # attachment) — drives the "Send signed reply" menu item.
-        "source_email_uid":        getattr(doc, "source_email_uid", None),
-        "source_email_folder":     getattr(doc, "source_email_folder", None),
+        "source_email_uid": getattr(doc, "source_email_uid", None),
+        "source_email_folder": getattr(doc, "source_email_folder", None),
         "source_email_account_id": getattr(doc, "source_email_account_id", None),
         "source_email_message_id": getattr(doc, "source_email_message_id", None),
     }
 
-def _version_to_dict(v: DocumentVersion) -> Dict[str, Any]:
+
+def _version_to_dict(v: DocumentVersion) -> dict[str, Any]:
     return {
         "id": v.id,
         "document_id": v.document_id,
@@ -78,6 +83,8 @@ def _verify_doc_owner(db, doc: Document, user: str):
     the session join for any not-yet-backfilled legacy row.
     """
     if user is None:
+        if _auth_disabled():
+            return  # Single-user / no-auth mode: allow access
         raise HTTPException(403, "Authentication required")
     if doc.owner is not None:
         if doc.owner != user:
@@ -104,12 +111,10 @@ def _owner_session_filter(q, user):
     by the time this filter is live there are no NULL-owner rows to leak;
     we therefore match the owner strictly for authenticated callers."""
     if not user:
-        from src.auth_helpers import _auth_disabled
         if user == "" or _auth_disabled():
             return q
         return q.filter(False)
     return q.filter(Document.owner == user)
-
 
 
 def _slug(name: str) -> str:
@@ -119,12 +124,13 @@ def _slug(name: str) -> str:
     Preserves letters, digits, dot, hyphen, underscore. Idempotent.
     """
     import re as _re
+
     s = (name or "").strip()
     # Drop the trailing extension if the title happens to include one
-    s = _re.sub(r'\.pdf$', '', s, flags=_re.IGNORECASE)
-    s = _re.sub(r'\s+', '_', s)
-    s = _re.sub(r'[^A-Za-z0-9._-]', '', s)
-    s = _re.sub(r'_+', '_', s).strip('_')
+    s = _re.sub(r"\.pdf$", "", s, flags=_re.IGNORECASE)
+    s = _re.sub(r"\s+", "_", s)
+    s = _re.sub(r"[^A-Za-z0-9._-]", "", s)
+    s = _re.sub(r"_+", "_", s).strip("_")
     return s or "form"
 
 
@@ -144,9 +150,9 @@ def _upload_path_inside(upload_dir: str, path: str) -> bool:
 def _resolve_user_upload_path(
     upload_handler: Any,
     upload_id: str,
-    owner: Optional[str],
+    owner: str | None,
     auth_manager=None,
-) -> Optional[str]:
+) -> str | None:
     """Resolve an upload id to a filesystem path the caller may read."""
     if upload_handler is None:
         return None
@@ -168,7 +174,7 @@ def _resolve_user_upload_path(
 def _locate_upload(
     upload_dir: str,
     file_id: str,
-    owner: Optional[str] = None,
+    owner: str | None = None,
     auth_manager=None,
     upload_handler: Any = None,
 ):
@@ -184,7 +190,7 @@ def _locate_upload(
 def _assert_pdf_marker_upload_owned(
     request: Request,
     content: str,
-    user: Optional[str],
+    user: str | None,
     upload_handler: Any,
 ) -> None:
     """Reject document content whose pdf_source marker points at another user's upload."""
@@ -205,7 +211,6 @@ def _assert_pdf_marker_upload_owned(
 
 def _derive_title(content: str) -> str:
     """Derive a title from document content."""
-    import re
     if not isinstance(content, str):
         return "Untitled"
     text = content.strip()
@@ -213,7 +218,7 @@ def _derive_title(content: str) -> str:
         return "Untitled"
 
     # Markdown header
-    md = re.match(r'^#{1,3}\s+(.+)', text, re.MULTILINE)
+    md = re.match(r"^#{1,3}\s+(.+)", text, re.MULTILINE)
     if md:
         title = md.group(1).strip()
         if len(title) > 50:
@@ -221,7 +226,7 @@ def _derive_title(content: str) -> str:
         return title
 
     # HTML heading
-    html = re.search(r'<h[1-3][^>]*>([^<]+)</h[1-3]>', text, re.IGNORECASE)
+    html = re.search(r"<h[1-3][^>]*>([^<]+)</h[1-3]>", text, re.IGNORECASE)
     if html:
         title = html.group(1).strip()
         if len(title) > 50:
@@ -229,10 +234,10 @@ def _derive_title(content: str) -> str:
         return title
 
     # First non-empty line (if short enough)
-    for line in text.split('\n'):
+    for line in text.split("\n"):
         line = line.strip()
         if line and 2 <= len(line) <= 60:
-            title = re.sub(r'[:#*`]+$', '', line).strip()
+            title = re.sub(r"[:#*`]+$", "", line).strip()
             if title and len(title) > 50:
                 title = title[:48] + "…"
             return title or "Untitled"

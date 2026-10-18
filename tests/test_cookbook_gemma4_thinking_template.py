@@ -6,6 +6,7 @@ thought channel. Cookbook serve commands should supply that template for
 OpenAI-compatible servers instead of relying on a generic chat template that
 cannot toggle thinking mode.
 """
+
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "static/js/cookbook.js"

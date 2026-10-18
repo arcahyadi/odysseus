@@ -8,11 +8,11 @@ import json
 import logging
 import socket
 import subprocess
-from typing import Optional, Tuple, Dict
 from urllib.parse import urlparse, urlunparse
 
-from core.database import SessionLocal, ModelEndpoint
-from src.llm_core import _detect_provider, _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT, _ollama_api_root
+import uuid
+from core.database import ModelEndpoint, SessionLocal
+from src.llm_core import KIMI_CODE_USER_AGENT, _detect_provider, _host_match, _is_kimi_code_url, _ollama_api_root
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +22,25 @@ logger = logging.getLogger(__name__)
 # `text-embedding-ada-002` first, which silently broke email-summarize and
 # other resolve_endpoint callers with "Cannot reach model").
 _NON_CHAT_MODEL = (
-    "text-embedding", "embedding", "tts-", "whisper", "dall-e",
-    "moderation", "rerank", "reranker", "clip", "stable-diffusion",
+    "text-embedding",
+    "embedding",
+    "tts-",
+    "whisper",
+    "dall-e",
+    "moderation",
+    "rerank",
+    "reranker",
+    "clip",
+    "stable-diffusion",
 )
 
 
-def _first_chat_model(models) -> Optional[str]:
+def _first_chat_model(models) -> str | None:
     """First model that isn't an embedding/tts/etc.; falls back to models[0]."""
-    for m in (models or []):
+    for m in models or []:
         if not any(p in str(m).lower() for p in _NON_CHAT_MODEL):
             return m
-    return (models[0] if models else None)
+    return models[0] if models else None
 
 
 def _endpoint_cached_models(ep) -> list:
@@ -70,7 +78,7 @@ def _endpoint_enabled_models(ep) -> list:
     return [m for m in _endpoint_cached_models(ep) if m not in hidden]
 
 
-def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Optional[str]]:
+def resolve_endpoint_runtime(ep, owner: str | None = None) -> tuple[str, str | None]:
     """Resolve a ModelEndpoint row to its runtime base URL and bearer/API key.
 
     Static-key providers use ``ModelEndpoint.api_key``. Session-backed providers
@@ -90,10 +98,10 @@ def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Opti
 
 
 # Cache for Tailscale hostname → IP resolution
-_tailscale_cache: Dict[str, Optional[str]] = {}
+_tailscale_cache: dict[str, str | None] = {}
 
 
-def _resolve_tailscale_host(hostname: str) -> Optional[str]:
+def _resolve_tailscale_host(hostname: str) -> str | None:
     """Try to resolve a hostname via 'tailscale status' if DNS fails."""
     if hostname in _tailscale_cache:
         return _tailscale_cache[hostname]
@@ -109,11 +117,11 @@ def _resolve_tailscale_host(hostname: str) -> Optional[str]:
     # DNS failed — try tailscale
     try:
         result = subprocess.run(
-            ["tailscale", "status", "--json"],
-            capture_output=True, text=True, timeout=5
+            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5, check=False
         )
         if result.returncode == 0:
             import json as _json
+
             data = _json.loads(result.stdout)
             peers = data.get("Peer", {})
             for _id, peer in peers.items():
@@ -210,7 +218,7 @@ def build_chat_url(base: str) -> str:
     return _append_endpoint_path(base, "/chat/completions")
 
 
-def build_models_url(base: str) -> Optional[str]:
+def build_models_url(base: str) -> str | None:
     """Return the provider-specific model-list endpoint URL for a base.
 
     For OpenAI-compatible servers (LM Studio, llama.cpp, vLLM,
@@ -242,10 +250,10 @@ def build_models_url(base: str) -> Optional[str]:
     return _append_endpoint_path(base, "/models")
 
 
-def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
+def build_headers(api_key: str | None, base: str) -> dict[str, str]:
     """Build auth headers for an endpoint."""
     provider = _detect_provider(base)
-    headers: Dict[str, str] = {}
+    headers: dict[str, str] = {}
     if provider == "anthropic":
         if api_key:
             headers["x-api-key"] = api_key
@@ -253,9 +261,11 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
         return headers
     if provider == "copilot":
         from src.copilot import copilot_headers
+
         return copilot_headers(api_key)
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import chatgpt_headers
+
         return chatgpt_headers(api_key)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -269,11 +279,11 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
 
 def resolve_endpoint(
     setting_prefix: str,
-    fallback_url: Optional[str] = None,
-    fallback_model: Optional[str] = None,
-    fallback_headers: Optional[Dict] = None,
-    owner: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
+    fallback_url: str | None = None,
+    fallback_model: str | None = None,
+    fallback_headers: dict | None = None,
+    owner: str | None = None,
+) -> tuple[str | None, str | None, dict | None]:
     """Resolve an endpoint/model from settings, with fallback.
 
     Args:
@@ -288,11 +298,13 @@ def resolve_endpoint(
     """
     try:
         from src.settings import get_user_setting, load_settings
+
         settings = load_settings()
     except Exception:
         return fallback_url, fallback_model, fallback_headers
 
     owner_str = owner or ""
+
     def _stg(key: str) -> str:
         return (get_user_setting(key, owner_str, settings.get(key, "")) or "").strip()
 
@@ -327,6 +339,7 @@ def resolve_endpoint(
         )
         if owner:
             from src.auth_helpers import owner_filter
+
             ep = owner_filter(ep, ModelEndpoint, owner).first()
         else:
             ep = ep.first()
@@ -351,7 +364,7 @@ def resolve_endpoint(
         if not model:
             model = _first_chat_model(_endpoint_enabled_models(ep)) or ""
         if not model and not fallback_model:
-            logger.warning('[resolve_endpoint] no usable model (all models hidden or list empty)')
+            logger.warning("[resolve_endpoint] no usable model (all models hidden or list empty)")
 
         return chat_url, model or fallback_model, headers
     except Exception as e:
@@ -362,8 +375,8 @@ def resolve_endpoint(
 
 
 def resolve_endpoint_by_id(
-    ep_id: str, model: Optional[str] = None, owner: Optional[str] = None
-) -> Optional[Tuple[str, str, Dict]]:
+    ep_id: str, model: str | None = None, owner: str | None = None
+) -> tuple[str, str, dict] | None:
     """Resolve a specific endpoint id (+ optional model) to (chat_url, model, headers).
 
     Returns None if the endpoint doesn't exist or is disabled. Used to turn
@@ -379,6 +392,7 @@ def resolve_endpoint_by_id(
         )
         if owner:
             from src.auth_helpers import owner_filter
+
             q = owner_filter(q, ModelEndpoint, owner)
         ep = q.first()
         if not ep:
@@ -407,7 +421,7 @@ def resolve_endpoint_by_id(
         db.close()
 
 
-def resolve_chat_fallback_candidates(owner: Optional[str] = None) -> list:
+def resolve_chat_fallback_candidates(owner: str | None = None) -> list:
     """Build the configured default-chat fallback chain as a list of
     (chat_url, model, headers) tuples, skipping any that can't resolve.
 
@@ -417,14 +431,20 @@ def resolve_chat_fallback_candidates(owner: Optional[str] = None) -> list:
     return _resolve_fallback_candidates("default_model_fallbacks", owner=owner)
 
 
-def resolve_utility_fallback_candidates(owner: Optional[str] = None) -> list:
+def resolve_utility_fallback_candidates(owner: str | None = None) -> list:
     """Configured fallback chain for the Utility model (`utility_model_fallbacks`)."""
     try:
         from src.settings import get_user_setting, load_settings
+
         settings = load_settings()
-        utility_ep = (get_user_setting("utility_endpoint_id", owner or "", settings.get("utility_endpoint_id", "")) or "").strip()
+        utility_ep = (
+            get_user_setting("utility_endpoint_id", owner or "", settings.get("utility_endpoint_id", "")) or ""
+        ).strip()
         if not utility_ep:
-            utility_chain = get_user_setting("utility_model_fallbacks", owner or "", settings.get("utility_model_fallbacks") or []) or []
+            utility_chain = (
+                get_user_setting("utility_model_fallbacks", owner or "", settings.get("utility_model_fallbacks") or [])
+                or []
+            )
             if utility_chain:
                 return _resolve_fallback_candidates("utility_model_fallbacks", owner=owner)
             return _resolve_fallback_candidates("default_model_fallbacks", owner=owner)
@@ -433,15 +453,16 @@ def resolve_utility_fallback_candidates(owner: Optional[str] = None) -> list:
     return _resolve_fallback_candidates("utility_model_fallbacks", owner=owner)
 
 
-def resolve_vision_fallback_candidates(owner: Optional[str] = None) -> list:
+def resolve_vision_fallback_candidates(owner: str | None = None) -> list:
     """Configured fallback chain for the Vision model (`vision_model_fallbacks`)."""
     return _resolve_fallback_candidates("vision_model_fallbacks", owner=owner)
 
 
-def _resolve_fallback_candidates(setting_key: str, owner: Optional[str] = None) -> list:
+def _resolve_fallback_candidates(setting_key: str, owner: str | None = None) -> list:
     out = []
     try:
         from src.settings import get_user_setting, load_settings
+
         settings = load_settings()
         chain = get_user_setting(setting_key, owner or "", settings.get(setting_key) or []) or []
     except Exception:
@@ -453,3 +474,60 @@ def _resolve_fallback_candidates(setting_key: str, owner: Optional[str] = None) 
         if resolved:
             out.append(resolved)
     return out
+
+# ============================================================================
+# MOD-3 — Infrastructure cache unifiée
+# ============================================================================
+
+
+
+def register_endpoint(name: str, config: dict) -> None:
+    """Enregistre un nouvel endpoint via l'API unifiée (MOD-3).
+    
+    C'est LE point unique pour enregistrer un endpoint. Tous les modules
+    doivent déléguer à cette fonction pour éviter la duplication de logique.
+    
+    Args:
+        name: Nom d'affichage de l'endpoint
+        config: Dict avec keys: type, base_url, model, api_key (optionnel), 
+                is_enabled (default True), owner (optionnel)
+    """
+    from core.database import ModelEndpoint, SessionLocal
+    from src.auth_helpers import owner_filter
+    
+    db = SessionLocal()
+    try:
+        # Check if already exists (by name)
+        existing = db.query(ModelEndpoint).filter(
+            ModelEndpoint.name == name,
+            ModelEndpoint.is_enabled == True
+        ).first()
+        if existing:
+            # Update existing
+            ep = existing
+        else:
+            ep = ModelEndpoint()
+            db.add(ep)
+        
+        ep.id = str(uuid.uuid4())
+        ep.name = name
+        ep.base_url = config.get("base_url", "")
+        ep.api_key = config.get("api_key", "")
+        ep.cached_models = config.get("model", "")
+        ep.is_enabled = config.get("is_enabled", True)
+        ep.provider = config.get("type", "local")
+        
+        if "owner" in config:
+            from src.auth_helpers import get_owner_id
+            ep.owner_id = get_owner_id(config["owner"])
+        
+        db.commit()
+        # Invalider les caches
+        _reset_caches()
+    finally:
+        db.close()
+
+def _reset_caches() -> None:
+    """Vide tous les caches de ce module. Appelé par les tests pour isoler."""
+    global _tailscale_cache
+    _tailscale_cache.clear()

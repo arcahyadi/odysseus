@@ -41,8 +41,9 @@ import concurrent.futures
 import logging
 import socket
 import ssl
-import time
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from datetime import UTC
+from typing import Any
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -80,11 +81,11 @@ _ERROR_DETAIL = {
 }
 
 
-def _svc(name: str, status: str, detail: str, **meta: Any) -> Dict[str, Any]:
+def _svc(name: str, status: str, detail: str, **meta: Any) -> dict[str, Any]:
     return {"name": name, "status": status, "detail": detail, "meta": dict(meta)}
 
 
-def _safe_url(url: Optional[str]) -> str:
+def _safe_url(url: str | None) -> str:
     """Strip credentials (userinfo), query, and fragment from a URL.
 
     Keeps scheme / host / port / path so the report is still useful, but never
@@ -113,17 +114,15 @@ def _classify_error(exc: BaseException) -> str:
     Never returns `str(exc)` — httpx/imaplib exception text can embed the target
     URL (which may carry credentials) or server-supplied detail.
     """
-    if isinstance(exc, (asyncio.TimeoutError, concurrent.futures.TimeoutError,
-                        TimeoutError, socket.timeout)):
+    if isinstance(exc, (asyncio.TimeoutError, concurrent.futures.TimeoutError, TimeoutError, socket.timeout)):
         return "timeout"
     name = type(exc).__name__
-    mod = (type(exc).__module__ or "")
+    mod = type(exc).__module__ or ""
     if isinstance(exc, ssl.SSLError) or "SSL" in name or "Certificate" in name:
         return "tls_error"
     if isinstance(exc, socket.gaierror) or name in ("gaierror", "herror"):
         return "dns_error"
-    if isinstance(exc, ConnectionRefusedError) or "ConnectionRefused" in name \
-            or name in ("ConnectError",):
+    if isinstance(exc, ConnectionRefusedError) or "ConnectionRefused" in name or name in ("ConnectError",):
         return "connection_refused"
     if "Timeout" in name:
         return "timeout"
@@ -131,9 +130,17 @@ def _classify_error(exc: BaseException) -> str:
         return "auth_or_protocol_error"
     if name == "HTTPStatusError":
         return "http_error"
-    if name in ("ConnectTimeout", "ReadTimeout", "ReadError", "WriteError",
-                "PoolTimeout", "RemoteProtocolError", "NetworkError",
-                "ProxyError", "ProtocolError"):
+    if name in (
+        "ConnectTimeout",
+        "ReadTimeout",
+        "ReadError",
+        "WriteError",
+        "PoolTimeout",
+        "RemoteProtocolError",
+        "NetworkError",
+        "ProxyError",
+        "ProtocolError",
+    ):
         return "network_error"
     if isinstance(exc, OSError):
         return "network_error"
@@ -147,12 +154,17 @@ def _detail_for(category: str) -> str:
 def _http_get(url: str, timeout: float = _PROBE_TIMEOUT):
     """Single network entry point for the HTTP probes (monkeypatched in tests)."""
     import httpx
+
     return httpx.get(url, timeout=timeout)
 
 
-def _bounded_map(items: List[Any], worker: Callable[[int, Any], Dict[str, Any]],
-                 *, budget: float = _FANOUT_BUDGET,
-                 concurrency: int = _PROBE_CONCURRENCY) -> List[Optional[Dict[str, Any]]]:
+def _bounded_map(
+    items: list[Any],
+    worker: Callable[[int, Any], dict[str, Any]],
+    *,
+    budget: float = _FANOUT_BUDGET,
+    concurrency: int = _PROBE_CONCURRENCY,
+) -> list[dict[str, Any] | None]:
     """Run ``worker(index, item)`` across a bounded thread pool, in order.
 
     `worker` must catch its own exceptions and return a per-item dict. Any item
@@ -162,7 +174,7 @@ def _bounded_map(items: List[Any], worker: Callable[[int, Any], Dict[str, Any]],
     timeout reaps them shortly after.
     """
     n = len(items)
-    out: List[Optional[Dict[str, Any]]] = [None] * n
+    out: list[dict[str, Any] | None] = [None] * n
     if n == 0:
         return out
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(concurrency, n)))
@@ -183,7 +195,8 @@ def _bounded_map(items: List[Any], worker: Callable[[int, Any], Dict[str, Any]],
 
 # ── ChromaDB (vector RAG + vector memory) ──
 
-def chromadb_health(rag_manager: Any, memory_vector: Any) -> Dict[str, Any]:
+
+def chromadb_health(rag_manager: Any, memory_vector: Any) -> dict[str, Any]:
     """Report on the two ChromaDB-backed stores via their `.healthy` flags.
 
     Both absent  → disabled (Chroma/embeddings not installed or off).
@@ -192,82 +205,103 @@ def chromadb_health(rag_manager: Any, memory_vector: Any) -> Dict[str, Any]:
     rag_present = rag_manager is not None
     mem_present = memory_vector is not None
     if not rag_present and not mem_present:
-        return _svc("chromadb", DISABLED,
-                    "Vector RAG and vector memory are not initialized.",
-                    rag=None, memory=None)
+        return _svc("chromadb", DISABLED, "Vector RAG and vector memory are not initialized.", rag=None, memory=None)
 
     rag_ok = bool(rag_present and getattr(rag_manager, "healthy", False))
     mem_ok = bool(mem_present and getattr(memory_vector, "healthy", False))
-    meta = {"rag": rag_ok if rag_present else None,
-            "memory": mem_ok if mem_present else None}
+    meta = {"rag": rag_ok if rag_present else None, "memory": mem_ok if mem_present else None}
 
-    healthy = [ok for ok in (rag_ok if rag_present else None,
-                             mem_ok if mem_present else None) if ok is not None]
+    healthy = [ok for ok in (rag_ok if rag_present else None, mem_ok if mem_present else None) if ok is not None]
     if healthy and all(healthy):
         return _svc("chromadb", OK, "Vector stores healthy.", **meta)
     if any(healthy):
-        return _svc("chromadb", DEGRADED,
-                    "One vector store is unavailable.", **meta)
+        return _svc("chromadb", DEGRADED, "One vector store is unavailable.", **meta)
     return _svc("chromadb", DOWN, "Vector stores are unavailable.", **meta)
+
+
+# ── Qdrant (opt-in vector backend) ──
+
+
+def qdrant_health() -> dict[str, Any]:
+    """Check Qdrant server connectivity.
+
+    Returns ok when ODYSSEUS_QDRANT is off (opt-in, not an error).
+    When on, probes the Qdrant HTTP port.
+    """
+    import os
+
+    val = os.getenv("ODYSSEUS_QDRANT", "off").strip().lower()
+    enabled = val in {"on", "1", "true", "yes"}
+    if not enabled:
+        return _svc("qdrant", DISABLED, "Qdrant is opt-in (ODYSSEUS_QDRANT=off).")
+    try:
+        import urllib.request
+
+        url = os.getenv("VECTOR_QDRANT_URL", "http://localhost:6333")
+        urllib.request.urlopen(f"{url}/collections", timeout=5).read(1)
+        return _svc("qdrant", OK, f"Qdrant reachable at {url}")
+    except Exception as exc:
+        return _svc("qdrant", DOWN, f"Qdrant unreachable: {exc}")
 
 
 # ── SearXNG ──
 
-def _searxng_instance(settings: Dict[str, Any]) -> str:
+
+def _searxng_instance(settings: dict[str, Any]) -> str:
     """Mirror src/search/providers.py:_get_search_instance precedence."""
     url = (settings.get("search_url") or "").strip()
     if url:
         return url.rstrip("/")
     from src.constants import SEARXNG_INSTANCE
+
     return SEARXNG_INSTANCE.rstrip("/")
 
 
-def searxng_health(settings: Dict[str, Any],
-                   *, http_get: Callable = _http_get) -> Dict[str, Any]:
+def searxng_health(settings: dict[str, Any], *, http_get: Callable = _http_get) -> dict[str, Any]:
     """Non-intrusive reachability probe for the configured SearXNG instance.
 
     Tries `/healthz` (2xx), falling back to the instance root (any non-5xx means
     the host answered). No search query is run. The configured instance is
     probed in full, but only its sanitized form is returned in `meta`.
     """
-    provider = (settings.get("search_provider") or "searxng")
+    provider = settings.get("search_provider") or "searxng"
     if provider != "searxng":
-        return _svc("searxng", DISABLED,
-                    f"Search provider is '{provider}', not SearXNG.",
-                    provider=provider)
+        return _svc("searxng", DISABLED, f"Search provider is '{provider}', not SearXNG.", provider=provider)
     instance = _searxng_instance(settings)
     if not instance:
         return _svc("searxng", DISABLED, "No SearXNG instance configured.")
     safe_instance = _safe_url(instance)
     last_category = "error"
-    for path, accept in (("/healthz", lambda c: 200 <= c < 300),
-                         ("/", lambda c: 0 < c < 500)):
+    for path, accept in (("/healthz", lambda c: 200 <= c < 300), ("/", lambda c: 0 < c < 500)):
         try:
             r = http_get(instance + path, timeout=_PROBE_TIMEOUT)
             code = getattr(r, "status_code", 0)
             if accept(code):
-                return _svc("searxng", OK, f"Reachable (HTTP {code}).",
-                            instance=safe_instance, probed=path, http_status=code)
+                return _svc(
+                    "searxng", OK, f"Reachable (HTTP {code}).", instance=safe_instance, probed=path, http_status=code
+                )
             last_category = "http_error"
         except Exception as e:  # connection refused, DNS, timeout, …
             last_category = _classify_error(e)
-    return _svc("searxng", DOWN, f"Unreachable ({_detail_for(last_category)}).",
-                instance=safe_instance, error=last_category)
+    return _svc(
+        "searxng", DOWN, f"Unreachable ({_detail_for(last_category)}).", instance=safe_instance, error=last_category
+    )
 
 
 # ── ntfy ──
 
-def _ntfy_integration(integrations: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+
+def _ntfy_integration(integrations: list[dict[str, Any]]) -> dict[str, Any] | None:
     """First enabled ntfy integration with a base_url (matches note_routes)."""
     for i in integrations or []:
-        if (i.get("preset") == "ntfy" and i.get("enabled", True)
-                and i.get("base_url")):
+        if i.get("preset") == "ntfy" and i.get("enabled", True) and i.get("base_url"):
             return i
     return None
 
 
-def ntfy_health(integrations: List[Dict[str, Any]], settings: Dict[str, Any],
-                *, http_get: Callable = _http_get) -> Dict[str, Any]:
+def ntfy_health(
+    integrations: list[dict[str, Any]], settings: dict[str, Any], *, http_get: Callable = _http_get
+) -> dict[str, Any]:
     """Non-intrusive ntfy probe via the server's built-in `/v1/health` route.
 
     No test notification is POSTed — `/v1/health` returns `{"healthy":true}`
@@ -277,31 +311,42 @@ def ntfy_health(integrations: List[Dict[str, Any]], settings: Dict[str, Any],
     channel = settings.get("reminder_channel") or "browser"
     intg = _ntfy_integration(integrations)
     if not intg:
-        return _svc("ntfy", DISABLED, "No ntfy integration configured.",
-                    reminder_channel=channel)
+        return _svc("ntfy", DISABLED, "No ntfy integration configured.", reminder_channel=channel)
     raw = (intg.get("base_url") or "").strip()
     parsed = urlparse(raw)
-    probe_base = (f"{parsed.scheme}://{parsed.netloc}"
-                  if parsed.scheme and parsed.netloc else raw.rstrip("/"))
+    probe_base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else raw.rstrip("/")
     safe_base = _safe_url(raw)
     try:
         r = http_get(probe_base + "/v1/health", timeout=_PROBE_TIMEOUT)
         code = getattr(r, "status_code", 0)
         if code and code < 500:
-            return _svc("ntfy", OK, f"Reachable (HTTP {code}).",
-                        base=safe_base, reminder_channel=channel, http_status=code)
-        return _svc("ntfy", DOWN, "Server returned an error response.",
-                    base=safe_base, reminder_channel=channel, error="http_error")
+            return _svc(
+                "ntfy", OK, f"Reachable (HTTP {code}).", base=safe_base, reminder_channel=channel, http_status=code
+            )
+        return _svc(
+            "ntfy",
+            DOWN,
+            "Server returned an error response.",
+            base=safe_base,
+            reminder_channel=channel,
+            error="http_error",
+        )
     except Exception as e:
         category = _classify_error(e)
-        return _svc("ntfy", DOWN, f"Unreachable ({_detail_for(category)}).",
-                    base=safe_base, reminder_channel=channel, error=category)
+        return _svc(
+            "ntfy",
+            DOWN,
+            f"Unreachable ({_detail_for(category)}).",
+            base=safe_base,
+            reminder_channel=channel,
+            error=category,
+        )
 
 
 # ── Email (IMAP) ──
 
-def email_health(accounts: List[Dict[str, Any]],
-                 *, connect: Optional[Callable] = None) -> Dict[str, Any]:
+
+def email_health(accounts: list[dict[str, Any]], *, connect: Callable | None = None) -> dict[str, Any]:
     """Try a short IMAP connect+logout per configured account, concurrently.
 
     All connect → ok. Some fail → degraded. All fail → down. No account
@@ -312,14 +357,14 @@ def email_health(accounts: List[Dict[str, Any]],
     if not accounts:
         return _svc("email", DISABLED, "No email accounts configured.")
     if connect is None:
-        from routes.email_helpers import _imap_connect
+        
         # Impose the service-health budget on the IMAP connect itself.
-        connect = lambda aid: _imap_connect(aid, timeout=_PROBE_TIMEOUT)  # noqa: E731
+        connect = lambda aid: _get_action("_imap_connect")(aid, timeout=_PROBE_TIMEOUT)  # noqa: E731
 
-    def _label(acc: Dict[str, Any]) -> str:
+    def _label(acc: dict[str, Any]) -> str:
         return acc.get("account_name") or acc.get("account_id") or "account"
 
-    def _check(_i: int, acc: Dict[str, Any]) -> Dict[str, Any]:
+    def _check(_i: int, acc: dict[str, Any]) -> dict[str, Any]:
         name = _label(acc)
         if not (acc.get("imap_host") or ""):
             return {"name": name, "ok": False, "error": "no_host"}
@@ -333,18 +378,18 @@ def email_health(accounts: List[Dict[str, Any]],
         except Exception as e:
             return {"name": name, "ok": False, "error": _classify_error(e)}
 
-    raw = _bounded_map(accounts, _check, budget=_FANOUT_BUDGET,
-                       concurrency=_PROBE_CONCURRENCY)
-    per_account = [r if r is not None
-                   else {"name": _label(accounts[i]), "ok": False, "error": "timeout"}
-                   for i, r in enumerate(raw)]
+    raw = _bounded_map(accounts, _check, budget=_FANOUT_BUDGET, concurrency=_PROBE_CONCURRENCY)
+    per_account = [
+        r if r is not None else {"name": _label(accounts[i]), "ok": False, "error": "timeout"}
+        for i, r in enumerate(raw)
+    ]
     return _rollup_items("email", "mailbox(es)", per_account)
 
 
 # ── Provider endpoints ──
 
-def providers_health(endpoints: List[Dict[str, Any]],
-                     *, probe: Optional[Callable] = None) -> Dict[str, Any]:
+
+def providers_health(endpoints: list[dict[str, Any]], *, probe: Callable | None = None) -> dict[str, Any]:
     """Probe each enabled model endpoint's model list, concurrently.
 
     `endpoints` is a list of plain dicts ({name, base_url, api_key}) so this
@@ -356,34 +401,29 @@ def providers_health(endpoints: List[Dict[str, Any]],
     if not endpoints:
         return _svc("providers", DISABLED, "No model endpoints configured.")
     if probe is None:
-        from routes.model_routes import _probe_endpoint as probe
+        return _svc("providers", DISABLED, "No probe function provided.")
 
-    def _label(ep: Dict[str, Any]) -> str:
+    def _label(ep: dict[str, Any]) -> str:
         return ep.get("name") or _safe_url(ep.get("base_url")) or "endpoint"
 
-    def _check(_i: int, ep: Dict[str, Any]) -> Dict[str, Any]:
+    def _check(_i: int, ep: dict[str, Any]) -> dict[str, Any]:
         name = _label(ep)
         try:
-            models = probe(ep.get("base_url"), ep.get("api_key"),
-                           timeout=_PROBE_TIMEOUT) or []
+            models = _get_action("_probe_endpoint")(ep.get("base_url"), ep.get("api_key"), timeout=_PROBE_TIMEOUT) or []
         except Exception as e:
-            return {"name": name, "ok": False, "model_count": 0,
-                    "error": _classify_error(e)}
+            return {"name": name, "ok": False, "model_count": 0, "error": _classify_error(e)}
         count = len(models)
-        return {"name": name, "ok": bool(count), "model_count": count,
-                "error": None if count else "no_models"}
+        return {"name": name, "ok": bool(count), "model_count": count, "error": None if count else "no_models"}
 
-    raw = _bounded_map(endpoints, _check, budget=_FANOUT_BUDGET,
-                       concurrency=_PROBE_CONCURRENCY)
-    per_endpoint = [r if r is not None
-                    else {"name": _label(endpoints[i]), "ok": False,
-                          "model_count": 0, "error": "timeout"}
-                    for i, r in enumerate(raw)]
+    raw = _bounded_map(endpoints, _check, budget=_FANOUT_BUDGET, concurrency=_PROBE_CONCURRENCY)
+    per_endpoint = [
+        r if r is not None else {"name": _label(endpoints[i]), "ok": False, "model_count": 0, "error": "timeout"}
+        for i, r in enumerate(raw)
+    ]
     return _rollup_items("providers", "endpoint(s)", per_endpoint, key="endpoints")
 
 
-def _rollup_items(name: str, noun: str, items: List[Dict[str, Any]],
-                  key: str = "accounts") -> Dict[str, Any]:
+def _rollup_items(name: str, noun: str, items: list[dict[str, Any]], key: str = "accounts") -> dict[str, Any]:
     """Shared ok/degraded/down rollup for a list of per-item probe results."""
     total = len(items)
     ok_count = sum(1 for it in items if it.get("ok"))
@@ -398,7 +438,8 @@ def _rollup_items(name: str, noun: str, items: List[Dict[str, Any]],
 
 # ── Aggregate ──
 
-def _rollup(services: List[Dict[str, Any]]) -> str:
+
+def _rollup(services: list[dict[str, Any]]) -> str:
     worst = OK
     for s in services:
         sev = _SEVERITY.get(s.get("status"))
@@ -407,65 +448,63 @@ def _rollup(services: List[Dict[str, Any]]) -> str:
     return worst
 
 
-def _gather_inputs() -> Dict[str, Any]:
+def _gather_inputs() -> dict[str, Any]:
     """Pull live config/account/endpoint lists from the app's data sources.
 
     Each lookup fails soft: a broken source yields an empty/neutral value so a
     single failure can't take down the whole health report.
     """
-    settings: Dict[str, Any] = {}
-    integrations: List[Dict[str, Any]] = []
-    accounts: List[Dict[str, Any]] = []
-    endpoints: List[Dict[str, Any]] = []
+    settings: dict[str, Any] = {}
+    integrations: list[dict[str, Any]] = []
+    accounts: list[dict[str, Any]] = []
+    endpoints: list[dict[str, Any]] = []
     try:
         from src.settings import load_settings
+
         settings = load_settings() or {}
     except Exception as e:
         logger.debug(f"service_health: settings load failed: {e}")
     try:
         from src.integrations import load_integrations
+
         integrations = load_integrations() or []
     except Exception as e:
         logger.debug(f"service_health: integrations load failed: {e}")
     try:
-        from routes.email_helpers import _list_email_accounts
-        accounts = _list_email_accounts() or []
+        
+        accounts = _get_action("_list_email_accounts")() or []
     except Exception as e:
         logger.debug(f"service_health: email accounts load failed: {e}")
     try:
-        from core.database import SessionLocal, ModelEndpoint
+        from core.database import ModelEndpoint, SessionLocal
+
         db = SessionLocal()
         try:
-            rows = db.query(ModelEndpoint).filter(
-                ModelEndpoint.is_enabled == True).all()  # noqa: E712
-            endpoints = [{"name": r.name, "base_url": r.base_url,
-                          "api_key": r.api_key} for r in rows]
+            rows = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()  # noqa: E712
+            endpoints = [{"name": r.name, "base_url": r.base_url, "api_key": r.api_key} for r in rows]
         finally:
             db.close()
     except Exception as e:
         logger.debug(f"service_health: endpoint load failed: {e}")
-    return {"settings": settings, "integrations": integrations,
-            "accounts": accounts, "endpoints": endpoints}
+    return {"settings": settings, "integrations": integrations, "accounts": accounts, "endpoints": endpoints}
 
 
-async def _run_subsystem(name: str, fn: Callable, *args: Any) -> Dict[str, Any]:
+async def _run_subsystem(name: str, fn: Callable, *args: Any) -> dict[str, Any]:
     """Run one (sync) subsystem probe in a thread under a hard deadline.
 
     A subsystem that overruns `_SUBSYSTEM_DEADLINE` (or raises) becomes a
     controlled `down`/`timeout` entry instead of hanging or leaking the error.
     """
     try:
-        return await asyncio.wait_for(asyncio.to_thread(fn, *args),
-                                      timeout=_SUBSYSTEM_DEADLINE)
-    except asyncio.TimeoutError:
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout=_SUBSYSTEM_DEADLINE)
+    except TimeoutError:
         return _svc(name, DOWN, _detail_for("timeout"), error="timeout")
     except Exception as e:
         category = _classify_error(e)
         return _svc(name, DOWN, _detail_for(category), error=category)
 
 
-async def collect_service_health(rag_manager: Any = None,
-                                 memory_vector: Any = None) -> Dict[str, Any]:
+async def collect_service_health(rag_manager: Any = None, memory_vector: Any = None) -> dict[str, Any]:
     """Run every probe and return {overall, services, timestamp}.
 
     Bounded end-to-end: in-process ChromaDB flags are read synchronously; the
@@ -473,7 +512,7 @@ async def collect_service_health(rag_manager: Any = None,
     with an overall `_AGGREGATE_DEADLINE` backstop. Per-item probes inside
     providers/email are themselves bounded by `_FANOUT_BUDGET`.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     inputs = _gather_inputs()
     settings = inputs["settings"]
@@ -489,12 +528,10 @@ async def collect_service_health(rag_manager: Any = None,
         _run_subsystem("providers", providers_health, inputs["endpoints"]),
     ]
     try:
-        results = await asyncio.wait_for(asyncio.gather(*coros),
-                                         timeout=_AGGREGATE_DEADLINE)
-    except asyncio.TimeoutError:
+        results = await asyncio.wait_for(asyncio.gather(*coros), timeout=_AGGREGATE_DEADLINE)
+    except TimeoutError:
         # Hard backstop — should not normally fire given per-subsystem deadlines.
-        results = [_svc(n, DOWN, _detail_for("timeout"), error="timeout")
-                   for n in names]
+        results = [_svc(n, DOWN, _detail_for("timeout"), error="timeout") for n in names]
 
     services = [chroma, *results]
     return {
@@ -502,5 +539,5 @@ async def collect_service_health(rag_manager: Any = None,
         "services": services,
         # Timezone-aware UTC (…+00:00). Avoids the deprecated naive
         # datetime.utcnow() flagged in review (overlaps with #1116).
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }

@@ -4,8 +4,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
 from core.models import ChatMessage
-import routes.history_routes as history_routes
-import routes.session_routes as session_routes
+from routes import history_routes, session_routes
 
 
 class _FakeQuery:
@@ -86,10 +85,7 @@ class _FakeSession:
         self.message_count = len(history)
 
     def get_context_messages(self):
-        return [
-            msg.to_dict() if isinstance(msg, ChatMessage) else msg
-            for msg in self.history
-        ]
+        return [msg.to_dict() if isinstance(msg, ChatMessage) else msg for msg in self.history]
 
 
 def _compact_prompt_for(monkeypatch, history):
@@ -102,12 +98,10 @@ def _compact_prompt_for(monkeypatch, history):
     monkeypatch.setattr(history_routes, "_verify_session_owner", lambda request, session_id: None)
     monkeypatch.setattr(history_routes, "SessionLocal", lambda: _FakeDb())
 
-    import src.agent_runs as agent_runs
-    import src.endpoint_resolver as endpoint_resolver
-    import src.llm_core as llm_core
-    import src.model_context as model_context
+    from src import agent_runs, endpoint_resolver, llm_core, model_context
 
     monkeypatch.setattr(agent_runs, "is_active", lambda session_id: False)
+
     def fake_resolve_endpoint(kind, owner=None):
         captured.setdefault("resolve_calls", []).append((kind, owner))
         return None, None, {}
@@ -146,11 +140,10 @@ def _registered_compact_response(monkeypatch, history, active_run=False):
     monkeypatch.setattr(history_routes, "_verify_session_owner", lambda request, session_id: None)
     monkeypatch.setattr(history_routes, "SessionLocal", lambda: _FakeDb())
 
-    import src.agent_runs as agent_runs
-    import src.endpoint_resolver as endpoint_resolver
-    import src.llm_core as llm_core
+    from src import agent_runs, endpoint_resolver, llm_core
 
     monkeypatch.setattr(agent_runs, "is_active", lambda session_id: active_run)
+
     def fake_resolve_endpoint(kind, owner=None):
         captured.setdefault("resolve_calls", []).append((kind, owner))
         return None, None, {}
