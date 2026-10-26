@@ -327,7 +327,10 @@ To expose Odysseus on a local network or Tailscale with HTTPS:
 4. Install the `mkcert` CA on any other device you want to access Odysseus from (e.g., for iOS, email the `rootCA.pem` to yourself, install the profile, and trust it in Certificate Trust Settings).
 
 ### Common self-host traps (30-second fixes)
+
 A grab-bag of small gotchas that otherwise turn into long debugging sessions.
+The full list — including Cookbook / WSL2 / `tmux` / AVX2 / `sglang-kernel` /
+SSH host-key traps — lives at [docs/troubleshooting.md](troubleshooting.md).
 
 - **`AUTH_ENABLED=false` is ignored / you're still forced to log in (Windows).** If you edited `.env` in Notepad it may have saved a UTF-8 **BOM**, turning the first key into `﻿AUTH_ENABLED` so it is never matched. Odysseus loads `.env` with `encoding="utf-8-sig"` to tolerate a leading BOM, but the safe fix is to re-save `.env` as **UTF-8 without BOM** (VS Code: *Save with Encoding → UTF-8*).
 - **macOS: the app isn't at `http://localhost:7000`.** macOS AirPlay Receiver usually holds port `7000`, so the macOS start script serves on **`7860`** instead — open `http://localhost:7860`. To use `7000`, free it (System Settings → General → AirDrop & Handoff → turn off *AirPlay Receiver*) and set `APP_PORT=7000`.
@@ -382,6 +385,12 @@ Odysseus is a self-hosted workspace with powerful local tools: shell access, fil
 - Review `data/auth.json` after first boot: disable open signup unless you intentionally want it, make only your own account admin, and keep demo/test accounts non-admin.
 - Non-admin users do not get shell/Python/file read/write by default, and admin-only routes/tools such as MCP management, API tokens, webhooks, model/cookbook serving, backup/vault, and app settings are admin-gated. Other features are controlled by per-user privileges, so review each user's privileges before exposing a deployment.
 - Rotate any API keys or tokens that were ever pasted into a shared chat, demo, screenshot, or log.
+- **`ODYSSEUS_INTERNAL_TOKEN` is an admin-bypass header key.** Leave it
+  unset unless an external tool genuinely needs to hit admin-gated routes
+  via `X-Odysseus-Internal-Token` (the in-process agent loopback works
+  without it). Values under 32 chars or with less than 4 distinct
+  characters are rejected at import; a random token is generated instead.
+  If you do set one, treat it like a password and rotate if it leaks.
 - If you enable API tokens or webhooks, create separate tokens per integration and delete unused ones.
 - Prefer binding manual development runs to `127.0.0.1`; bind to `0.0.0.0` only when you intentionally want LAN/reverse-proxy access.
 - Keep ChromaDB, SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model/provider APIs internal-only. Expose only the authenticated Odysseus web/API entrypoint through your trusted proxy or private access layer.

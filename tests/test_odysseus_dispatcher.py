@@ -1,6 +1,18 @@
+import sys
+
+import pytest
+
 from tests.helpers.cli_loader import load_script
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "odysseus subcommands are POSIX shell scripts; on native Windows "
+        "os.access(X_OK) has no exec-bit semantics and subprocess.call on an "
+        "extension-less script cannot resolve a handler"
+    ),
+)
 def test_is_runnable_subcommand_requires_executable_file(tmp_path):
     cli = load_script("odysseus")
     sub = tmp_path / "odysseus-demo"

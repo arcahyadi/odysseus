@@ -203,7 +203,12 @@ DEFAULT_SETTINGS = {
 DEFAULT_FEATURES = {
     "web_search": True,
     "web_fetch": True,
-    "deep_research": False,
+    # Deep Research shipped in Phase 1 and is a headline feature; a fresh
+    # install should have its rail enabled out of the box. Existing installs
+    # keep whatever they set in data/features.json — load_features merges
+    # DEFAULT_FEATURES under the saved dict, so flipping this only affects
+    # first boot.
+    "deep_research": True,
     "memory": True,
     "document_editor": True,
     "rag": True,

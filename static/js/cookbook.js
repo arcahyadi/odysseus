@@ -2495,12 +2495,16 @@ function _wireTabEvents(body) {
         const r = await fetch(`/api/hwfit/system?${qp}`);
         if (r.ok) {
           const sys = await r.json();
-          const hw = { vram: sys?.gpu_vram_gb || 0, backend: String(sys?.backend || '').toLowerCase() };
+          const hw = {
+            vram: sys?.gpu_vram_gb || 0,
+            backend: String(sys?.backend || '').toLowerCase(),
+            host, sshPort, platform,
+          };
           _hwCache[cacheKey] = hw;
           return hw;
         }
       } catch {}
-      _hwCache[cacheKey] = { vram: 0, backend: '' };
+      _hwCache[cacheKey] = { vram: 0, backend: '', host, sshPort, platform };
       return _hwCache[cacheKey];
     }
     async function _loadLatest() {
@@ -2526,7 +2530,13 @@ function _wireTabEvents(body) {
       try {
         let lastErr = '';
         const _fetchLatest = async (v) => {
-          const res = await fetch(`/api/cookbook/hf-latest?vram_gb=${v}&limit=10`);
+          const qp = new URLSearchParams();
+          qp.set('vram_gb', String(v));
+          qp.set('limit', '10');
+          if (hwInfo.host) qp.set('host', hwInfo.host);
+          if (hwInfo.sshPort) qp.set('ssh_port', hwInfo.sshPort);
+          if (hwInfo.platform) qp.set('platform', hwInfo.platform);
+          const res = await fetch(`/api/cookbook/hf-latest?${qp}`);
           const data = await res.json();
           if (data.error) lastErr = data.error;   // HF API timeout/rate-limit etc.
           return data.models || [];

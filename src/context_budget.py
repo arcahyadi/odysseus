@@ -80,3 +80,57 @@ def budget_is_explicit(configured: int, *, default: int = DEFAULT_BUDGET) -> boo
     """
     configured = int(configured or 0)
     return configured > 0 and configured != default
+
+
+# ── Context-window driven tool-set tiering ──
+#
+# Small context windows cannot carry the full agent prompt AND a wide tool
+# schema block. Retrieval `k` used to be hard-coded to 8 tools regardless of
+# model window, so a 4K model burned ~2K tokens on tool schemas before the
+# user's message even started. These helpers scale both the retrieval width
+# and the "always-available" fallback to what the discovered window can
+# actually hold.
+#
+# Thresholds (context_length in tokens):
+#   <  4096  → k=4,  small core set (ask_user, update_plan)
+#   <  8192  → k=5,  small core set (manage_memory still reachable via RAG)
+#   < 32768  → k=8,  full ALWAYS_AVAILABLE (today's behaviour)
+#   ≥ 32768  → k=12, full ALWAYS_AVAILABLE, richer retrieval
+TIER_SMALL_K = 4
+TIER_TIGHT_K = 5
+TIER_DEFAULT_K = 8
+TIER_LARGE_K = 12
+
+TIER_SMALL_MAX = 4096
+TIER_TIGHT_MAX = 8192
+TIER_LARGE_MIN = 32768
+
+
+def compute_tool_retrieval_k(context_length: int, *, default: int = TIER_DEFAULT_K) -> int:
+    """Return how many tools vector retrieval should surface for a given window.
+
+    Pure and side-effect free. ``context_length <= 0`` (window unknown or
+    probing failed) falls back to ``default`` — the conservative wide-8
+    behaviour pre-tiering shipped with, so an unprobed endpoint isn't
+    silently degraded.
+    """
+    ctx = _int_or_zero(context_length)
+    if ctx <= 0:
+        return default
+    if ctx < TIER_SMALL_MAX:
+        return TIER_SMALL_K
+    if ctx < TIER_TIGHT_MAX:
+        return TIER_TIGHT_K
+    if ctx < TIER_LARGE_MIN:
+        return TIER_DEFAULT_K
+    return TIER_LARGE_K
+
+
+def is_small_context_window(context_length: int, *, threshold: int = TIER_TIGHT_MAX) -> bool:
+    """True when the discovered window is too tight to carry the full
+    ALWAYS_AVAILABLE set alongside RAG results. Callers use this to swap
+    in the reduced small-context tool set as the base."""
+    ctx = _int_or_zero(context_length)
+    if ctx <= 0:
+        return False
+    return ctx < threshold

@@ -48,6 +48,9 @@ def _provider_label(url: str) -> str | None:
     # Known remote provider hosts are still labeled by host suffix.
     ("https://api.openai.com/v1",     "OpenAI"),
     ("https://api.groq.com/openai/v1","Groq"),
+    ("https://api.z.ai/api/paas/v4",  "Z.ai"),
+    ("https://opencode.ai/zen/v1",    "OpenCode Zen"),
+    ("https://ollama.com/v1",         "Ollama Cloud"),
     ("http://192.168.1.50:8080",      "Local"),      # private LAN: no port branding
 ])
 def test_provider_label_neutral_for_loopback(url, expected):

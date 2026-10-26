@@ -1381,6 +1381,70 @@ def _diagnose_serve_output(text: str) -> dict | None:
     return None
 
 
+def _diagnose_download_output(text: str) -> dict | None:
+    """Structured diagnosis for a failed model download task.
+
+    Mirrors `_diagnose_serve_output`'s contract (`{message, suggestions}` or
+    `None`) so the frontend's diagnosis panel can offer clickable repairs on
+    the download path too — before 2026-10-03 download failures surfaced
+    only as raw output tail text.
+    """
+    if not text:
+        return None
+    tail = text[-6000:]
+    patterns = [
+        (
+            r"No space left on device|ENOSPC|InsufficientStorage|Disk quota exceeded|os error 28",
+            "The target drive is out of space. Downloads pause but do not resume cleanly once the disk refills.",
+            [
+                {"label": "free space on this host, then rerun the download", "op": "manual"},
+                {"label": "pick a different local_dir on a bigger drive", "op": "settings", "field": "local_dir", "value": ""},
+            ],
+        ),
+        (
+            r"403 Forbidden|401 Unauthorized|Access to model .* is restricted|"
+            r"gated repo|not in the authorized list|awaiting a review|"
+            r"Invalid user token|token is invalid|Bad credentials",
+            "Hugging Face rejected the request — the repo is gated or the stored HF token is missing / invalid.",
+            [
+                {"label": "accept the model license on huggingface.co, then retry", "op": "manual"},
+                {"label": "set a HF token in Cookbook > Environment", "op": "settings", "field": "hf_token", "value": ""},
+            ],
+        ),
+        (
+            r"404 Client Error|Repository Not Found|Model not found|"
+            r"not a valid revision|Bad revision|Entry not found|"
+            r"Does not appear to have a file named",
+            "The repo id or filename (usually a quant tag) doesn't exist on Hugging Face.",
+            [
+                {"label": "double-check the exact repo id / filename on huggingface.co", "op": "manual"},
+                {"label": "for GGUF, prefer a `-GGUF` repo suffix and a common quant like Q4_K_M.gguf", "op": "manual"},
+            ],
+        ),
+        (
+            r"Max retries exceeded|Read timed out|Connection (?:reset by peer|aborted|refused)|"
+            r"NameResolutionError|SSLError|hf_transfer.*(?:error|failed|incomplete)|"
+            r"incomplete download|resumable_download|ChunkedEncodingError",
+            "The download was interrupted by a network or hf_transfer failure. Odysseus will retry on the next run.",
+            [
+                {"label": "retry the download", "op": "manual"},
+                {"label": "if this repeats, disable hf_transfer and let huggingface_hub resume in chunks", "op": "settings", "field": "hf_transfer", "value": "0"},
+            ],
+        ),
+    ]
+    for pattern, message, suggestions in patterns:
+        if re.search(pattern, tail, re.I):
+            return {"message": message, "suggestions": suggestions}
+    if re.search(r"Traceback \(most recent call last\)", tail, re.I):
+        return {
+            "message": "Python traceback during download.",
+            "suggestions": [
+                {"label": "inspect the traceback and retry with adjusted include/exclude patterns", "op": "manual"},
+            ],
+        }
+    return None
+
+
 async def run_ssh_command_async(
     remote: str,
     ssh_port: str | None,

@@ -1,14 +1,6 @@
 // static/js/slashCommands.js
 // Slash command handlers and dispatcher, extracted from chat.js
 
-window.cancelActiveTour = function cancelActiveTour() {
-  document.querySelectorAll('.odysseus-highlight, .odysseus-highlight-click')
-    .forEach(e => e.classList.remove('odysseus-highlight', 'odysseus-highlight-click'));
-  document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  document.getElementById('tour-tooltip')?.remove();
-  document.body?.classList.remove('tour-active');
-};
-
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
@@ -22,6 +14,10 @@ import settingsModule from './settings.js';
 import cookbookModule from './cookbook.js';
 import { EVAL_PROMPTS } from './compare/index.js';
 import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
+// Installing this module also registers `window.cancelActiveTour` (see the
+// bottom of tour-core.js), so multi-phase handlers can still call the global
+// teardown on modal-close without importing the function directly.
+import { ensureTourStyles, clearComposer, makeHalo, runTour } from './tour-core.js';
 
 // ── Module state ──────────────────────────────────────────────────────
 
@@ -2548,28 +2544,7 @@ async function _cmdTourCompare(args, ctx) {
     _msgEl.value = '';
     _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
+  ensureTourStyles();
 
   let overlay = document.getElementById('compare-model-overlay');
   if (!overlay) {
@@ -2831,28 +2806,7 @@ async function _cmdTourCookbook(args, ctx) {
   }
 
   // Idempotent tour-styles injection (shared with /tour and /tour-compare).
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
+  ensureTourStyles();
 
   // Open the cookbook modal if it's not already up.
   let modal = document.getElementById('cookbook-modal');
@@ -3049,1099 +3003,203 @@ async function _cmdTourCookbook(args, ctx) {
 
 // ── Theme tour ──
 async function _cmdTourTheme(args, ctx) {
-  // Clear the chat input so "/tour-theme" doesn't linger.
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
-  // Idempotent tour-styles injection (shared with other tours).
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  // Open the theme modal if it isn't already up. Same hamburger / rail
-  // opener pattern as the other tours.
-  let modal = document.getElementById('theme-modal');
-  if (!modal || modal.classList.contains('hidden')) {
-    const opener = document.getElementById('tool-theme-btn')
-      || document.getElementById('rail-theme')
-      || document.getElementById('open-theme-btn');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      modal = document.getElementById('theme-modal');
-      if (modal && !modal.classList.contains('hidden')) break;
-    }
-  }
-  if (!modal || modal.classList.contains('hidden')) {
-    slashReply('Could not open Theme. Try clicking the Theme tool first.');
-    return true;
-  }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    document.querySelectorAll('.odysseus-highlight').forEach(e => e.classList.remove('odysseus-highlight'));
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
+  const _clickTab = (m, tabId) => {
+    m?.querySelector('.admin-tab[data-tab="' + tabId + '"]')?.click();
   };
 
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  // Interactive step — show tooltip + halo over one or more targets and
-  // resolve 'next' when the user actually clicks one of the highlighted
-  // elements. Skip button still exits. `extraSel` (optional) adds a
-  // second highlight target whose click also advances the step.
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    const extraSel = opts.extraSel;
-    const interactive = !!opts.interactive;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      setTimeout(() => {
-        const target = document.querySelector(sel);
-        if (!target) return resolve('skip');
-        _halos.push(_makeHalo(target));
-        const extra = extraSel ? document.querySelector(extraSel) : null;
-        if (extra) _halos.push(_makeHalo(extra));
-        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-        tooltip.classList.remove('tour-fade-in');
-        tooltip.innerHTML =
-          '<div class="tour-text">' + text + '</div>' +
-          '<div class="tour-nav">' +
-            '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-            '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-            '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-          '</div>';
-        requestAnimationFrame(() => {
-          _positionTooltip(target, placement);
-          tooltip.classList.add('tour-fade-in');
-        });
-
-        let _onTarget;
-        const cleanup = () => {
-          tooltip.removeEventListener('click', onClick);
-          if (_onTarget) {
-            target.removeEventListener('click', _onTarget, true);
-            if (extra) extra.removeEventListener('click', _onTarget, true);
-          }
-        };
-        const onClick = (e) => {
-          const hit = e.target.closest && e.target.closest('[data-act]');
-          const act = hit && hit.dataset.act;
-          if (!act) return;
-          cleanup();
-          resolve(act);
-        };
-        tooltip.addEventListener('click', onClick);
-        // Interactive: clicking the highlighted target advances. We let
-        // the original click propagate so the user's real action (apply
-        // theme, switch tab, etc.) actually happens.
-        if (interactive) {
-          _onTarget = () => { cleanup(); resolve('next'); };
-          target.addEventListener('click', _onTarget, true);
-          if (extra) extra.addEventListener('click', _onTarget, true);
-        }
-      }, before ? 160 : 0);
-    });
-  }
-
-  // Clicks one of the theme modal's top-level tabs by data-tab id.
-  function _clickTab(tabId) {
-    const tab = modal.querySelector('.admin-tab[data-tab="' + tabId + '"]');
-    if (tab) tab.click();
-  }
-
-  // ── Steps ──
-  // Interactive flow: the user actually clicks each highlighted element
-  // to progress. Skip button exits at any point; arrow buttons still
-  // work as a fallback (read past without touching anything).
-  const steps = [
-    { sel: '#theme-popup',
-      text: '<b>Welcome to Theme.</b> Odysseus is yours to customize!',
-      placement: 'center-above',
-      before: () => _clickTab('theme-tab-browse') },
-    { sel: '#themeGrid',
-      text: 'Try a <b>default theme</b> — or build your own with <b>Customize</b>.',
-      extraSel: '#theme-tabs .admin-tab[data-tab="theme-tab-customize"]',
-      interactive: true },
-    { sel: '#theme-harmony-card',
-      text: 'Build a quick theme with <b>color harmony</b> — pick one accent color, hit Generate, and a matching palette falls out.',
-      before: () => _clickTab('theme-tab-customize'),
-      interactive: true },
-    { sel: '#themeCustom',
-      text: 'Want finer control? <b>Edit each color individually</b> here — the page updates live.',
-      before: () => _clickTab('theme-tab-customize'),
-      interactive: true },
-    { sel: '#theme-bg-pattern-select',
-      text: 'Add a <b>background animation</b> — rain, petals, constellations, sparkles, embers…',
-      before: () => _clickTab('theme-tab-customize'),
-      interactive: true },
-    { sel: '#theme-opacity-wrap',
-      text: '<b>Peek</b> fades this window so you can see the page behind it while you tweak.',
-      before: () => _clickTab('theme-tab-customize'),
-      interactive: true },
-  ];
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: i === steps.length - 1,
-      before: step.before,
-      placement: step.placement,
-      extraSel: step.extraSel,
-      interactive: step.interactive,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  _clear();
-  await typewriterReply('That’s Theme. Make it yours.');
-  return true;
+  // Interactive flow: the user actually clicks each highlighted element to
+  // progress. Skip button exits at any point; arrow buttons still work as a
+  // fallback (read past without touching anything).
+  return runTour({
+    modalId: 'theme-modal',
+    openerIds: ['tool-theme-btn', 'rail-theme', 'open-theme-btn'],
+    bailMessage: 'Could not open Theme. Try clicking the Theme tool first.',
+    steps: [
+      { sel: '#theme-popup',
+        text: '<b>Welcome to Theme.</b> Odysseus is yours to customize!',
+        placement: 'center-above',
+        before: (m) => _clickTab(m, 'theme-tab-browse') },
+      { sel: '#themeGrid',
+        text: 'Try a <b>default theme</b> — or build your own with <b>Customize</b>.',
+        extraSel: '#theme-tabs .admin-tab[data-tab="theme-tab-customize"]',
+        interactive: true },
+      { sel: '#theme-harmony-card',
+        text: 'Build a quick theme with <b>color harmony</b> — pick one accent color, hit Generate, and a matching palette falls out.',
+        before: (m) => _clickTab(m, 'theme-tab-customize'),
+        interactive: true },
+      { sel: '#themeCustom',
+        text: 'Want finer control? <b>Edit each color individually</b> here — the page updates live.',
+        before: (m) => _clickTab(m, 'theme-tab-customize'),
+        interactive: true },
+      { sel: '#theme-bg-pattern-select',
+        text: 'Add a <b>background animation</b> — rain, petals, constellations, sparkles, embers…',
+        before: (m) => _clickTab(m, 'theme-tab-customize'),
+        interactive: true },
+      { sel: '#theme-opacity-wrap',
+        text: '<b>Peek</b> fades this window so you can see the page behind it while you tweak.',
+        before: (m) => _clickTab(m, 'theme-tab-customize'),
+        interactive: true },
+    ],
+    doneText: 'That’s Theme. Make it yours.',
+    reply: slashReply,
+    done: typewriterReply,
+  });
 }
 
 // ── Settings tour ──
 async function _cmdTourSettings(args, ctx) {
-  // Clear the chat input so "/tour-settings" doesn't linger.
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
-  // Idempotent tour-styles injection.
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  // Open the settings modal.
-  let modal = document.getElementById('settings-modal');
-  if (!modal || modal.classList.contains('hidden')) {
-    const opener = document.getElementById('rail-settings')
-      || document.getElementById('tool-settings-btn');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      modal = document.getElementById('settings-modal');
-      if (modal && !modal.classList.contains('hidden')) break;
-    }
-  }
-  if (!modal || modal.classList.contains('hidden')) {
-    slashReply('Could not open Settings. Try clicking the gear icon first.');
-    return true;
-  }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    // Track the modal-enter scale animation (see task-tour notes).
-    const _tStart = performance.now();
-    let _rafId = 0;
-    const tick = () => {
-      update();
-      if (performance.now() - _tStart < 500) _rafId = requestAnimationFrame(tick);
-    };
-    _rafId = requestAnimationFrame(tick);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      if (_rafId) cancelAnimationFrame(_rafId);
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
+  const _clickNav = (m, tab) => {
+    m?.querySelector('.settings-nav-item[data-settings-tab="' + tab + '"]')?.click();
   };
 
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      setTimeout(() => {
-        const target = document.querySelector(sel);
-        if (!target) return resolve('skip');
-        _halos.push(_makeHalo(target));
-        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-        tooltip.classList.remove('tour-fade-in');
-        tooltip.innerHTML =
-          '<div class="tour-text">' + text + '</div>' +
-          '<div class="tour-nav">' +
-            '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-            '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-            '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-          '</div>';
-        requestAnimationFrame(() => {
-          _positionTooltip(target, placement);
-          tooltip.classList.add('tour-fade-in');
-        });
-
-        const onClick = (e) => {
-          const hit = e.target.closest && e.target.closest('[data-act]');
-          const act = hit && hit.dataset.act;
-          if (!act) return;
-          tooltip.removeEventListener('click', onClick);
-          resolve(act);
-        };
-        tooltip.addEventListener('click', onClick);
-      }, before ? 160 : 0);
-    });
-  }
-
-  function _clickNav(tab) {
-    const btn = modal.querySelector('.settings-nav-item[data-settings-tab="' + tab + '"]');
-    if (btn) btn.click();
-  }
-
-  const steps = [
-    { sel: '#settings-modal .modal-content',
-      text: '<b>Welcome to Settings.</b> HOW EXCITING.',
-      placement: 'center-above' },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="services"]',
-      text: '<b>Add Models</b> — add a local endpoint first, like Ollama, vLLM, or llama.cpp. Cloud providers are optional.',
-      before: () => _clickNav('services') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="ai"]',
-      text: '<b>AI Defaults</b> — three roles share the work. Let\'s walk through them.',
-      before: () => _clickNav('ai') },
-    { sel: '#settings-modal .admin-card:has(#set-defaultModelSelect)',
-      text: '<b>Default Chat Model</b> — your main model. The one Odysseus reaches for whenever you start a new chat.',
-      before: () => _clickNav('ai') },
-    { sel: '#settings-modal .admin-card:has(#set-utilityModelSelect)',
-      text: '<b>Utility Model</b> — your hard-working sidekick. Runs background tasks (compaction, cleanup, auto-naming, summarization) so your chat model doesn\'t burn cycles on chores. <b>Recommend a small local model</b> here — it\'s free and always on.',
-      before: () => _clickNav('ai') },
-    { sel: '#settings-modal .admin-card:has(#set-vlModelSelect)',
-      text: '<b>Vision</b> — powers any image-recognition feature: drop a photo in chat, ask what\'s in it, OCR, etc.',
-      before: () => _clickNav('ai') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="integrations"]',
-      text: '<b>Integrations</b> — wire up email, calendar, contacts here (per-account).',
-      before: () => _clickNav('integrations') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="search"]',
-      text: '<b>Search</b> — plug in your own search provider, or use the bundled <b>SearXNG</b> out of the box.',
-      before: () => _clickNav('search') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="appearance"]',
-      text: '<b>Appearance</b> — too many tools you don\'t need? Adjust them here! Toggle sidebar buttons, tool icons, and section visibility.',
-      before: () => _clickNav('appearance') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="email"]',
-      text: '<b>Email</b> — sync schedule, drafts, snooze defaults — everything email-flow related.',
-      before: () => _clickNav('email') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="reminders"]',
-      text: '<b>Reminders</b> — quiet hours and how Odysseus nudges you about calendar + urgent email.',
-      before: () => _clickNav('reminders') },
-  ];
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: i === steps.length - 1,
-      before: step.before,
-      placement: step.placement,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  // Land on the first tab so the user has a familiar starting point.
-  _clickNav('services');
-  _clear();
-  await typewriterReply('See? Not so bad. Tweak away.');
-  return true;
+  return runTour({
+    modalId: 'settings-modal',
+    openerIds: ['rail-settings', 'tool-settings-btn'],
+    bailMessage: 'Could not open Settings. Try clicking the gear icon first.',
+    haloTracksAppear: true,
+    steps: [
+      { sel: '#settings-modal .modal-content',
+        text: '<b>Welcome to Settings.</b> HOW EXCITING.',
+        placement: 'center-above' },
+      { sel: '#settings-modal .settings-nav-item[data-settings-tab="services"]',
+        text: '<b>Add Models</b> — add a local endpoint first, like Ollama, vLLM, or llama.cpp. Cloud providers are optional.',
+        before: (m) => _clickNav(m, 'services') },
+      { sel: '#settings-modal .settings-nav-item[data-settings-tab="ai"]',
+        text: '<b>AI Defaults</b> — three roles share the work. Let\'s walk through them.',
+        before: (m) => _clickNav(m, 'ai') },
+      { sel: '#settings-modal .admin-card:has(#set-defaultModelSelect)',
+        text: '<b>Default Chat Model</b> — your main model. The one Odysseus reaches for whenever you start a new chat.',
+        before: (m) => _clickNav(m, 'ai') },
+      { sel: '#settings-modal .admin-card:has(#set-utilityModelSelect)',
+        text: '<b>Utility Model</b> — your hard-working sidekick. Runs background tasks (compaction, cleanup, auto-naming, summarization) so your chat model doesn\'t burn cycles on chores. <b>Recommend a small local model</b> here — it\'s free and always on.',
+        before: (m) => _clickNav(m, 'ai') },
+      { sel: '#settings-modal .admin-card:has(#set-vlModelSelect)',
+        text: '<b>Vision</b> — powers any image-recognition feature: drop a photo in chat, ask what\'s in it, OCR, etc.',
+        before: (m) => _clickNav(m, 'ai') },
+      { sel: '#settings-modal .settings-nav-item[data-settings-tab="integrations"]',
+        text: '<b>Integrations</b> — wire up email, calendar, contacts here (per-account).',
+        before: (m) => _clickNav(m, 'integrations') },
+      { sel: '#settings-modal .settings-nav-item[data-settings-tab="search"]',
+        text: '<b>Search</b> — plug in your own search provider, or use the bundled <b>SearXNG</b> out of the box.',
+        before: (m) => _clickNav(m, 'search') },
+      { sel: '#settings-modal .settings-nav-item[data-settings-tab="appearance"]',
+        text: '<b>Appearance</b> — too many tools you don\'t need? Adjust them here! Toggle sidebar buttons, tool icons, and section visibility.',
+        before: (m) => _clickNav(m, 'appearance') },
+      { sel: '#settings-modal .settings-nav-item[data-settings-tab="email"]',
+        text: '<b>Email</b> — sync schedule, drafts, snooze defaults — everything email-flow related.',
+        before: (m) => _clickNav(m, 'email') },
+      { sel: '#settings-modal .settings-nav-item[data-settings-tab="reminders"]',
+        text: '<b>Reminders</b> — quiet hours and how Odysseus nudges you about calendar + urgent email.',
+        before: (m) => _clickNav(m, 'reminders') },
+    ],
+    // Land on the first tab so the user has a familiar starting point.
+    onFinish: (session) => _clickNav(session.modal, 'services'),
+    doneText: 'See? Not so bad. Tweak away.',
+    reply: slashReply,
+    done: typewriterReply,
+  });
 }
 
 // ── Gallery tour ──
 async function _cmdTourGallery(args, ctx) {
-  // Clear the chat input so "/tour-gallery" doesn't linger.
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-  try { localStorage.setItem('odysseus-notes-first-open-hint-v1', '1'); } catch (_) {}
-  document.getElementById('notes-first-open-hint')?.remove();
-
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  // Open the gallery modal.
-  let modal = document.getElementById('gallery-modal');
-  if (!modal || modal.classList.contains('hidden')) {
-    const opener = document.getElementById('tool-gallery-btn')
-      || document.getElementById('rail-gallery');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      modal = document.getElementById('gallery-modal');
-      if (modal && !modal.classList.contains('hidden')) break;
-    }
-  }
-  if (!modal || modal.classList.contains('hidden')) {
-    slashReply('Could not open Gallery. Try clicking the Gallery tool first.');
-    return true;
-  }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    const _tStart = performance.now();
-    let _rafId = 0;
-    const tick = () => {
-      update();
-      if (performance.now() - _tStart < 500) _rafId = requestAnimationFrame(tick);
-    };
-    _rafId = requestAnimationFrame(tick);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      if (_rafId) cancelAnimationFrame(_rafId);
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
+  const _clickTab = (m, tab) => {
+    m?.querySelector('.gallery-tab[data-tab="' + tab + '"]')?.click();
   };
 
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      setTimeout(() => {
-        const target = document.querySelector(sel);
-        if (!target) return resolve('skip');
-        _halos.push(_makeHalo(target));
-        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-        tooltip.classList.remove('tour-fade-in');
-        tooltip.innerHTML =
-          '<div class="tour-text">' + text + '</div>' +
-          '<div class="tour-nav">' +
-            '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-            '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-            '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-          '</div>';
-        requestAnimationFrame(() => {
-          _positionTooltip(target, placement);
-          tooltip.classList.add('tour-fade-in');
-        });
-
-        const onClick = (e) => {
-          const hit = e.target.closest && e.target.closest('[data-act]');
-          const act = hit && hit.dataset.act;
-          if (!act) return;
-          tooltip.removeEventListener('click', onClick);
-          resolve(act);
-        };
-        tooltip.addEventListener('click', onClick);
-      }, before ? 160 : 0);
-    });
-  }
-
-  function _clickTab(tab) {
-    const btn = modal.querySelector('.gallery-tab[data-tab="' + tab + '"]');
-    if (btn) btn.click();
-  }
-
-  const steps = [
-    { sel: '#gallery-modal .modal-content',
-      text: '<b>Welcome to Gallery.</b> Photos and albums live here.',
-      placement: 'center-above',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="images"]',
-      text: '<b>Photos</b> — every image you\'ve uploaded, in one grid.',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-upload-tile',
-      text: 'Drop or click this tile to <b>upload</b> photos and videos.',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="albums"]',
-      text: '<b>Albums</b> — group images into collections.',
-      before: () => _clickTab('albums') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="editor"]',
-      text: '<b>Editor</b> — honestly still WIP, so explore as you want.',
-      before: () => _clickTab('editor') },
-  ];
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: i === steps.length - 1,
-      before: step.before,
-      placement: step.placement,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  // Land on Photos so the user has a familiar starting point.
-  _clickTab('images');
-  _clear();
-  await typewriterReply('That\'s Gallery. Editor is rough — feedback welcome.');
-  return true;
+  return runTour({
+    modalId: 'gallery-modal',
+    openerIds: ['tool-gallery-btn', 'rail-gallery'],
+    bailMessage: 'Could not open Gallery. Try clicking the Gallery tool first.',
+    haloTracksAppear: true,
+    onBefore: () => {
+      try { localStorage.setItem('odysseus-notes-first-open-hint-v1', '1'); } catch (_) {}
+      document.getElementById('notes-first-open-hint')?.remove();
+    },
+    steps: [
+      { sel: '#gallery-modal .modal-content',
+        text: '<b>Welcome to Gallery.</b> Photos and albums live here.',
+        placement: 'center-above',
+        before: (m) => _clickTab(m, 'images') },
+      { sel: '#gallery-modal .gallery-tab[data-tab="images"]',
+        text: '<b>Photos</b> — every image you\'ve uploaded, in one grid.',
+        before: (m) => _clickTab(m, 'images') },
+      { sel: '#gallery-upload-tile',
+        text: 'Drop or click this tile to <b>upload</b> photos and videos.',
+        before: (m) => _clickTab(m, 'images') },
+      { sel: '#gallery-modal .gallery-tab[data-tab="albums"]',
+        text: '<b>Albums</b> — group images into collections.',
+        before: (m) => _clickTab(m, 'albums') },
+      { sel: '#gallery-modal .gallery-tab[data-tab="editor"]',
+        text: '<b>Editor</b> — honestly still WIP, so explore as you want.',
+        before: (m) => _clickTab(m, 'editor') },
+    ],
+    // Land on Photos so the user has a familiar starting point.
+    onFinish: (session) => _clickTab(session.modal, 'images'),
+    doneText: 'That\'s Gallery. Editor is rough — feedback welcome.',
+    reply: slashReply,
+    done: typewriterReply,
+  });
 }
 
 // ── Notes tour ──
 async function _cmdTourNotes(args, ctx) {
-  // Clear the chat input so "/tour-notes" doesn't linger.
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  // Open the notes pane (it's a side sheet, not a .modal).
-  let pane = document.getElementById('notes-pane');
-  if (!pane) {
-    const opener = document.getElementById('tool-notes-btn')
-      || document.getElementById('rail-notes');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      pane = document.getElementById('notes-pane');
-      if (pane) break;
-    }
-  }
-  if (!pane) {
-    slashReply('Could not open Notes. Try clicking the Notes tool first.');
-    return true;
-  }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    const _tStart = performance.now();
-    let _rafId = 0;
-    const tick = () => {
-      update();
-      if (performance.now() - _tStart < 500) _rafId = requestAnimationFrame(tick);
-    };
-    _rafId = requestAnimationFrame(tick);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      if (_rafId) cancelAnimationFrame(_rafId);
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
-  };
-
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      setTimeout(() => {
-        const target = document.querySelector(sel);
-        if (!target) return resolve('skip');
-        _halos.push(_makeHalo(target));
-        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-        tooltip.classList.remove('tour-fade-in');
-        tooltip.innerHTML =
-          '<div class="tour-text">' + text + '</div>' +
-          '<div class="tour-nav">' +
-            '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-            '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-            '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-          '</div>';
-        requestAnimationFrame(() => {
-          _positionTooltip(target, placement);
-          tooltip.classList.add('tour-fade-in');
-        });
-
-        const onClick = (e) => {
-          const hit = e.target.closest && e.target.closest('[data-act]');
-          const act = hit && hit.dataset.act;
-          if (!act) return;
-          tooltip.removeEventListener('click', onClick);
-          resolve(act);
-        };
-        tooltip.addEventListener('click', onClick);
-      }, before ? 160 : 0);
-    });
-  }
-
-  const steps = [
-    { sel: '#notes-pane',
-      text: '<b>Notes</b> is your basic todo list, and also where reminders are managed.',
-      placement: 'center-above' },
-    { sel: '#notes-pane .notes-pane-body',
-      text: 'Your notes show up here. You can also <b>ask Odysseus in chat</b> to take a note for you.' },
-    { sel: '#notes-search',
-      text: '<b>Search</b> across every note — title, body, tags, the works.' },
-    { sel: '#notes-view-toggle',
-      text: 'Switch between <b>grid</b> and <b>list</b> views — pick whichever fits your brain.' },
-    { sel: '#notes-archive-toggle',
-      text: '<b>Archive</b> stashes old notes you don\'t want cluttering the active view but still want to keep.' },
-    { sel: '#notes-select-btn',
-      text: '<b>Select</b> drops you into multi-select mode for bulk archive or delete.' },
-  ];
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: i === steps.length - 1,
-      before: step.before,
-      placement: step.placement,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  _clear();
-  await typewriterReply('That\'s Notes. Write down whatever you want to remember.');
-  return true;
+  return runTour({
+    // Notes is a side sheet (id=notes-pane), not a .modal with a `hidden`
+    // class — poll on element existence only.
+    modalId: 'notes-pane',
+    openerIds: ['tool-notes-btn', 'rail-notes'],
+    bailMessage: 'Could not open Notes. Try clicking the Notes tool first.',
+    requireVisible: false,
+    haloTracksAppear: true,
+    steps: [
+      { sel: '#notes-pane',
+        text: '<b>Notes</b> is your basic todo list, and also where reminders are managed.',
+        placement: 'center-above' },
+      { sel: '#notes-pane .notes-pane-body',
+        text: 'Your notes show up here. You can also <b>ask Odysseus in chat</b> to take a note for you.' },
+      { sel: '#notes-search',
+        text: '<b>Search</b> across every note — title, body, tags, the works.' },
+      { sel: '#notes-view-toggle',
+        text: 'Switch between <b>grid</b> and <b>list</b> views — pick whichever fits your brain.' },
+      { sel: '#notes-archive-toggle',
+        text: '<b>Archive</b> stashes old notes you don\'t want cluttering the active view but still want to keep.' },
+      { sel: '#notes-select-btn',
+        text: '<b>Select</b> drops you into multi-select mode for bulk archive or delete.' },
+    ],
+    doneText: 'That\'s Notes. Write down whatever you want to remember.',
+    reply: slashReply,
+    done: typewriterReply,
+  });
 }
 
 // ── Tour: Brain ──
 async function _cmdTourBrain(args, ctx) {
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  let modal = document.getElementById('memory-modal');
-  if (!modal || modal.classList.contains('hidden')) {
-    const opener = document.getElementById('tool-memory-btn') || document.getElementById('rail-memory');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      modal = document.getElementById('memory-modal');
-      if (modal && !modal.classList.contains('hidden')) break;
-    }
-  }
-  if (!modal || modal.classList.contains('hidden')) {
-    slashReply('Could not open Brain. Try clicking the Brain tool first.');
-    return true;
-  }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    const _tStart = performance.now();
-    let _rafId = 0;
-    const tick = () => {
-      update();
-      if (performance.now() - _tStart < 500) _rafId = requestAnimationFrame(tick);
-    };
-    _rafId = requestAnimationFrame(tick);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      if (_rafId) cancelAnimationFrame(_rafId);
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
-  };
-
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      setTimeout(() => {
-        const target = document.querySelector(sel);
-        if (!target) return resolve('skip');
-        _halos.push(_makeHalo(target));
-        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-        tooltip.classList.remove('tour-fade-in');
-        tooltip.innerHTML =
-          '<div class="tour-text">' + text + '</div>' +
-          '<div class="tour-nav">' +
-            '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-            '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-            '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-          '</div>';
-        requestAnimationFrame(() => {
-          _positionTooltip(target, placement);
-          tooltip.classList.add('tour-fade-in');
-        });
-
-        const onClick = (e) => {
-          const hit = e.target.closest && e.target.closest('[data-act]');
-          const act = hit && hit.dataset.act;
-          if (!act) return;
-          tooltip.removeEventListener('click', onClick);
-          resolve(act);
-        };
-        tooltip.addEventListener('click', onClick);
-      }, before ? 180 : 0);
-    });
-  }
-
   const _tab = (name) => document.querySelector(`.memory-tab[data-memory-tab="${name}"]`)?.click();
-  const steps = [
-    { sel: '#memory-modal .memory-modal-content',
-      text: '<b>Brain</b> is where your memories are. You can edit them, or add new ones under <b>Add</b>. Wow.',
-      before: () => _tab('browse'),
-      placement: 'center-above' },
-    { sel: '#memory-tidy-btn',
-      text: '<b>Tidy</b> runs your model to clear out irrelevant memories and duplicates. It also triggers automatically from Tasks.',
-      before: () => _tab('browse') },
-    { sel: '.memory-tab-panel[data-memory-panel="skills"]',
-      text: '<b>Skills</b> are basically your AI’s memory for improving its abilities.',
-      before: () => _tab('skills') },
-    { sel: '.memory-tab-panel[data-memory-panel="settings"]',
-      text: '<b>Settings</b> lets you turn off auto extraction and set how strong skills need to be before they are tagged.',
-      before: () => _tab('settings') },
-  ];
 
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: i === steps.length - 1,
-      before: step.before,
-      placement: step.placement,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  _clear();
-  await typewriterReply('That’s Brain — memories, skills, tidy, and settings in one place.');
-  return true;
+  return runTour({
+    modalId: 'memory-modal',
+    openerIds: ['tool-memory-btn', 'rail-memory'],
+    bailMessage: 'Could not open Brain. Try clicking the Brain tool first.',
+    haloTracksAppear: true,
+    steps: [
+      { sel: '#memory-modal .memory-modal-content',
+        text: '<b>Brain</b> is where your memories are. You can edit them, or add new ones under <b>Add</b>. Wow.',
+        before: () => _tab('browse'),
+        placement: 'center-above' },
+      { sel: '#memory-tidy-btn',
+        text: '<b>Tidy</b> runs your model to clear out irrelevant memories and duplicates. It also triggers automatically from Tasks.',
+        before: () => _tab('browse') },
+      { sel: '.memory-tab-panel[data-memory-panel="skills"]',
+        text: '<b>Skills</b> are basically your AI’s memory for improving its abilities.',
+        before: () => _tab('skills') },
+      { sel: '.memory-tab-panel[data-memory-panel="settings"]',
+        text: '<b>Settings</b> lets you turn off auto extraction and set how strong skills need to be before they are tagged.',
+        before: () => _tab('settings') },
+    ],
+    doneText: 'That’s Brain — memories, skills, tidy, and settings in one place.',
+    reply: slashReply,
+    done: typewriterReply,
+  });
 }
 
 // ── Task tours ──
@@ -4169,28 +3227,7 @@ async function _runTaskTour(steps, doneText, opts) {
     _msgEl.value = '';
     _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
+  ensureTourStyles();
 
   const modal = await _openTasksForTour();
   if (!modal) {
@@ -4395,28 +3432,7 @@ async function _cmdTourResearch(args, ctx) {
   }
 
   // Shared tour-styles injection (same block as /tour, /tour-compare, /tour-cookbook).
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
+  ensureTourStyles();
 
   // Open the research overlay if it's not already up.
   let overlay = document.getElementById('research-overlay');
@@ -4609,28 +3625,7 @@ async function _cmdTourLibrary(args, ctx) {
   }
 
   // Shared tour-styles injection.
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
+  ensureTourStyles();
 
   // Open the library modal if it's not already up.
   let libModal = document.getElementById('doclib-modal');

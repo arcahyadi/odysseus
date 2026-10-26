@@ -2747,17 +2747,29 @@ async def stream_agent_loop(
     # If caller provided a pre-computed set (e.g. task_scheduler), use that.
     _relevant_tools = relevant_tools
     _t1 = time.time()
+    # Context-window tiering: small windows can't carry every tool schema
+    # AND the user's prompt. Pick a tight-friendly base set and a retrieval
+    # width that scales with the discovered context_length.
+    from src.context_budget import (
+        compute_tool_retrieval_k, is_small_context_window,
+    )
+    from src.tool_index import ALWAYS_AVAILABLE
+    from src.tool_index import ALWAYS_AVAILABLE_SMALL as _AA_SMALL
+    _tool_rag_k = compute_tool_retrieval_k(context_length)
+    _always_base = (
+        set(_AA_SMALL) if is_small_context_window(context_length)
+        else set(ALWAYS_AVAILABLE)
+    )
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
     if not guide_only and not _relevant_tools and _low_signal_turn:
-        from src.tool_index import ALWAYS_AVAILABLE
         if workspace:
             # An active workspace IS the file-work signal: a vague "look at the
             # project" means explore this folder. Surface only the READ-ONLY file
             # tools (intersection with the plan-mode read-only allowlist) so the
             # agent can investigate; write/shell tools stay out until the request
             # actually calls for them (RAG retrieval adds those on a real ask).
-            _relevant_tools = set(ALWAYS_AVAILABLE)
+            _relevant_tools = set(_always_base)
             from src.tool_security import PLAN_MODE_READONLY_TOOLS
             _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
             logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
@@ -2768,7 +2780,7 @@ async def stream_agent_loop(
             logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
     if not guide_only and not _relevant_tools:
         try:
-            from src.tool_index import get_tool_index, ALWAYS_AVAILABLE
+            from src.tool_index import get_tool_index
             try:
                 tool_idx = await asyncio.wait_for(
                     asyncio.to_thread(get_tool_index),
@@ -2780,7 +2792,7 @@ async def stream_agent_loop(
                     _TOOL_SELECTION_TIMEOUT_SECONDS,
                 )
                 tool_idx = None
-                _relevant_tools = set(ALWAYS_AVAILABLE)
+                _relevant_tools = set(_always_base)
             if tool_idx:
                 if mcp_mgr:
                     try:
@@ -2796,10 +2808,15 @@ async def stream_agent_loop(
                 if _retrieval_query:
                     try:
                         _relevant_tools = await asyncio.wait_for(
-                            asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, 8),
+                            asyncio.to_thread(
+                                tool_idx.get_tools_for_query,
+                                _retrieval_query,
+                                _tool_rag_k,
+                                _always_base,
+                            ),
                             timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
-                        logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
+                        logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - _always_base)}")
                     except asyncio.TimeoutError:
                         # Leave _relevant_tools unset so the keyword fallback
                         # below still runs. Hard-coding ALWAYS_AVAILABLE here
@@ -2819,13 +2836,13 @@ async def stream_agent_loop(
     # Fallback: if RAG unavailable, use keyword-based tool selection
     # instead of sending ALL tools (which overwhelms the model).
     if not guide_only and not _relevant_tools and _retrieval_query:
-        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
-        _relevant_tools = set(ALWAYS_AVAILABLE)
+        from src.tool_index import ToolIndex
+        _relevant_tools = set(_always_base)
         ql = _retrieval_query.lower()
         for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
             if any(kw in ql for kw in keywords):
                 _relevant_tools.update(tools)
-        logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
+        logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - _always_base)}")
 
     # If deterministic domain detection fired, seed the corresponding domain
     # tools into the selected tool set. This is not direct prompt-pack
@@ -2882,8 +2899,7 @@ async def stream_agent_loop(
     # inspect files whose inline text was truncated or omitted.
     if not guide_only and uploaded_files:
         if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
-            _relevant_tools = set(ALWAYS_AVAILABLE)
+            _relevant_tools = set(_always_base)
         _relevant_tools.update({"read_file", "grep", "ls", "manage_documents"})
 
     # Per-request forced tools are stronger than retrieval. Explicit search
@@ -2892,8 +2908,7 @@ async def stream_agent_loop(
     if not guide_only and forced_tools:
         forced_set = {t for t in forced_tools if t not in disabled_tools}
         if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
-            _relevant_tools = set(ALWAYS_AVAILABLE)
+            _relevant_tools = set(_always_base)
         _relevant_tools.update(forced_set)
 
     # The skill index injected by _build_system_prompt tells the model to

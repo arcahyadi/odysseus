@@ -302,11 +302,29 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
     task_endpoint_mod.resolve_task_endpoint = lambda url, model, headers, owner=None: (url, model, headers)
     monkeypatch.setitem(sys.modules, "src.task_endpoint", task_endpoint_mod)
 
-    captured_jobs = {}
+    # Stub the knowledge-graph store too — this test is about the sequential
+    # dispatch gate, not graph semantics; without a stub it would try to reach
+    # the real services.memory.graph module.
+    graph_mod = types.ModuleType("services.memory.graph")
+    graph_store_mod = types.ModuleType("services.memory.graph.graph_store")
+    calls["graph"] = 0
+
+    async def fake_graph_extract(*a, **k):
+        calls["graph"] += 1
+
+    graph_store_mod.extract_and_store = fake_graph_extract
+    graph_mod.graph_store = graph_store_mod
+    monkeypatch.setitem(sys.modules, "services.memory.graph", graph_mod)
+    monkeypatch.setitem(sys.modules, "services.memory.graph.graph_store", graph_store_mod)
+
+    captured_jobs = {"names": []}
 
     async def fake_sequential_runner(session_id, jobs, max_wait_s=120.0):
         captured_jobs["session_id"] = session_id
-        captured_jobs["names"] = [name for name, _ in jobs]
+        # The memory+skill batch and the graph batch are dispatched as separate
+        # sequential-runner invocations; aggregate across all of them so no
+        # single call can overwrite the others' evidence.
+        captured_jobs["names"].extend(name for name, _ in jobs)
         for _, job in jobs:
             await job
 
@@ -333,11 +351,11 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
     # Let the scheduled background task run.
     await asyncio.sleep(0.05)
 
-    # Both extractors were queued through the sequential gate — not fired
-    # directly via asyncio.create_task — and both ultimately ran exactly once.
+    # Every extractor was queued through the sequential gate — not fired
+    # directly via asyncio.create_task — and each ultimately ran exactly once.
     assert captured_jobs.get("session_id") == "sess-Y"
-    assert captured_jobs.get("names") == ["memory", "skill"]
-    assert calls == {"memory": 1, "skill": 1}
+    assert captured_jobs.get("names") == ["memory", "skill", "graph"]
+    assert calls == {"memory": 1, "skill": 1, "graph": 1}
 
 
 # --------------------------------------------------------------------------- #

@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v344';
+const CACHE_NAME = 'odysseus-v348';
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -47,6 +47,7 @@ const PRECACHE = [
   '/static/js/admin.js',
   '/static/js/init.js',
   '/static/js/slashCommands.js',
+  '/static/js/tour-core.js',
   '/static/js/emailInbox.js',
   '/static/js/emailLibrary/utils.js',
   '/static/js/emailLibrary/signatureFold.js',
@@ -61,6 +62,9 @@ const PRECACHE = [
   '/static/js/sidebar-layout.js',
   '/static/js/section-management.js',
   '/static/lib/highlight.min.js',
+  '/static/lib/katex/katex.min.css',
+  '/static/lib/katex/katex.min.js',
+  '/static/lib/mermaid/mermaid.min.js',
 ];
 
 self.addEventListener('install', (e) => {

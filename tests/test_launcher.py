@@ -20,7 +20,12 @@ def test_create_tray_image():
         from PIL import Image
         img = create_tray_image()
         assert isinstance(img, Image.Image)
-        assert img.size == (64, 64)
+        # The function either returns a generated 64x64 fallback or the brand
+        # icon resized via Image.thumbnail((64, 64)) — thumbnail preserves
+        # aspect, so the returned image's longest side is 64 while the other
+        # can be smaller on non-square brand icons.
+        assert max(img.size) == 64
+        assert min(img.size) > 0
     except ImportError:
         pytest.skip("Pillow/PIL not installed in test environment")
 

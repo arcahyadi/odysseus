@@ -31,6 +31,15 @@ from routes.cookbook_helpers import (
     _shell_path,
     run_ssh_command_async,
 )
+from core.platform_compat import find_bash
+
+
+# The pip-install subshell tests below exercise the bash snippets that
+# cookbook_helpers embeds in the container serve scripts. On Windows the
+# PATH-resolved `bash` is often a WSL shim that fails to exec /bin/bash, so
+# use the same real-bash resolver the product uses and skip when none exists.
+_BASH = find_bash()
+_HAS_BASH = _BASH is not None
 
 
 def test_safe_env_prefix_accepts_quoted_venv_path():
@@ -265,6 +274,7 @@ def test_pip_install_fallback_chain_accepts_python_executable():
     assert 'python -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)"' in chain
 
 
+@pytest.mark.skipif(not _HAS_BASH, reason="pip-install chain test needs a real bash on PATH")
 def test_pip_install_fallback_chain_propagates_failure_in_venv():
     """When base install fails inside a venv, the chain must exit non-zero.
 
@@ -284,13 +294,14 @@ def test_pip_install_fallback_chain_propagates_failure_in_venv():
         "&& echo user_attempt; }"
     )
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True, text=True, timeout=10,
     )
     assert "user_attempt" not in result.stdout
     assert result.returncode != 0, "Chain should propagate failure when base fails in venv"
 
 
+@pytest.mark.skipif(not _HAS_BASH, reason="pip-install chain test needs a real bash on PATH")
 def test_pip_install_fallback_chain_tries_user_outside_venv():
     """When base install fails outside a venv, the chain should try --user."""
     # Force "not in venv" by making venv_check return 1 directly.
@@ -302,7 +313,7 @@ def test_pip_install_fallback_chain_tries_user_outside_venv():
         "'"
     )
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True, text=True, timeout=10,
     )
     assert "user_attempt" in result.stdout, "Chain should try --user when not in venv and base fails"
@@ -418,9 +429,11 @@ def test_pip_install_attempt_no_bare_pipe_tail():
 def test_pip_install_attempt_failure_propagates_real_exit_code():
     """Run the generated snippet against a deliberately broken pip install
     to confirm the subshell exits with pip's non-zero status."""
+    if not _HAS_BASH:
+        pytest.skip("pip-install attempt test needs a real bash on PATH")
     snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
     result = subprocess.run(
-        ["bash", "-c", snippet],
+        [_BASH, "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,
@@ -428,11 +441,12 @@ def test_pip_install_attempt_failure_propagates_real_exit_code():
     assert result.returncode != 0, "pip install of a nonexistent package should fail"
 
 
+@pytest.mark.skipif(not _HAS_BASH, reason="pip-install attempt test needs a real bash on PATH")
 def test_pip_install_attempt_success_exits_zero():
     """When pip succeeds, the subshell should exit 0."""
     snippet = _pip_install_attempt("python3 -c 'pass'")
     result = subprocess.run(
-        ["bash", "-c", snippet],
+        [_BASH, "-c", snippet],
         capture_output=True,
         text=True,
         timeout=15,
@@ -440,11 +454,12 @@ def test_pip_install_attempt_success_exits_zero():
     assert result.returncode == 0
 
 
+@pytest.mark.skipif(not _HAS_BASH, reason="pip-install attempt test needs a real bash on PATH")
 def test_pip_install_attempt_surfaces_stderr_on_failure():
     """On failure, the last 5 lines of pip output should appear in stdout."""
     snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
     result = subprocess.run(
-        ["bash", "-c", snippet],
+        [_BASH, "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,
@@ -824,17 +839,29 @@ def test_cached_model_scan_does_not_launch_ollama_cli_on_windows(tmp_path):
     env = dict(os.environ)
     env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
     env["HOME"] = str(empty_home)
+    # On Windows os.path.expanduser("~") reads USERPROFILE, not HOME. Pin both
+    # so the scanner cannot reach the real user's HF/GGUF caches under %USERPROFILE%.
+    env["USERPROFILE"] = str(empty_home)
+    env["HOMEDRIVE"] = str(empty_home.drive)
+    env["HOMEPATH"] = str(empty_home.root) + str(empty_home).replace(str(empty_home.drive), "", 1).lstrip("\\")
     env.pop("ODYSSEUS_ALLOW_OLLAMA_CLI_SCAN", None)
     proc = subprocess.run(
         [sys.executable, str(scan_py)],
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
     )
 
     assert marker.exists() is False
-    assert all(m.get("backend") != "ollama" for m in json.loads(proc.stdout))
+    models = json.loads(proc.stdout)
+    # The fake CLI would contribute "local-model:latest"; assert none of the
+    # returned entries came from that path. Other backend='ollama' entries
+    # can legitimately come from scan_ollama_api() hitting a locally-running
+    # Ollama server, which this guard is not concerned with.
+    assert all(m.get("repo_id") != "local-model:latest" for m in models)
 
 
 def test_cached_model_scan_uses_huggingface_cache_env(tmp_path):

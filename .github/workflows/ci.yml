@@ -103,10 +103,11 @@ jobs:
   python-tests:
     name: Python tests (pytest)
     runs-on: ubuntu-latest
-    # Informational for now: the suite has known flaky / environment-dependent
-    # failures (test isolation + embedding-model assertions). Tracked under the
-    # ROADMAP "fresh install smoke tests" item; make this required once green.
-    continue-on-error: true
+    # Required: the Windows/Linux portability work (encoding pins, event-loop
+    # guards, DATA_DIR isolation) landed and the full suite is green locally.
+    # A red pytest run must now block merges; the "fresh install smoke tests"
+    # matrix job below complements this by catching first-boot regressions
+    # per-OS without duplicating the whole suite.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -146,3 +147,29 @@ jobs:
         if: steps.docs-check.outputs.docs_only != 'true'
       - run: python -m pytest -q
         if: steps.docs-check.outputs.docs_only != 'true'
+
+  # First-boot smoke tests on all three OSes the project supports. Spins up
+  # the full FastAPI app in a subprocess against an empty ODYSSEUS_DATA_DIR
+  # and asserts health/ready/static-asset endpoints come up clean. The main
+  # pytest job runs on Linux only; this matrix catches OS-specific startup
+  # regressions (Windows MIME registry drift, Proactor event-loop policy,
+  # macOS Gatekeeper paths) without re-running the full suite per OS.
+  first-boot-smoke:
+    name: First-boot smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [python-syntax, node-syntax]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run first-boot smoke tests
+        run: python -m pytest tests/smoke -q --maxfail=3

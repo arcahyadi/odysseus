@@ -20,6 +20,8 @@ const TOUR_FOR_MODAL = {
   'theme-modal':            'tour-theme',
   'settings-modal':         'tour-settings',
   'gallery-modal':          'tour-gallery',
+  'memory-modal':           'tour-brain',
+  'notes-pane':             'tour-notes',
 };
 
 const SEEN_KEY = (tour) => `odysseus-tour-autoplay-seen-${tour}`;

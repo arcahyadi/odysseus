@@ -53,12 +53,19 @@ def _make_vectorrag(rows):
 
 
 def test_vectorrag_remove_is_path_bounded():
+    # VectorRAG.remove_directory does `os.path.abspath(directory)` and then
+    # matches stored `source` strings against that with os.sep as the boundary.
+    # On Windows, `/a/docs` would abspath to `C:\a\docs`, so the fake metadata
+    # has to be built with the same normalization to remain portable.
+    docs = os.path.abspath("/a/docs")
+    docs2 = os.path.abspath("/a/docs2")
+    docs_personal = os.path.abspath("/a/docs_personal")
     rows = [
-        ("a", {"source": "/a/docs/f1.md"}),
-        ("b", {"source": "/a/docs/sub/f2.md"}),   # nested -> must be removed
-        ("c", {"source": "/a/docs2/f3.md"}),       # sibling prefix -> must survive
-        ("d", {"source": "/a/docs_personal/f4.md"}),  # sibling prefix -> must survive
-        ("e", {"filename": "no-source.md"}),       # sourceless dict -> must not crash/survive
+        ("a", {"source": os.path.join(docs, "f1.md")}),
+        ("b", {"source": os.path.join(docs, "sub", "f2.md")}),   # nested -> must be removed
+        ("c", {"source": os.path.join(docs2, "f3.md")}),           # sibling prefix -> must survive
+        ("d", {"source": os.path.join(docs_personal, "f4.md")}),   # sibling prefix -> must survive
+        ("e", {"filename": "no-source.md"}),                       # sourceless dict -> must not crash/survive
     ]
     rag = _make_vectorrag(rows)
     res = rag.remove_directory("/a/docs")

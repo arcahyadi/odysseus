@@ -17,6 +17,7 @@ def _node_eval(source: str):
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 

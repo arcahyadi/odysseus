@@ -55,7 +55,7 @@ from routes.cookbook_helpers import (
     load_stored_hf_token,
     _append_vllm_linux_preflight_lines, _ollama_bind_from_cmd, _pip_install_fallback_chain,
     _pip_install_no_cache, _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
-    _diagnose_serve_output, run_ssh_command_async,
+    _diagnose_serve_output, _diagnose_download_output, run_ssh_command_async,
     _ollama_bind_from_cmd, _pip_install_fallback_chain, _pip_install_no_cache,
     _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
     _append_pip_install_runner_lines, _pip_install_command_without_break_system_packages,
@@ -387,170 +387,6 @@ def setup_cookbook_routes() -> APIRouter:
                 if isinstance(task, dict) and isinstance(task.get("payload"), dict):
                     task["payload"].pop("hf_token", None)
         return state
-
-    def _diagnose_serve_output(text: str) -> dict | None:
-        """Server-side mirror of the Cookbook UI's common serve diagnoses.
-
-        The browser uses cookbook-diagnosis.js for clickable fixes. This gives
-        the agent/tool path the same structured signal so it can retry with an
-        adjusted command instead of guessing from raw tmux output.
-        """
-        if not text:
-            return None
-        tail = text[-6000:]
-        patterns = [
-            (
-                r"No available memory for the cache blocks|Available KV cache memory:.*-",
-                "No GPU memory left for KV cache after loading model.",
-                [
-                    {"label": "retry with GPU memory utilization 0.95", "op": "replace", "flag": "--gpu-memory-utilization", "value": "0.95"},
-                    {"label": "retry with context 2048", "op": "replace", "flag": "--max-model-len", "value": "2048"},
-                ],
-            ),
-            (
-                r"CUDA out of memory|torch\.cuda\.OutOfMemoryError|CUDA error: out of memory|warming up sampler|max_num_seqs.*gpu_memory_utilization",
-                "GPU ran out of memory during startup or warmup.",
-                [
-                    {"label": "retry with context 4096", "op": "replace", "flag": "--max-model-len", "value": "4096"},
-                    {"label": "retry with GPU memory utilization 0.80", "op": "replace", "flag": "--gpu-memory-utilization", "value": "0.80"},
-                    {"label": "retry with --enforce-eager", "op": "append", "arg": "--enforce-eager"},
-                ],
-            ),
-            (
-                r"not divisib|must be divisible|attention heads.*divisible",
-                "Tensor parallel size is incompatible with the model.",
-                [
-                    {"label": "retry with tensor parallel size 1", "op": "replace", "flag": "--tensor-parallel-size", "value": "1"},
-                    {"label": "retry with tensor parallel size 2", "op": "replace", "flag": "--tensor-parallel-size", "value": "2"},
-                ],
-            ),
-            (
-                r"KV cache.*too (small|large)|max_model_len.*exceeds|maximum.*context",
-                "Context length is too large for available GPU memory.",
-                [
-                    {"label": "retry with context 8192", "op": "replace", "flag": "--max-model-len", "value": "8192"},
-                    {"label": "retry with context 4096", "op": "replace", "flag": "--max-model-len", "value": "4096"},
-                ],
-            ),
-            (
-                r"enable-auto-tool-choice requires --tool-call-parser",
-                "Auto tool choice requires an explicit tool call parser.",
-                [{"label": "retry with Hermes tool parser", "op": "append", "arg": "--tool-call-parser hermes"}],
-            ),
-            (
-                r"Please pass.*trust.remote.code=True|contains custom code which must be executed to correctly load|does not recognize this architecture|model type.*but Transformers does not",
-                "Model requires custom code or newer model support.",
-                [{"label": "retry with --trust-remote-code", "op": "append", "arg": "--trust-remote-code"}],
-            ),
-            (
-                r"Either a revision or a version must be specified|transformers\.integrations\.hub_kernels|kernels/layer",
-                "vLLM/Transformers kernel package mismatch.",
-                [{"label": "update vLLM, Transformers, and kernels on this server", "op": "dependency", "package": "vllm transformers kernels"}],
-            ),
-            (
-                r"Address already in use|bind.*address.*in use",
-                "Port is already in use.",
-                [{"label": "retry on port 8001", "op": "replace", "flag": "--port", "value": "8001"}],
-            ),
-            (
-                r"No CUDA GPUs are available|no GPU.*found|CUDA_VISIBLE_DEVICES.*invalid",
-                "No GPUs are visible to the serve process.",
-                [{"label": "clear Cookbook GPU selection or choose available GPUs", "op": "settings", "field": "gpus", "value": ""}],
-            ),
-            (
-                r"Failed to infer device type|NVML Shared Library Not Found|No module named 'amdsmi'|platform is not available",
-                "vLLM could not find a supported GPU (CUDA or ROCm). "
-                "This machine may have integrated or unsupported graphics only.",
-                [
-                    {"label": "switch to llama.cpp (CPU/Metal, works without a discrete GPU)", "op": "manual"},
-                    {"label": "switch to Ollama (CPU/Metal, works without a discrete GPU)", "op": "manual"},
-                ],
-            ),
-            (
-                r"vllm.*command not found|No module named vllm|ERROR: vLLM is not installed",
-                "vLLM is not installed or not in PATH on this server.",
-                [{"label": "install vLLM in Cookbook Dependencies", "op": "dependency", "package": "vllm"}],
-            ),
-            (
-                r"sgl_kernel[\s\S]*(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)|"
-                r"(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)[\s\S]*sgl_kernel|"
-                r"Could not load any common_ops library|"
-                r"Please ensure sgl_kernel is properly installed",
-                "SGLang native kernel/runtime is missing or mismatched on this server.",
-                [
-                    {"label": "repair sglang-kernel in this Python environment", "op": "dependency", "package": "sglang-kernel"},
-                    {"label": "if libnvrtc is still missing, install the matching CUDA/NVRTC runtime on this host", "op": "manual"},
-                ],
-            ),
-            (
-                r"sglang.*command not found|No module named sglang|SGLang is not installed",
-                "SGLang is not installed or not in PATH on this server.",
-                [{"label": "install SGLang in Cookbook Dependencies", "op": "dependency", "package": "sglang[all]"}],
-            ),
-            (
-                r"No module named ['\"]?mlx_lm|mlx_lm.*command not found|MLX is not installed|MLX LM is not installed",
-                "MLX LM is not installed on this server.",
-                [{"label": "install mlx-lm in Cookbook Dependencies", "op": "dependency", "package": "mlx-lm"}],
-            ),
-            (
-                r"Unable to quantize model of type <class ['\"]mlx_lm\.models\.switch_layers\.QuantizedSwitchLinear['\"]>|QuantizedSwitchLinear",
-                "MLX-LM tried to quantize an already-quantized DeepSeek switch layer.",
-                [
-                    {"label": "relaunch from the cached local Hugging Face snapshot path on this Mac", "op": "manual"},
-                    {"label": "Odysseus now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
-                ],
-            ),
-            # System build deps come BEFORE the generic llama.cpp catch-all
-            # so cmake / build-essential / git missing → a specific OS-package
-            # remediation instead of "install llama-cpp-python[server]" (which
-            # itself fails to compile when cmake is absent).
-            (
-                r"cmake: command not found|cmake.*not found.*[Cc]ould not",
-                "cmake is required to build llama.cpp from source but isn't installed on this server.",
-                [{"label": "install build deps for llama.cpp (apt: cmake build-essential git / pacman: cmake base-devel git / dnf: cmake gcc-c++ make git / brew: cmake git)", "op": "dependency", "package": "llama-cpp-python[server]"}],
-            ),
-            (
-                r"^(make|g\+\+|gcc): command not found|Could not find C\+\+ compiler",
-                "A C/C++ compiler (build-essential) is required to build llama.cpp from source.",
-                [{"label": "install build deps for llama.cpp on this server", "op": "dependency", "package": "llama-cpp-python[server]"}],
-            ),
-            (
-                r"^git: command not found",
-                "git is required to clone the llama.cpp source tree.",
-                [{"label": "install build deps for llama.cpp on this server", "op": "dependency", "package": "llama-cpp-python[server]"}],
-            ),
-            (
-                r"llama-server.*command not found|llama\.cpp.*not found|No module named.*llama_cpp|No module named 'starlette_context'",
-                "llama.cpp / llama-cpp-python dependencies are missing.",
-                [{"label": "install llama.cpp dependencies or llama-cpp-python[server]", "op": "dependency", "package": "llama-cpp-python[server]"}],
-            ),
-            (
-                r"No GGUF found on this host|no \.gguf file|No GGUF file found",
-                "No GGUF file found for this model on this host. The llama.cpp backend needs a .gguf file.",
-                [{"label": "download a GGUF build of this model (repo name usually ends in -GGUF, file like Q4_K_M.gguf)", "op": "manual"}],
-            ),
-            (
-                r"No module named 'torch'|No module named torch|No module named 'diffusers'|No module named diffusers",
-                "Diffusion serving requires PyTorch and diffusers.",
-                [{"label": "install diffusers[torch] in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch]"}],
-            ),
-            (
-                r"403 Forbidden|401 Unauthorized|Access to model.*is restricted|gated repo|not in the authorized list|awaiting a review",
-                "Model access is gated or unauthorized.",
-                [{"label": "set HF token and request model access on HuggingFace", "op": "manual"}],
-            ),
-        ]
-        for pattern, message, suggestions in patterns:
-            if re.search(pattern, tail, re.I):
-                return {"message": message, "suggestions": suggestions}
-        if re.search(r"Traceback \(most recent call last\)", tail, re.I) and not re.search(
-            r"Application startup complete|GET /v1/|Uvicorn running on", tail, re.I
-        ):
-            return {
-                "message": "Python traceback detected during serve startup.",
-                "suggestions": [{"label": "inspect traceback and retry with adjusted backend/settings", "op": "manual"}],
-            }
-        return None
 
     def _state_for_client(state):
         """Return cookbook state without raw secrets for browser clients."""
@@ -3319,17 +3155,36 @@ def setup_cookbook_routes() -> APIRouter:
             return {"ok": False, "error": str(e)}
 
     @router.get("/api/cookbook/hf-latest")
-    async def hf_latest(vram_gb: float = 0, limit: int = 10, pipeline: str = "text-generation", owner: str = Depends(require_user)):
-        """Fetch latest HuggingFace models, filtered by what fits in available VRAM.
+    async def hf_latest(
+        vram_gb: float = 0,
+        limit: int = 10,
+        pipeline: str = "text-generation",
+        host: str = "",
+        ssh_port: str = "",
+        platform: str = "",
+        owner: str = Depends(require_user),
+    ):
+        """Rank trending HuggingFace models against the selected server's
+        hardware using the same hwfit fit engine the What-Fits tab uses.
 
-        vram_gb: total available VRAM in GB. 0 = no filter (return everything).
-        limit:   how many models to return (default 10).
-        pipeline: HF pipeline_tag filter (text-generation, text-to-image, etc.).
+        vram_gb: fallback VRAM hint when host detection is unavailable.
+        limit:   number of models to return.
+        pipeline: HF pipeline_tag filter.
+        host / ssh_port / platform: when set, rank against that server's
+        detected system (cached via services.hwfit.hardware.detect_system).
         """
-        import re
+        import asyncio
         import httpx
 
-        # Fetch a larger pool so we have enough to filter from (we drop ~80%)
+        from services.hwfit.hf_discovery import (
+            _infer_context, _infer_quant, _infer_use_case, _parse_params_from_name,
+        )
+        from services.hwfit.hardware import detect_system
+        from services.hwfit.fit import analyze_model
+
+        # Fetch a larger pool so we have enough to filter from after
+        # exclusion + fit checks. Trending is a small tiebreaker input, not
+        # the primary sort key — the fit engine scores against hardware.
         pool_size = max(limit * 15, 100)
         url = (
             "https://huggingface.co/api/models"
@@ -3341,30 +3196,43 @@ def setup_cookbook_routes() -> APIRouter:
                 if resp.status_code != 200:
                     return {"models": [], "error": f"HF API HTTP {resp.status_code}"}
                 raw = resp.json()
-        except Exception as e:
-            return {"models": [], "error": str(e)}
+        except Exception:
+            logger.exception("cookbook hf-latest: HF models request failed")
+            return {"models": [], "error": "Hugging Face API request failed"}
 
-        # Estimate VRAM from the model id. Looks for patterns like "7B", "70B", "1.5B" etc.
-        # Returns approx VRAM in GB at fp16 (params*2). Caller adjusts for quant.
-        def _est_vram_fp16(repo_id: str) -> float | None:
-            m = re.search(r'[-_/](\d+(?:\.\d+)?)\s*[Bb](?![a-zA-Z])', repo_id)
-            if not m:
-                return None
-            params_b = float(m.group(1))
-            return params_b * 2.0  # fp16 baseline
+        # Detect the ranking target system. Remote hosts probe over SSH and can
+        # block; run them off-thread so an actively-polled cookbook page does
+        # not peg uvicorn. Local + vram_gb-only calls skip detection and
+        # synthesise a minimal CUDA profile from the caller's hint.
+        try:
+            if host or (not host and not vram_gb):
+                if host:
+                    system = await asyncio.to_thread(
+                        detect_system, host, ssh_port, platform
+                    )
+                else:
+                    system = detect_system()
+            else:
+                system = None
+        except Exception:
+            logger.exception("cookbook hf-latest: detect_system failed")
+            system = None
+        if not system or "error" in (system or {}):
+            has_vram = (vram_gb or 0) > 0
+            system = {
+                "has_gpu": has_vram,
+                "gpu_vram_gb": vram_gb or 0,
+                "gpu_count": 1,
+                "available_ram_gb": 0,
+                "total_ram_gb": 0,
+                "backend": "cuda" if has_vram else "cpu_x86",
+                "platform": platform or "linux",
+            }
+        # Respect an explicit vram_gb hint even when detection succeeded (the
+        # frontend may override it, e.g. when ranking for a different server).
+        if vram_gb > 0 and (system.get("gpu_vram_gb") or 0) == 0:
+            system = {**system, "has_gpu": True, "gpu_vram_gb": vram_gb}
 
-        # Detect quantization from repo_id / tags. Returns a multiplier on fp16 size.
-        def _quant_factor(repo_id: str, tags: list) -> float:
-            text = (repo_id + " " + " ".join(tags or [])).lower()
-            if "fp4" in text or "nf4" in text or "int4" in text or "4bit" in text or "q4" in text or "awq" in text or "gptq" in text:
-                return 0.25
-            if "int8" in text or "8bit" in text or "q8" in text or "fp8" in text:
-                return 0.5
-            if "bf16" in text or "fp16" in text:
-                return 1.0
-            return 1.0  # default fp16
-
-        # Exclude adapters, LoRAs, datasets, GGUF-only repos, and other non-runnable artifacts
         EXCLUDE_TAG_SUBSTRINGS = (
             "lora", "adapter", "peft", "qlora",
             "dataset", "embeddings",
@@ -3390,50 +3258,85 @@ def setup_cookbook_routes() -> APIRouter:
                     return True
             return False
 
-        out = []
+        analyzed = []
         for entry in raw:
             repo_id = entry.get("modelId") or entry.get("id") or ""
             if not repo_id:
                 continue
             tags = entry.get("tags") or []
             pipeline_tag = entry.get("pipeline_tag") or ""
-
-            # Hard filter: only the requested pipeline (HF's filter param is loose)
             if pipeline and pipeline_tag and pipeline_tag != pipeline:
                 continue
-            # Skip adapters, LoRAs, datasets, etc.
             if _is_excluded(repo_id, tags):
                 continue
 
-            est_fp16 = _est_vram_fp16(repo_id)
-            quant_mult = _quant_factor(repo_id, tags)
-            est_vram = (est_fp16 * quant_mult) if est_fp16 else None
-            # Add 30% headroom for KV cache, activations, etc.
-            needed_vram = (est_vram * 1.3) if est_vram else None
+            total_params, active_params = _parse_params_from_name(repo_id)
+            if not total_params:
+                # Trending list must be conservative: unknown-size repos
+                # can't be ranked, so drop them when a VRAM budget was given
+                # and skip them entirely otherwise (they'd have no score).
+                continue
 
-            if vram_gb > 0:
-                if needed_vram is None:
-                    # The "trending models that fit" list must be conservative:
-                    # if we cannot estimate size from the repo id/tags, do not
-                    # present it as runnable on this hardware.
-                    continue
-                if needed_vram > vram_gb:
-                    continue
+            quant = _infer_quant(repo_id, {})
+            release_date = (
+                entry.get("createdAt") or entry.get("lastModified") or ""
+            )[:10]
+            model = {
+                "name": repo_id,
+                "provider": repo_id.split("/", 1)[0] if "/" in repo_id else "",
+                "parameter_count": f"{total_params / 1_000_000_000:.3g}B",
+                "parameters_raw": total_params,
+                "quantization": quant,
+                "context_length": _infer_context(repo_id, pipeline_tag),
+                "use_case": _infer_use_case(repo_id, pipeline_tag),
+                "pipeline_tag": pipeline_tag,
+                "release_date": release_date,
+                "hf_downloads": int(entry.get("downloads") or 0),
+                "hf_likes": int(entry.get("likes") or 0),
+                "capabilities": ["vllm", "sglang"],
+                "format": "safetensors",
+                "_discovered": True,
+                "_source": "hf_trending",
+            }
+            if quant == "Q4_K_M":
+                model["is_gguf"] = True
+                model["format"] = "gguf"
+                model["capabilities"] = ["llama.cpp"]
+            if active_params:
+                model["is_moe"] = True
+                model["active_parameters"] = active_params
 
-            out.append({
+            result = analyze_model(model, system)
+            if result is None:
+                continue
+            fit_level = result.get("fit_level") or "too_tight"
+            if vram_gb > 0 and fit_level == "too_tight":
+                continue
+
+            required_gb = float(result.get("required_gb") or 0)
+            # Small trending bump so equally-ranked models sort by community
+            # signal, but never enough to outvote a real fit gap.
+            trending_bump = min(4.0, (entry.get("downloads") or 0) / 250_000)
+            base_score = float(result.get("score") or 0)
+            analyzed.append({
                 "repo_id": repo_id,
                 "downloads": entry.get("downloads", 0),
                 "likes": entry.get("likes", 0),
                 "createdAt": entry.get("createdAt", ""),
-                "tags": tags[:5],  # trim
+                "tags": tags[:5],
                 "pipeline_tag": pipeline_tag,
-                "est_vram_gb": round(est_vram, 1) if est_vram else None,
-                "needed_vram_gb": round(needed_vram, 1) if needed_vram else None,
+                "est_vram_gb": round(required_gb / 1.3, 1) if required_gb else None,
+                "needed_vram_gb": round(required_gb, 1) if required_gb else None,
+                "fit_level": fit_level,
+                "run_mode": result.get("run_mode", ""),
+                "quant": result.get("quant", ""),
+                "use_case": result.get("use_case", ""),
+                "speed_tps": result.get("speed_tps", 0),
+                "score": round(base_score + trending_bump, 1),
             })
-            if len(out) >= limit:
-                break
 
-        return {"models": out}
+        analyzed.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return {"models": analyzed[:limit]}
 
     # Rate-limit for the orphan-tmux adoption sweep. Five-minute interval so SSH
     # work is genuinely sparse even on an actively-polled cookbook page.
@@ -4357,7 +4260,12 @@ def setup_cookbook_routes() -> APIRouter:
             if phase_info.get("status") == "ready" and is_alive:
                 status = "ready"
             serve_phase = phase_info.get("phase", "")
-            diagnosis = _diagnose_serve_output(full_snapshot) if task_type == "serve" and full_snapshot else None
+            if task_type == "serve":
+                diagnosis = _diagnose_serve_output(full_snapshot) if full_snapshot else None
+            elif task_type == "download":
+                diagnosis = _diagnose_download_output(full_snapshot) if full_snapshot else None
+            else:
+                diagnosis = None
             if diagnosis and status in {"running", "unknown", "stopped"} and phase_info.get("status") != "ready":
                 status = "error"
             if download_zero_files:

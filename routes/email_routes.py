@@ -1112,17 +1112,21 @@ def setup_email_routes():
     router = APIRouter(prefix="/api/email", tags=["email"])
 
     # ── In-memory cache + prefetch + IMAP connection pool ──
-    # Three layers stacked because every cold click was hitting Dovecot
+    # Four layers stacked because every cold click was hitting Dovecot
     # over a fresh TCP+TLS+LOGIN handshake plus a full RFC822 fetch.
-    #   1. _LIST_CACHE: list-emails responses keyed by (account, folder, filter,
-    #      limit, offset). 8s TTL — short enough that flag changes show up
-    #      quickly but long enough to absorb burst polls and tab switches.
-    #   2. _READ_CACHE: per-(account, folder, uid) parsed email bodies.
-    #      60s TTL — bodies don't change.
-    #   3. _IMAP_POOL: per-account live IMAP connection reused across
-    #      requests. Recycled if NOOP fails or it's been idle >60s.
-    #   4. Prefetch task: after a list load, kick off background reads of
-    #      the top-N visible UIDs so clicks land in the read cache.
+    #   1. _LIST_CACHE: list-emails responses keyed by (account, folder,
+    #      filter, limit, offset). 45s TTL — long enough to absorb burst
+    #      polls and tab switches, short enough that flag changes show up
+    #      on the next natural refresh.
+    #   2. _FOLDER_CACHE: per-(account, owner) folder listing. 5 min TTL —
+    #      folder structure changes rarely; invalidated on any mutation.
+    #   3. _READ_CACHE: per-(account, folder, uid) parsed email bodies.
+    #      30 min TTL — bodies don't change once fetched, so this is the
+    #      longest-lived tier.
+    #   4. _IMAP_POOL: per-(account, owner) live IMAP connection reused
+    #      across requests. Recycled if NOOP fails or idle >60s.
+    # Prefetch warms the read cache with the top-N visible UIDs after a
+    # list load (see _WARMING_READS below).
     import asyncio as _asyncio
     import time as _time
     import threading as _threading

@@ -44,6 +44,18 @@ ALWAYS_AVAILABLE = frozenset({
     "update_plan",
 })
 
+# Reduced baseline for tight context windows (see src.context_budget
+# `is_small_context_window`). Every schema has to fit alongside the user's
+# prompt and the retrieval results, so we drop ambient tools that RAG or the
+# keyword hints can still surface on a real ask. `ask_user` and `update_plan`
+# stay — the agent loses coherence without a way to pause for clarification
+# or tick plan steps mid-run. `manage_memory` is dropped because the memory
+# domain retrieves cleanly via embedding on any "remember this" phrasing.
+ALWAYS_AVAILABLE_SMALL = frozenset({
+    "ask_user",
+    "update_plan",
+})
+
 # Tools that the Personal Assistant always has access to during scheduled
 # check-ins and proactive tasks, in addition to RAG-selected tools.
 ASSISTANT_ALWAYS_AVAILABLE = frozenset({

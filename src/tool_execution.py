@@ -90,7 +90,7 @@ def _is_sensitive_path(resolved: str) -> bool:
     the lowercase form, so a case-sensitive check would let it slip past the
     deny-list in every file tool that relies on it.
     """
-    parts = [p.casefold() for p in resolved.split(os.sep)]
+    parts = [p.casefold() for p in resolved.replace("\\", "/").split("/")]
     filename = parts[-1] if parts else ""
 
     # Check if any path component is a sensitive directory.
@@ -113,19 +113,30 @@ def _tool_path_roots() -> list[str]:
     from src.constants import DATA_DIR
     roots.append(DATA_DIR)
 
-    # /tmp (and its macOS realpath /private/tmp).
-    roots.append("/tmp")
-    try:
-        private_tmp = os.path.realpath("/tmp")
-        if private_tmp != "/tmp":
-            roots.append(private_tmp)
-    except OSError:
-        pass
-
-    # $TMPDIR — per-user temp root on macOS (e.g. /var/folders/.../T/).
-    tmpdir = os.environ.get("TMPDIR")
-    if tmpdir:
-        roots.append(tmpdir)
+    # System temp dir(s) — portable across OSes. tempfile.gettempdir() is the
+    # OS-native scratch root (/tmp on POSIX, %TEMP% on Windows). We also keep the
+    # /tmp literal, its realpath (macOS resolves it to /private/tmp), and the
+    # per-user temp env vars: TMPDIR (macOS/BSD) and TEMP/TMP (Windows). Adding
+    # these only grants the platform-equivalent of the already-trusted temp dir;
+    # confinement to the allowlist is otherwise unchanged.
+    import tempfile
+    _tmp_candidates = [
+        tempfile.gettempdir(),
+        "/tmp",
+        os.environ.get("TMPDIR"),
+        os.environ.get("TEMP"),
+        os.environ.get("TMP"),
+    ]
+    for _cand in _tmp_candidates:
+        if not _cand:
+            continue
+        roots.append(_cand)
+        try:
+            _real = os.path.realpath(_cand)
+        except OSError:
+            continue
+        if _real != _cand:
+            roots.append(_real)
 
     # Opt-in extra roots from settings.
     try:
