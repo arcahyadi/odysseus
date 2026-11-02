@@ -40741,3 +40741,233 @@ body.theme-frosted .modal {
 .plan-progress__counts { color: color-mix(in srgb, var(--fg, #abb2bf) 60%, transparent); }
 .plan-progress__current { color: var(--accent, #61afef); }
 .plan-progress__status { text-transform: uppercase; font-size: 0.7em; }
+
+
+/* -- Phase 2: plan-progress container (document-to-action pipeline) -- */
+.plan-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--bg) 6%, transparent);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.plan-progress__title {
+  font-size: 0.9em;
+  font-weight: 600;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-progress__counters {
+  display: flex;
+  gap: 8px;
+  font-size: 0.75em;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+}
+
+.plan-progress__doc-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.plan-progress__doc-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+  font-size: 0.85em;
+}
+
+.plan-progress__doc-step:hover {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+/* Document action badges */
+.plan-progress__doc-step .action-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 0.7em;
+  font-weight: 600;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--bg);
+  flex-shrink: 0;
+}
+
+/* Action-specific badge colors */
+.plan-progress__doc-step .action-badge.create {
+  background: var(--accent, #61afef);
+}
+
+.plan-progress__doc-step .action-badge.update {
+  background: color-mix(in srgb, var(--accent) 60%, var(--green));
+}
+
+.plan-progress__doc-step .action-badge.edit {
+  background: color-mix(in srgb, var(--accent) 40%, var(--warn));
+}
+
+.plan-progress__doc-step .action-badge.suggest {
+  background: color-mix(in srgb, var(--accent) 20%, var(--red));
+}
+
+.plan-progress__doc-step .action-badge.read {
+  background: color-mix(in srgb, var(--fg) 50%, var(--border));
+  color: var(--fg);
+}
+
+.plan-progress__doc-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88em;
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.plan-progress__doc-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.plan-progress__doc-step .action-icon {
+  width: 16px;
+  height: 16px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+/* -- Phase 2: doc-step modal -- */
+.p2-doc-step-modal .modal-content {
+  max-width: min(92vw, 800px);
+}
+
+.p2-doc-step-modal .modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.p2-doc-step-modal .modal-title {
+  font-size: 1.05em;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.p2-doc-step-modal .doc-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 0.75em;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  margin-left: auto;
+}
+
+.p2-doc-step-modal .doc-meta .meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  background: color-mix(in srgb, var(--bg) 10%, transparent);
+  border-radius: 4px;
+}
+
+.p2-doc-step-modal .doc-meta .action-badge {
+  color: var(--bg);
+}
+
+.p2-doc-step-modal .doc-meta .action-badge.create { background: var(--accent, #61afef); }
+.p2-doc-step-modal .doc-meta .action-badge.update { background: color-mix(in srgb, var(--accent) 60%, var(--green)); }
+.p2-doc-step-modal .doc-meta .action-badge.edit { background: color-mix(in srgb, var(--accent) 40%, var(--warn)); }
+.p2-doc-step-modal .doc-meta .action-badge.suggest { background: color-mix(in srgb, var(--accent) 20%, var(--red)); }
+.p2-doc-step-modal .doc-meta .action-badge.read { background: color-mix(in srgb, var(--fg) 50%, var(--border)); color: var(--fg); }
+
+.p2-doc-step-modal .modal-body {
+  padding: 16px;
+  max-height: 60vh;
+  overflow-y: auto;
+  line-height: 1.6;
+}
+
+.p2-doc-step-modal .doc-content {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 0.9em;
+  color: var(--fg);
+}
+
+.p2-doc-step-modal .doc-content pre {
+  background: color-mix(in srgb, var(--bg) 12%, transparent);
+  border-color: color-mix(in srgb, var(--fg) 10%, transparent);
+  padding: 10px;
+}
+
+.p2-doc-step-modal .doc-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.p2-doc-step-modal .btn-primary {
+  background: var(--accent, #61afef);
+  color: var(--bg);
+  border: none;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.88em;
+  transition: background 0.15s;
+}
+
+.p2-doc-step-modal .btn-primary:hover {
+  background: color-mix(in srgb, var(--accent) 80%, white);
+}
+
+.p2-doc-step-modal .btn-secondary {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  font-size: 0.88em;
+  transition: all 0.15s;
+}
+
+.p2-doc-step-modal .btn-secondary:hover {
+  background: color-mix(in srgb, var(--fg) 14%, transparent);
+  border-color: color-mix(in srgb, var(--fg) 25%, transparent);
+}
+
+/* Light theme overrides */
+:root.light .plan-progress { background: color-mix(in srgb, var(--bg) 12%, transparent); }
+:root.light .plan-progress__doc-step { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+:root.light .p2-doc-step-modal .doc-content { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+:root.light .p2-doc-step-modal .doc-content pre { background: color-mix(in srgb, var(--bg) 8%, transparent); }
+
