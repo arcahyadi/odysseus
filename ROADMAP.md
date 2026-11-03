@@ -110,13 +110,9 @@ still ride along; further slimming remains open.
 
 - SQUASH BUGS
 - Fresh install smoke tests on Linux, macOS, and Windows. Docker, native Python,
-  and WSL all need coverage. _(Native Python done: `tests/smoke/test_first_boot.py`
-  runs against a pristine `ODYSSEUS_DATA_DIR` in a subprocess and CI's
-  `first-boot-smoke` matrix exercises it on ubuntu-latest / windows-latest /
-  macos-14. Docker + WSL matrices still open.)_
+  and WSL all need coverage.
 
 - Integration audit: do integrations even work? Confirm what works, what needs setup docs, and what should be removed or hidden. 
-- Self-host troubleshooting cookbook. Document the weird 30-second fixes that otherwise become 30-minute searches: Dovecot cleartext auth for local stacks, ntfy Android Instant Delivery for non-ntfy.sh servers, clipboard limits on plain-HTTP Tailscale URLs, Radicale collection URLs, and similar traps.
 - Cookbook reliability on other computers. This is probably the area most likely to need work across different machines, GPUs, drivers, shells, and Python environments.
 - Cookbook SGLang support across platforms. Make sure SGLang setup/serve works
   predictably on Linux, Windows/WSL, macOS where possible, Docker, and common
@@ -129,20 +125,26 @@ still ride along; further slimming remains open.
   better hardware-fit models instead of scoring everything almost the same.
   Ranking should account for architecture age, quant format, VRAM/RAM fit,
   backend support, vision/mmproj requirements, and likely serve reliability.
-  _(Done: `GET /api/cookbook/hf-latest` now converts each trending entry into
-  an hwfit record and ranks it via `services.hwfit.fit.analyze_model`, which
-  already handles architecture bonus, quant quality penalty, VRAM/RAM fit and
-  backend support. Trending downloads are only a small tiebreaker bump.)_
+- Cookbook error feedback and logging. Failed downloads, dependency installs,
+  preflights, and serve jobs should show the actual command/output/error in the
+  UI, with copyable logs and clear next steps instead of just "crashed".
 - Agent prompt/context bloat. Agent mode is too heavy for smaller local models:
   tool schemas, skills, memory, documents, and instructions can eat the context
   before the user request really starts. We need slimmer prompts, better tool
   selection, smaller default tool sets, and clearer guidance for models with
   4k/8k/16k context windows.
-  _(Tool-side tiering landed: `compute_tool_retrieval_k` narrows RAG width to
-  4/5/8/12 for sub-4K / sub-8K / sub-32K / ≥32K windows, and
-  `ALWAYS_AVAILABLE_SMALL` (ask_user + update_plan) is the baseline when the
-  window is under 8K. Skills/documents/instructions still ride along; further
-  prompt slimming remains open.)_
+- Local model speculative decoding support. For Odysseus-tuned local models,
+  plan to ship or recommend a small same-tokenizer draft model when the serving
+  backend supports it. Early vLLM testing showed a generic `Qwen3-0.6B` draft
+  beside `Qwen3-8B` can materially reduce wall time, while an unsupported
+  DSpark conversion performed poorly. Treat this as a supported draft-model lane
+  first; keep MTP-specific packaging as future work only when the architecture
+  and runtime support are real. Judge this by time-to-success, tool correctness,
+  grammar, and unchanged target output, not tokens/sec alone.
+- Skill/tool prompt-injection audit. User-editable skills, notes, documents,
+  fetched pages, and memories should be treated as untrusted data. Keep testing
+  whether models follow malicious instructions from those surfaces.
+- Better degraded-state reporting for ChromaDB, SearXNG, email, ntfy, and provider probes.
 - Email performance audit. Fetching, searching, opening, deleting, and sending
   email can feel slow, especially over IMAP/SMTP providers with high latency.
   Need someone who knows mail performance to profile the current flow, identify
@@ -251,16 +253,6 @@ stays re-editable without shipping a rendering engine in JS.
 ## Refactor Targets
 - CSS cleanup. `static/style.css` basically Calypso's island atm.
 - Tour core helper. The onboarding tours have too much copy-pasted scaffolding; promote a shared `tour-core.js` helper before adding more tours.
-  _(Partially done: `static/js/tour-core.js` now owns `ensureTourStyles` /
-  `clearComposer` / `makeHalo` / `pollForModal` / `positionTooltip` /
-  `beginSession` / `runTour` / `cancelActiveTour`. The 5 linear tours
-  (Theme/Settings/Gallery/Notes/Brain) call `runTour({...})` in a single
-  shot; the 5 multi-phase handlers (Compare/Cookbook/Library/Research/Tasks)
-  and `_runChatTour` still drive halos/tooltip directly, but they all use
-  `ensureTourStyles()` for the CSS block. Guards live in
-  `tests/test_tour_core_extraction.py`. Remaining: migrate multi-phase
-  handlers to `beginSession(...)` so the halo/step closures come from one
-  place too.)_
 - Modal/window positioning cleanup. Some window controls have improved, but the
   underlying popup/dropdown/fixed-position behavior is still too fragile.
 - Mobile media override discoverability. A lot of "CSS did not move" bugs are mobile `@media` overrides of the same selector; comments or linting around desktop/mobile paired rules would help.

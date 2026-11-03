@@ -1,10 +1,11 @@
 // Model Picker — chatbox model selector dropdown
 // Extracted from sessions.js
 
-import { providerLogo } from './providers.js';
-import uiModule from './ui.js';
-import settingsModule from './settings.js';
+import { providerLogo, providerLabel } from './providers.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
+import settingsModule from './settings.js?v=20260912writingstyle3';
 import { sortModelObjects } from './modelSort.js';
+import spinnerModule from './spinner.js';
 
 const API_BASE = window.location.origin;
 
@@ -51,6 +52,11 @@ function _toggleFavorite(mid) {
   return i < 0; // true when now favorited
 }
 
+function _pickerModelKey(m) {
+  if (!m) return '';
+  return `${m.endpointId || m.url || m.epName || 'model'}::${m.mid || ''}`;
+}
+
 // ── Shared keyboard nav for model pickers ──
 function _handlePickerKeydown(e, listEl, itemSelector, closeFn) {
   if (e.key === 'Escape') { closeFn(); return; }
@@ -78,6 +84,7 @@ function _handlePickerKeydown(e, listEl, itemSelector, closeFn) {
 let _deps = null;
 let _autoSelectingDefault = false;
 let _defaultChatPickInFlight = false;
+let _defaultPendingSeq = 0;
 
 function _modelExists(modelId, url) {
   if (!modelId || !window.modelsModule || !window.modelsModule.getCachedItems) return false;
@@ -121,17 +128,29 @@ async function _ensureDefaultPendingChat() {
   if (!_deps || _defaultChatPickInFlight) return;
   if (_deps.getCurrentSessionId && _deps.getCurrentSessionId()) return;
   const pending = _deps.getPendingChat && _deps.getPendingChat();
-  if (pending && pending.modelId && pending.source === 'manual') return;
+  if (pending && pending.modelId && pending.source !== 'fallback') return;
   _defaultChatPickInFlight = true;
+  const seq = ++_defaultPendingSeq;
   try {
-    await _ensureModelCacheForFallback();
     let dc = null;
     try {
-      const res = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
-      if (res.ok) dc = await res.json();
+      dc = window.__odysseusDefaultChat || null;
     } catch (_) {}
-    if (dc && dc.endpoint_url && dc.model && _modelExists(dc.model, dc.endpoint_url)) {
-      const pendingUrl = String((pending && pending.url) || '').replace(/\/+$/, '');
+    if (!dc || !dc.endpoint_url || !dc.model) {
+      try {
+        const res = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
+        if (res.ok) dc = await res.json();
+      } catch (_) {}
+    }
+    if (dc && dc.endpoint_url && dc.model) {
+      if (seq !== _defaultPendingSeq) return;
+      const latest = _deps.getPendingChat && _deps.getPendingChat();
+      if (latest && latest.modelId && latest.source !== 'default' && latest.source !== 'fallback') return;
+      try {
+        window.__odysseusDefaultChat = dc;
+        localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(dc));
+      } catch (_) {}
+      const pendingUrl = String((latest && latest.url) || '').replace(/\/+$/, '');
       const defaultUrl = String(dc.endpoint_url || '').replace(/\/+$/, '');
       _deps.setPendingChat({
         url: dc.endpoint_url,
@@ -139,17 +158,20 @@ async function _ensureDefaultPendingChat() {
         endpointId: dc.endpoint_id || '',
         source: 'default',
       });
-      try { window.__odysseusDefaultChat = dc; } catch (_) {}
-      if (!pending || pending.modelId !== dc.model || pendingUrl !== defaultUrl || pending.source !== 'default') {
+      if (!latest || latest.modelId !== dc.model || pendingUrl !== defaultUrl || latest.source !== 'default') {
         updateModelPicker();
       }
       return;
     }
     if (pending && pending.modelId) return;
+    await _ensureModelCacheForFallback();
     // No configured default, or the configured default is gone/offline:
     // preserve the convenience fallback and keep the picker usable.
     const fallback = _firstAvailableModel();
     if (fallback) {
+      if (seq !== _defaultPendingSeq) return;
+      const latest = _deps.getPendingChat && _deps.getPendingChat();
+      if (latest && latest.modelId && latest.source !== 'default' && latest.source !== 'fallback') return;
       _deps.setPendingChat({ ...fallback, source: 'fallback' });
       updateModelPicker();
     }
@@ -180,7 +202,10 @@ function _initModelPickerDropdown() {
   const listEl = document.getElementById('model-picker-list');
   const searchRow = menu ? menu.querySelector('.model-picker-search-row') : null;
   const refreshBtn = document.getElementById('model-picker-refresh-btn');
+  _initReasoningEffort();
   if (!wrap || !btn || !menu || !search || !listEl) return;
+  if (wrap.dataset.modelPickerBound === '1') return;
+  wrap.dataset.modelPickerBound = '1';
 
   function _close() {
     if (menu.classList.contains('hidden')) return;
@@ -227,10 +252,12 @@ function _initModelPickerDropdown() {
 
   // Local endpoint health — only probed for LOCAL endpoints, since
   // cloud APIs are essentially always up. Cached briefly on the
-  // server side too (8s TTL). Picker opens trigger a refresh.
+  // server side too (8s TTL).
   let _localProbe = {};            // {endpoint_id: {alive, latency_ms, error}}
   let _localProbeFetchedAt = 0;
   const _LOCAL_PROBE_TTL_MS = 5000;
+  let _pickerLoading = false;
+  let _pickerLoadSeq = 0;
 
   async function _refreshLocalProbe() {
     try {
@@ -264,17 +291,24 @@ function _initModelPickerDropdown() {
       const probeResult = item.endpoint_id ? _localProbe[item.endpoint_id] : null;
       const isLocalDead = !!(probeResult && probeResult.alive === false);
       allModels.forEach((mid, i) => {
-        // Deduplicate by model ID — prefer ONLINE endpoint entries over
-        // offline duplicates so the user gets a working endpoint first
-        // when the same model is exposed by both.
-        if (seen.has(mid)) return;
-        seen.add(mid);
+        // A registered route is a user choice, including local routes using
+        // identical weights with different harness profiles. Never collapse
+        // distinct endpoints just because their model IDs match.
+        const isApiEndpoint = item.category && item.category !== 'local';
+        const seenKey = isApiEndpoint
+          ? `${item.endpoint_id || item.url || item.endpoint_name || 'api'}::${mid}`
+          : _pickerModelKey({ endpointId: item.endpoint_id, url: item.url, epName: item.endpoint_name, mid }); // const seenKey = _pickerModelKey(
+        if (seen.has(seenKey)) return;
+        seen.add(seenKey);
         result.push({
+          key: seenKey,
           mid,
           display: (allDisplay[i] || mid).split('/').pop(),
           url: item.url,
           endpointId: item.endpoint_id,
           epName: item.endpoint_name || '',
+          category: item.category || '',
+          modelsMetadata: item.models_metadata || {},
           providerText: [
             item.endpoint_name || '',
             item.category || '',
@@ -290,6 +324,49 @@ function _initModelPickerDropdown() {
       });
     });
     return sortModelObjects(result);
+  }
+
+  function _hasModelCache() {
+    try {
+      return !!(window.modelsModule && window.modelsModule.getCachedItems && (window.modelsModule.getCachedItems() || []).length);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function _renderLoading(text = 'Loading models…') {
+    listEl.innerHTML = '';
+    listEl.classList.remove('is-empty');
+    listEl.classList.add('is-loading');
+    menu.classList.remove('no-models');
+    if (search) search.placeholder = text;
+    let row = null;
+    try {
+      row = spinnerModule.createLoadingRow(text, 15);
+    } catch (_) {
+      row = document.createElement('div');
+      row.className = 'model-switch-empty';
+      row.textContent = text;
+    }
+    row.classList.add('model-picker-loading-row');
+    listEl.appendChild(row);
+  }
+
+  async function _refreshPickerModels({ force = false, showLoading = false } = {}) {
+    if (!window.modelsModule || typeof window.modelsModule.refreshModels !== 'function') return false;
+    const seq = ++_pickerLoadSeq;
+    _pickerLoading = true;
+    if (showLoading) _renderLoading(force ? 'Refreshing models…' : 'Loading models…');
+    try {
+      await window.modelsModule.refreshModels(force, { waitForRefresh: force });
+      await _refreshLocalProbe();
+    } finally {
+      if (seq === _pickerLoadSeq) {
+        _pickerLoading = false;
+        listEl.classList.remove('is-loading');
+      }
+    }
+    return seq === _pickerLoadSeq;
   }
 
   // ── Provider display names and grouping ──
@@ -329,8 +406,28 @@ function _initModelPickerDropdown() {
     'bytedance-seed': 'bytedance', '~anthropic': 'anthropic',
     '~google': 'google', '~moonshotai': 'moonshotai', '~openai': 'openai',
   };
-  function _providerDisplayName(slug) {
-    return _PROVIDER_NAMES[slug] || slug.charAt(0).toUpperCase() + slug.slice(1).replace(/-/g, ' ');
+  const _endpointGroupNames = new Map();
+  function _providerGroupKey(m) {
+    if (!m) return 'other';
+    // Grouping must be keyed on endpoint_id, falling back to url or epName
+    const gid = m.endpointId || m.url || (m.category && m.category !== 'local' && m.epName ? m.epName : '');
+    if (gid) {
+      const gname = m.epName || (m.endpointId ? m.endpointId : (m.url || 'Other Models'));
+      _endpointGroupNames.set(gid, gname);
+      return `~endpoint:${gid}`;
+    }
+    if (m.category && m.category !== 'local' && m.epName) {
+      _endpointGroupNames.set(m.epName, m.epName);
+      return `~endpoint:${m.epName}`;
+    }
+    return _providerSlug((m && m.mid) || '');
+  }
+  function _providerGroupName(provider) {
+    if (String(provider || '').startsWith('~endpoint:')) {
+      const raw = String(provider).slice('~endpoint:'.length);
+      return _endpointGroupNames.get(raw) || raw;
+    }
+    return _providerDisplayName(provider);
   }
   function _providerSlug(mid) {
     const slash = mid.indexOf('/');
@@ -342,6 +439,7 @@ function _initModelPickerDropdown() {
 
   function _populate(filter) {
     listEl.innerHTML = '';
+    listEl.classList.remove('is-loading');
     const all = _getAllModels();
     const q = (filter || '').trim().toLowerCase();
     const hasAnyModel = all.length > 0;
@@ -359,7 +457,12 @@ function _initModelPickerDropdown() {
     // Unique lookup so Recent/Favorites (stored as bare model IDs) can be
     // resolved back to full model objects; drops anything no longer offered.
     const byId = new Map();
-    all.forEach(m => { if (!byId.has(m.mid)) byId.set(m.mid, m); });
+    const byKey = new Map();
+    all.forEach(m => {
+      const key = _pickerModelKey(m);
+      if (key && !byKey.has(key)) byKey.set(key, m);
+      if (!byId.has(m.mid)) byId.set(m.mid, m);
+    });
 
     const favs = _loadFavorites();
 
@@ -375,7 +478,7 @@ function _initModelPickerDropdown() {
       empty.textContent = text;
       listEl.appendChild(empty);
     }
-    function _addRow(m) {
+    function _addRow(m, { inGroup = false } = {}) {
       const row = document.createElement('div');
       row.className = 'model-switch-item';
       if (m.stale) {
@@ -405,17 +508,18 @@ function _initModelPickerDropdown() {
       const epSpan = document.createElement('span');
       epSpan.className = 'model-switch-ep';
       // Don't show endpoint name if it matches the model name (local self-hosted)
-      const _epDisplay = m.epName && !m.display.toLowerCase().includes(m.epName.toLowerCase().split('/').pop()) ? m.epName : '';
+      // or if it's already rendered under its endpoint group header
+      const _epDisplay = (!inGroup && m.epName && !m.display.toLowerCase().includes(m.epName.toLowerCase().split('/').pop())) ? m.epName : '';
       epSpan.textContent = _epDisplay;
       row.appendChild(epSpan);
 
-      // Inline favorite dot — toggles favorite, never picks the model.
+      // Inline favorite button — toggles favorite, never picks the model.
       const favDot = document.createElement('button');
       favDot.type = 'button';
       favDot.className = 'mp-fav-dot' + (favs.includes(m.mid) ? ' active' : '');
-      favDot.textContent = '●';
       const _setFavState = (on) => {
         favDot.classList.toggle('active', on);
+        favDot.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="${on ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`;
         favDot.title = on ? 'Remove from favorites' : 'Add to favorites';
         favDot.setAttribute('aria-label', on ? 'Remove from favorites' : 'Add to favorites');
         favDot.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -448,113 +552,142 @@ function _initModelPickerDropdown() {
       listEl.appendChild(row);
     }
 
-    // ── Search mode: flat, filtered results across the whole catalog ──
+    function _renderGroup(provider, models, { isSearch = false } = {}) {
+      if (!models || !models.length) return;
+      const isCollapsed = !isSearch && _collapsedProviders.has(provider);
+      const header = document.createElement('div');
+      header.className = 'mp-provider-header';
+      header.innerHTML =
+        `<svg class="mp-provider-chevron${isCollapsed ? ' collapsed' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'mp-provider-name';
+      nameSpan.textContent = _providerGroupName(provider);
+      header.appendChild(nameSpan);
+      const countSpan = document.createElement('span');
+      countSpan.className = 'mp-provider-count';
+      countSpan.textContent = `${models.length} model${models.length === 1 ? '' : 's'}`;
+      header.appendChild(countSpan);
+
+      header.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (_collapsedProviders.has(provider)) {
+          _collapsedProviders.delete(provider);
+          _justExpandedProvider = provider;
+        } else {
+          _collapsedProviders.add(provider);
+          _justExpandedProvider = null;
+        }
+        _saveList('odysseus-model-collapsed', [..._collapsedProviders]);
+        const st = listEl.scrollTop;
+        _populate(search ? search.value : '');
+        listEl.scrollTop = st;
+      });
+      listEl.appendChild(header);
+
+      if (!isCollapsed) {
+        const group = document.createElement('div');
+        group.className = 'mp-provider-group' + (_justExpandedProvider === provider ? ' mp-just-expanded' : '');
+        models.forEach(m => {
+          _addRow(m, { inGroup: true });
+          // Move the just-appended row into the group container
+          group.appendChild(listEl.lastElementChild);
+        });
+        listEl.appendChild(group);
+        if (_justExpandedProvider === provider) _justExpandedProvider = null;
+      }
+    }
+
+    // ── Search mode: grouped, filtered results across the whole catalog ──
     if (q) {
       const matches = all.filter(m => {
-        const provName = _providerDisplayName(_providerSlug(m.mid)).toLowerCase();
-        return [m.mid, m.display, m.epName, m.providerText, provName]
+        const groupKey = _providerGroupKey(m);
+        const groupName = _providerGroupName(groupKey).toLowerCase();
+        return [m.mid, m.display, m.epName, m.providerText, groupName]
           .filter(Boolean).join(' ').toLowerCase().includes(q);
       });
-      if (matches.length === 0) _addEmpty('No matching models');
-      else matches.forEach(_addRow);
+      if (matches.length === 0) {
+        _addEmpty('No matching models');
+      } else {
+        const groups = new Map();
+        matches.forEach(m => {
+          const key = _providerGroupKey(m);
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(m);
+        });
+        const sorted = [...groups.keys()].sort((a, b) =>
+          _providerGroupName(a).localeCompare(_providerGroupName(b)));
+        sorted.forEach(provider => {
+          _renderGroup(provider, groups.get(provider), { isSearch: true });
+        });
+      }
       return;
     }
 
     // ── Browse mode: Favorites (manual) + Recent (auto), with dedupe. ──
-    // Rules:
-    //   1. Never list the same model twice in the dropdown. Favorites
-    //      win over Recent (if you favorited it, that's where it
-    //      belongs — Recent shouldn't show it again as duplicate).
-    //   2. Small catalogs (≤ BROWSE_ALL_LIMIT total) skip the Recent
-    //      section entirely — when there's only ~10 models, the whole
-    //      list fits below as "All models" and a separate Recent
-    //      section just duplicates rows.
     const shown = new Set();
-    const favModels = favs.map(id => byId.get(id)).filter(Boolean);
+    const favModels = favs.map(id => byKey.get(id) || byId.get(id)).filter(Boolean);
     if (favModels.length) {
       _addSection('Favorites');
-      favModels.forEach(m => { shown.add(m.mid); _addRow(m); });
+      favModels.forEach(m => { shown.add(_pickerModelKey(m)); _addRow(m, { inGroup: false }); });
     }
     // Recent: only render when the catalog is big enough that surfacing
     // a recency shortlist is actually useful, AND only models that
     // aren't already in Favorites (dedupe).
     if (all.length > BROWSE_ALL_LIMIT) {
       const recentModels = _loadRecent()
-        .map(id => byId.get(id))
+        .map(id => byKey.get(id) || byId.get(id))
         .filter(Boolean)
-        .filter(m => !shown.has(m.mid))
+        .filter(m => !shown.has(_pickerModelKey(m)))
         .slice(0, RECENT_MAX);
       if (recentModels.length) {
         _addSection('Recent');
-        recentModels.forEach(m => { shown.add(m.mid); _addRow(m); });
+        recentModels.forEach(m => { shown.add(_pickerModelKey(m)); _addRow(m, { inGroup: false }); });
       }
     }
 
-    // Small catalogs: still list everything so users aren't forced to search.
-    if (all.length <= BROWSE_ALL_LIMIT) {
-      const rest = all.filter(m => !shown.has(m.mid));
-      if (rest.length) {
-        if (shown.size) _addSection('All models');
-        rest.forEach(_addRow);
-      }
-    } else {
-      // Large catalog: show provider groups with collapsible sections.
-      const rest = all.filter(m => !shown.has(m.mid));
-      const groups = new Map();
-      rest.forEach(m => {
-        const slug = _providerSlug(m.mid);
-        if (!groups.has(slug)) groups.set(slug, []);
-        groups.get(slug).push(m);
-      });
-      const sorted = [...groups.keys()].sort((a, b) =>
-        _providerDisplayName(a).localeCompare(_providerDisplayName(b)));
+    // Provider / endpoint groups with collapsible sections.
+    const rest = all.filter(m => !shown.has(_pickerModelKey(m)));
+    const groups = new Map();
+    rest.forEach(m => {
+      const key = _providerGroupKey(m);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(m);
+    });
+    const sorted = [...groups.keys()].sort((a, b) =>
+      _providerGroupName(a).localeCompare(_providerGroupName(b)));
 
-      sorted.forEach(provider => {
-        const models = groups.get(provider);
-        const isCollapsed = _collapsedProviders.has(provider);
-        const header = document.createElement('div');
-        header.className = 'mp-provider-header';
-        header.innerHTML =
-          `<svg class="mp-provider-chevron${isCollapsed ? ' collapsed' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`
-          + `<span class="mp-provider-name">${_providerDisplayName(provider)}</span>`
-          + `<span class="mp-provider-count">${models.length}</span>`;
-        header.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (_collapsedProviders.has(provider)) {
-            _collapsedProviders.delete(provider);
-            _justExpandedProvider = provider;
-          } else {
-            _collapsedProviders.add(provider);
-            _justExpandedProvider = null;
-          }
-          _saveList('odysseus-model-collapsed', [..._collapsedProviders]);
-          const st = listEl.scrollTop;
-          _populate('');
-          listEl.scrollTop = st;
-        });
-        listEl.appendChild(header);
-        if (!isCollapsed) {
-          const group = document.createElement('div');
-          group.className = 'mp-provider-group' + (_justExpandedProvider === provider ? ' mp-just-expanded' : '');
-          models.forEach(m => {
-            _addRow(m);
-            // Move the just-appended row into the group container
-            group.appendChild(listEl.lastElementChild);
-          });
-          listEl.appendChild(group);
-          if (_justExpandedProvider === provider) _justExpandedProvider = null;
-        }
-      });
-    }
+    sorted.forEach(provider => {
+      _renderGroup(provider, groups.get(provider), { isSearch: false });
+    });
   }
 
-  async function _pick(m) {
+async function _pick(m) {
+    _defaultPendingSeq++;
+    try {
+      window.__odysseusLastPickedRoute = {
+        model: m.mid || '',
+        endpoint_url: m.url || '',
+        endpoint_id: m.endpointId || '',
+        display: m.display || m.mid || '',
+        picked_at: Date.now(),
+        session_id: _deps.getCurrentSessionId() || null,
+      };
+    } catch (_) {}
+    let switchDone = null;
+    const switchPromise = new Promise(resolve => { switchDone = resolve; });
+    try { window.__odysseusModelSwitchPromise = switchPromise; } catch (_) {}
+    const finishSwitch = () => {
+      try {
+        if (switchDone) switchDone();
+        if (window.__odysseusModelSwitchPromise === switchPromise) delete window.__odysseusModelSwitchPromise;
+      } catch (_) {}
+    };
     const currentSessionId = _deps.getCurrentSessionId();
     const _pendingChat = _deps.getPendingChat();
 
     // Remember this pick so it surfaces under "Recent" next time the picker
     // opens — the whole point of quick-switch.
-    if (m && m.mid) _pushRecent(m.mid);
+    if (m && m.mid) _pushRecent(_pickerModelKey(m) || m.mid);
 
     // Broadcast immediately so listeners (e.g. the tour) can advance without
     // waiting for the async session-create/PATCH that follows.
@@ -574,12 +707,23 @@ function _initModelPickerDropdown() {
       // Header stays as session name — model switch only updates picker
       updateModelPicker();
       uiModule.showToast(`Using ${m.display}`);
+      finishSwitch();
       return;
     } else if (!currentSessionId) {
       // No session yet — create one with this model
-      await _deps.createDirectChat(m.url, m.mid, m.endpointId);
+      try {
+        await _deps.createDirectChat(m.url, m.mid, m.endpointId);
+      } catch (e) {
+        uiModule.showError('Failed to start chat: ' + e);
+        finishSwitch();
+        return;
+      }
     } else {
       // Existing session with no model — PATCH it
+      const sessions = _deps.getSessions();
+      const s = sessions.find(x => x.id === currentSessionId);
+      if (s) { s.model = m.mid; s.endpoint_url = m.url; s.endpoint_id = m.endpointId || ''; s.endpoint_name = m.epName || ''; }
+      updateModelPicker();
       const fd = new FormData();
       fd.append('model', m.mid);
       fd.append('endpoint_url', m.url);
@@ -588,20 +732,21 @@ function _initModelPickerDropdown() {
         const res = await fetch(`${API_BASE}/api/session/${currentSessionId}`, { method: 'PATCH', body: fd });
         if (!res.ok) {
           uiModule.showError('Failed to set model');
+          finishSwitch();
           return;
         }
-        const sessions = _deps.getSessions();
-        const s = sessions.find(x => x.id === currentSessionId);
-        if (s) { s.model = m.mid; s.endpoint_url = m.url; }
         // Header stays as session name — model info shown in picker only
       } catch (e) {
         uiModule.showError('Failed to set model: ' + e);
+        finishSwitch();
         return;
       }
     }
     // Update picker visibility — model is now set
     updateModelPicker();
+    if (window.refreshChatContextHeader) window.refreshChatContextHeader('model-pick');
     uiModule.showToast(`Using ${m.display}`);
+    finishSwitch();
   }
 
   document.addEventListener('odysseus:auto-select-model', async (e) => {
@@ -650,15 +795,26 @@ function _initModelPickerDropdown() {
     if (match) await _pick(match);
   });
 
+  btn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (menu.classList.contains('hidden') || menu.classList.contains('closing')) {
       // Force-clear any in-progress close animation
       menu.classList.remove('closing', 'hidden');
-      _populate('');
+      const hasCache = _hasModelCache();
+      if (hasCache) {
+        _populate('');
+      } else {
+        _renderLoading('Loading models…');
+      }
       if (window.modelsModule && window.modelsModule.refreshModels) {
-        window.modelsModule.refreshModels().then(() => {
-          if (!menu.classList.contains('hidden')) _populate(search.value || '');
+        // Open instantly from cache; never force a re-probe on open (a dead
+        // endpoint would otherwise stall every open). The explicit refresh
+        // button still forces a full re-probe.
+        _refreshPickerModels({ force: false, showLoading: !hasCache }).then(isLatest => {
+          if (isLatest && !menu.classList.contains('hidden')) _populate(search.value || '');
           updateModelPicker();
         }).catch(() => {});
       }
@@ -671,7 +827,10 @@ function _initModelPickerDropdown() {
     }
   });
 
-  search.addEventListener('input', () => _populate(search.value));
+  search.addEventListener('input', () => {
+    if (_pickerLoading) return;
+    _populate(search.value);
+  });
   search.addEventListener('click', (e) => e.stopPropagation());
   if (refreshBtn) {
     refreshBtn.addEventListener('click', async (e) => {
@@ -679,10 +838,7 @@ function _initModelPickerDropdown() {
       refreshBtn.disabled = true;
       refreshBtn.classList.add('spinning');
       try {
-        if (window.modelsModule && window.modelsModule.refreshModels) {
-          await window.modelsModule.refreshModels(true);
-        }
-        await _refreshLocalProbe();
+        await _refreshPickerModels({ force: true, showLoading: true });
         if (!menu.classList.contains('hidden')) _populate(search.value || '');
         updateModelPicker();
       } catch (_) {
@@ -704,7 +860,7 @@ function _initModelPickerDropdown() {
     });
   }
   document.addEventListener('click', (e) => {
-    if (!menu.classList.contains('hidden') && !menu.contains(e.target) && e.target !== btn) {
+    if (!menu.classList.contains('hidden') && !wrap.contains(e.target)) {
       _close();
     }
   });
@@ -738,14 +894,31 @@ export function updateModelPicker() {
   let modelId = null;
   if (s && s.model) {
     modelId = s.model;
-    if (!_modelExists(modelId, s.endpoint_url || '')) {
-      modelId = null;
-    }
   } else if (_pendingChat && _pendingChat.modelId) {
     modelId = _pendingChat.modelId;
-    if (!_modelExists(modelId, _pendingChat.url || '')) {
+    if (_pendingChat.source === 'fallback' && !_modelExists(modelId, _pendingChat.url || '')) {
       _deps.setPendingChat(null);
       modelId = null;
+    }
+  }
+  if (!modelId && !currentSessionId && !_pendingChat && _deps.setPendingChat) {
+    let cachedDefault = null;
+    try {
+      cachedDefault = window.__odysseusDefaultChat || null;
+    } catch (_) {}
+    if (!cachedDefault || !cachedDefault.endpoint_url || !cachedDefault.model) {
+      try {
+        cachedDefault = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+      } catch (_) {}
+    }
+    if (cachedDefault && cachedDefault.endpoint_url && cachedDefault.model) {
+      modelId = cachedDefault.model;
+      _deps.setPendingChat({
+        url: cachedDefault.endpoint_url,
+        modelId,
+        endpointId: cachedDefault.endpoint_id || '',
+        source: 'default',
+      });
     }
   }
   // SECURITY: deliberately NOT auto-injecting `odysseus-model-favorites[0]`
@@ -757,7 +930,14 @@ export function updateModelPicker() {
   //
   // Check if selected model is still available — fall back ONLY for pending chats with no user selection
   // Never override an existing session's model — the user explicitly chose it
-  if (modelId && !currentSessionId && _pendingChat && window.modelsModule && window.modelsModule.getCachedItems) {
+  if (
+    modelId &&
+    !currentSessionId &&
+    _pendingChat &&
+    _pendingChat.source !== 'manual' &&
+    window.modelsModule &&
+    window.modelsModule.getCachedItems
+  ) {
     const items = window.modelsModule.getCachedItems();
     const allAvailable = [];
     items.forEach(item => {
@@ -774,6 +954,38 @@ export function updateModelPicker() {
     }
   }
   const latestPending = _deps.getPendingChat && _deps.getPendingChat();
+
+  let displayName = modelId ? modelId.split('/').pop() : 'Select model';
+  const routeItems = window.modelsModule?.getCachedItems?.() || [];
+  const candidates = routeItems.filter(item => (item.models || []).concat(item.models_extra || []).includes(modelId));
+  const selectedId = s?.endpoint_id || latestPending?.endpointId;
+  const selectedUrl = s?.endpoint_url || latestPending?.url || '';
+  const normalizeRouteUrl = url => String(url || '').replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '');
+  const selectedEndpoint = candidates.find(item => selectedId ? item.endpoint_id === selectedId
+    : normalizeRouteUrl(item.url) === normalizeRouteUrl(selectedUrl));
+  const routeName = s?.endpoint_name || selectedEndpoint?.endpoint_name || '';
+  const endpointUrl = selectedUrl || selectedEndpoint?.url || '';
+  const detectedProvider = selectedEndpoint?.category === 'local'
+    ? 'Local' : providerLabel(endpointUrl || routeName);
+  let addressLabel = !routeName;
+  try {
+    const endpoint = new URL(endpointUrl);
+    addressLabel = addressLabel || [endpoint.host, endpoint.hostname, endpointUrl].includes(routeName);
+  } catch (_) {}
+  const provider = addressLabel ? detectedProvider : routeName;
+  if (modelId && provider) displayName = `${provider} · ${displayName}`;
+  // Keep route details and the full model ID available without putting raw
+  // local addresses in the compact picker label.
+  label.title = modelId ? [...new Set([modelId, routeName, endpointUrl].filter(Boolean))].join(' · ') : '';
+  const logo = modelId ? providerLogo(modelId) : null;
+  if (logo) {
+    label.innerHTML = '<span class="model-picker-logo">' + logo + '</span> ';
+    label.appendChild(document.createTextNode(displayName));
+  } else {
+    label.textContent = displayName;
+  }
+  _updateReasoningEffortUI(modelId, s, latestPending, selectedEndpoint);
+  // A cached default can resolve synchronously and re-render the picker.
   if (
     !currentSessionId &&
     !_autoSelectingDefault &&
@@ -783,15 +995,174 @@ export function updateModelPicker() {
   ) {
     _ensureDefaultPendingChat();
   }
+}
 
-  const displayName = modelId ? modelId.split('/').pop() : 'Select model';
-  // The header indicator clips long names with ellipsis; show the full model
-  // identifier on hover (#1982). No tooltip on the "Select model" placeholder.
-  label.title = modelId || '';
-  const logo = modelId ? providerLogo(modelId) : null;
-  if (logo) {
-    label.innerHTML = '<span class="model-picker-logo">' + logo + '</span> ' + displayName;
-  } else {
-    label.textContent = displayName;
+// ── Reasoning effort control for models supporting reasoning levels ──
+let _reasoningEffortBound = false;
+let _pendingReasoningEffort = null;
+
+export function getSelectedReasoningEffort() {
+  if (!_deps) return _pendingReasoningEffort;
+  const currentSessionId = _deps.getCurrentSessionId ? _deps.getCurrentSessionId() : null;
+  if (!currentSessionId) return _pendingReasoningEffort;
+  const sessions = _deps.getSessions ? _deps.getSessions() : [];
+  const s = sessions.find(x => x.id === currentSessionId);
+  const mode = s?.thinking_mode || '';
+  if (mode.startsWith('effort:')) {
+    return mode.slice('effort:'.length).trim().toLowerCase();
+  }
+  return null;
+}
+try { window.__odysseusGetReasoningEffort = getSelectedReasoningEffort; } catch (_) {}
+
+function _initReasoningEffort() {
+  if (_reasoningEffortBound) return;
+  const wrap = document.getElementById('reasoning-effort-wrap');
+  const btn = document.getElementById('reasoning-effort-btn');
+  const menu = document.getElementById('reasoning-effort-menu');
+  if (!wrap || !btn || !menu) return;
+  _reasoningEffortBound = true;
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isHidden = menu.classList.contains('hidden');
+    if (isHidden) {
+      menu.classList.remove('hidden');
+      btn.setAttribute('aria-expanded', 'true');
+    } else {
+      menu.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!wrap.contains(e.target) && !menu.classList.contains('hidden')) {
+      menu.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
+    }
+  });
+}
+
+function _findModelMetadata(modelId, selectedEndpoint) {
+  if (selectedEndpoint?.models_metadata?.[modelId]) {
+    return selectedEndpoint.models_metadata[modelId];
+  }
+  const routeItems = window.modelsModule?.getCachedItems?.() || [];
+  for (const ep of routeItems) {
+    if (ep.models_metadata && ep.models_metadata[modelId]) {
+      return ep.models_metadata[modelId];
+    }
+  }
+  return null;
+}
+
+async function _updateReasoningEffortUI(modelId, s, latestPending, selectedEndpoint) {
+  _initReasoningEffort();
+  const wrap = document.getElementById('reasoning-effort-wrap');
+  const btn = document.getElementById('reasoning-effort-btn');
+  const currentSpan = document.getElementById('reasoning-effort-current');
+  const menu = document.getElementById('reasoning-effort-menu');
+  if (!wrap || !btn || !currentSpan || !menu) return;
+
+  if (!modelId) {
+    wrap.style.display = 'none';
+    return;
+  }
+
+  const metadata = _findModelMetadata(modelId, selectedEndpoint);
+  const levels = metadata?.supported_reasoning_levels;
+  if (!Array.isArray(levels) || levels.length === 0) {
+    wrap.style.display = 'none';
+    return;
+  }
+
+  wrap.style.display = 'inline-flex';
+
+  const supportedEffortNames = levels.map(l => (typeof l === 'string' ? l : l.effort).toLowerCase());
+  let activeLevel = 'default';
+  const sessionMode = s?.thinking_mode || '';
+
+  if (s && s.id) {
+    if (sessionMode.startsWith('effort:')) {
+      const parsed = sessionMode.slice('effort:'.length).trim().toLowerCase();
+      if (supportedEffortNames.includes(parsed)) {
+        activeLevel = parsed;
+      } else {
+        activeLevel = 'default';
+        s.thinking_mode = 'off';
+        try {
+          fetch(`${API_BASE}/api/session/${encodeURIComponent(s.id)}/generation-settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ thinking_mode: 'off', reasoning_effort: null }),
+          }).catch(() => {});
+        } catch (_) {}
+      }
+    }
+  } else if (_pendingReasoningEffort) {
+    if (supportedEffortNames.includes(_pendingReasoningEffort)) {
+      activeLevel = _pendingReasoningEffort;
+    } else {
+      activeLevel = 'default';
+      _pendingReasoningEffort = null;
+    }
+  }
+
+  currentSpan.textContent = activeLevel === 'default' ? 'Default' : (activeLevel.charAt(0).toUpperCase() + activeLevel.slice(1));
+  btn.title = 'Reasoning effort';
+
+  menu.innerHTML = '';
+  const options = [{ effort: 'default', label: 'Default', desc: `Model default (${metadata.default_reasoning_level || 'standard'})` }];
+  for (const l of levels) {
+    const eff = (typeof l === 'string' ? l : l.effort).toLowerCase();
+    const desc = (typeof l === 'object' && l.description) ? l.description : '';
+    options.push({ effort: eff, label: eff.charAt(0).toUpperCase() + eff.slice(1), desc });
+  }
+
+  for (const opt of options) {
+    const optBtn = document.createElement('button');
+    optBtn.type = 'button';
+    optBtn.className = 'reasoning-effort-option' + (opt.effort === activeLevel ? ' active' : '');
+    optBtn.setAttribute('role', 'option');
+    optBtn.setAttribute('aria-selected', opt.effort === activeLevel ? 'true' : 'false');
+    if (opt.desc) optBtn.title = opt.desc;
+
+    const lbl = document.createElement('span');
+    lbl.textContent = opt.label;
+    optBtn.appendChild(lbl);
+
+    if (opt.effort === activeLevel) {
+      const check = document.createElement('span');
+      check.textContent = '✓';
+      check.style.fontSize = '11px';
+      optBtn.appendChild(check);
+    }
+
+    optBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      menu.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
+      const newEffort = opt.effort;
+      const thinkingModeVal = newEffort === 'default' ? 'off' : `effort:${newEffort}`;
+      const effortVal = newEffort === 'default' ? null : newEffort;
+
+      if (s && s.id) {
+        s.thinking_mode = thinkingModeVal;
+        try {
+          await fetch(`${API_BASE}/api/session/${encodeURIComponent(s.id)}/generation-settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ thinking_mode: thinkingModeVal, reasoning_effort: effortVal }),
+          });
+        } catch (_) {}
+      } else {
+        _pendingReasoningEffort = effortVal;
+      }
+      _updateReasoningEffortUI(modelId, s, latestPending, selectedEndpoint);
+    });
+
+    menu.appendChild(optBtn);
   }
 }

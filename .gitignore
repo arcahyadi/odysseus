@@ -26,6 +26,9 @@ secrets.env.*
 
 # Data — all user data stays local
 data/
+# Per-worktree runtime state written by `odysseus dev` (its own data dir,
+# logs and stop handle) — disposable, and never shared between checkouts.
+.odysseus-dev/
 !services/hwfit/data/
 !services/hwfit/data/hf_models.json
 logs/
@@ -50,6 +53,8 @@ services/data/
 
 # Test capture artifacts (browser session dumps may contain personal content)
 .playwright-mcp/
+test-results/
+playwright-report/
 
 # OS
 .DS_Store
@@ -85,6 +90,24 @@ output.txt.txt
 !docs/**/*.gif
 !docs/**/*.webp
 
+# …except shipped website and branding media.
+!website/**/*.jpg
+!website/**/*.jpeg
+!website/**/*.png
+!website/**/*.gif
+!website/**/*.bmp
+!website/**/*.webp
+!website/**/*.tiff
+!website/**/*.pdf
+!assets/branding/**/*.jpg
+!assets/branding/**/*.jpeg
+!assets/branding/**/*.png
+!assets/branding/**/*.gif
+!assets/branding/**/*.bmp
+!assets/branding/**/*.webp
+!assets/branding/**/*.tiff
+!assets/branding/**/*.pdf
+
 # Reports and temp files
 reports/
 tasks/
@@ -102,43 +125,3 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
-
-dist/
-
-build/
-
-# Portable Windows build placed at the repo root — local only, must never be
-# committed. Odysseus.exe is a PyInstaller --onedir binary whose runtime lives
-# in the sibling _internal/ directory (a junction onto dist/Odysseus/_internal),
-# so both the binary and that runtime have to stay out of git.
-/*.exe
-/_internal/
-
-# Local verification scaffolding and the local-only Phase 2 Task 10 report.
-# Harnesses and throwaway `pip --target` installs are generated locally and must
-# never enter the repo.
-/tmp_verify/
-/tmp_verify_deps/
-/tmp_pytest_probe/
-/phase2-task10-verification.md
-
-# Python test caches. These currently self-ignore via their own internal
-# .gitignore, but pin them explicitly so a cache dir can never be staged.
-.hypothesis/
-.pytest_cache/
-
-# ── Agent memory — must never be committed ─────────────────────────────────
-# The assistant's memory lives OUTSIDE this repo, under %USERPROFILE%\.accio
-# (long-term MEMORY.md, dated diary notes, and workspace memory). These rules are
-# a backstop for the case where a memory file is ever written or copied into the
-# working tree: it still cannot be staged. Root-anchored where possible, so a real
-# project file elsewhere in the tree that happens to share a name is unaffected.
-/MEMORY.md
-/ACCIO.md
-/diary/
-/.accio/
-**/agent-core/
-/.agents/
-
-# The app's own store (data/memory.json, data/app.db) is already covered by the
-# data/ rule above. A frozen build writes to %USERPROFILE%\.odysseus instead.

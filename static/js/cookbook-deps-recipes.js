@@ -6,7 +6,7 @@
 // generic fallback for that backend.
 
 // Recipes carry two variants per entry:
-//   variants.pip    → install into the configured venv via uv/pip
+//   variants.pip    → install into the configured venv via pip/uv
 //   variants.docker → pull the official container image
 //
 // The renderer prepends a `source <venv>/bin/activate` for the pip variant
@@ -55,7 +55,89 @@ const _RECIPES = [
     label: 'Any MLX model',
     match: () => true,
     variants: {
-      pip:    { commands: ['uv pip install -U mlx-lm'] },
+      pip:    { commands: ['python -m pip install -U mlx-lm'] },
+    },
+  },
+  {
+    backend: 'mflux',
+    label: 'mflux-compatible MLX image models',
+    match: () => true,
+    variants: {
+      pip:    { commands: ['python -m pip install -U mflux fastapi uvicorn python-multipart'] },
+    },
+  },
+  {
+    backend: 'boogu_image_mlx',
+    label: 'MLX image models (Boogu)',
+    match: () => true,
+    variants: {
+      pip:    { commands: ['python -m pip install -U git+https://github.com/xocialize/boogu-image-mlx.git fastapi uvicorn python-multipart pillow'] },
+    },
+  },
+  {
+    backend: 'mlx_vlm',
+    label: 'MLX image models (HiDream)',
+    match: () => true,
+    variants: {
+      pip:    { commands: ['python -m pip install -U fastapi uvicorn python-multipart mlx mlx-vlm "transformers>=4.57.0,<6.0" huggingface_hub safetensors numpy pillow tqdm sentencepiece hf_transfer'] },
+    },
+  },
+  {
+    backend: 'mlx_lama_swift',
+    label: 'MLX image editing (LaMa / MI-GAN)',
+    match: () => true,
+    variants: {
+      pip: {
+        commands: [
+          'python -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub',
+          'BRIDGE_DIR="${ODYSSEUS_ROOT:-$PWD}/swift/odysseus-mlx-image-bridge"; test -d "$BRIDGE_DIR" || { echo "Run this from an Odysseus checkout that includes swift/odysseus-mlx-image-bridge, or set ODYSSEUS_ROOT=/path/to/odysseus."; exit 1; }',
+          'BRIDGE_DIR="${ODYSSEUS_ROOT:-$PWD}/swift/odysseus-mlx-image-bridge"; cd "$BRIDGE_DIR" && swift build -c release --product odysseus-mlx-inpaint',
+          'BRIDGE_DIR="${ODYSSEUS_ROOT:-$PWD}/swift/odysseus-mlx-image-bridge"; mkdir -p "$HOME/.local/bin" && cp "$BRIDGE_DIR/.build/release/odysseus-mlx-inpaint" "$HOME/.local/bin/odysseus-mlx-inpaint"',
+          'MLX_METALLIB="$(python - <<\'PY\'\nimport pathlib, sys\ntry:\n    import mlx\nexcept Exception as exc:\n    raise SystemExit(f"mlx Python package is required for mlx.metallib: {exc}")\nroot = pathlib.Path(mlx.__file__).resolve().parent\nfor name in ("lib/mlx.metallib", "mlx.metallib", "lib/default.metallib", "default.metallib"):\n    path = root / name\n    if path.exists():\n        print(path)\n        break\nelse:\n    raise SystemExit(f"No MLX metallib found under {root}")\nPY\n)"; mkdir -p "$HOME/.local/bin" && cp "$MLX_METALLIB" "$HOME/.local/bin/mlx.metallib" && cp "$MLX_METALLIB" "$HOME/.local/bin/default.metallib"',
+        ],
+      },
+    },
+  },
+  {
+    backend: 'mlx_ddcolor_swift',
+    label: 'MLX image editing (DDColor)',
+    match: () => true,
+    variants: {
+      pip: {
+        commands: [
+          'python -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub',
+          'BRIDGE_DIR="${ODYSSEUS_ROOT:-$PWD}/swift/odysseus-mlx-image-bridge"; test -d "$BRIDGE_DIR" || { echo "Run this from an Odysseus checkout that includes swift/odysseus-mlx-image-bridge, or set ODYSSEUS_ROOT=/path/to/odysseus."; exit 1; }',
+          'BRIDGE_DIR="${ODYSSEUS_ROOT:-$PWD}/swift/odysseus-mlx-image-bridge"; cd "$BRIDGE_DIR" && swift build -c release --product odysseus-mlx-colorize',
+          'BRIDGE_DIR="${ODYSSEUS_ROOT:-$PWD}/swift/odysseus-mlx-image-bridge"; mkdir -p "$HOME/.local/bin" && cp "$BRIDGE_DIR/.build/release/odysseus-mlx-colorize" "$HOME/.local/bin/odysseus-mlx-colorize"',
+          'MLX_METALLIB="$(python - <<\'PY\'\nimport pathlib, sys\ntry:\n    import mlx\nexcept Exception as exc:\n    raise SystemExit(f"mlx Python package is required for mlx.metallib: {exc}")\nroot = pathlib.Path(mlx.__file__).resolve().parent\nfor name in ("lib/mlx.metallib", "mlx.metallib", "lib/default.metallib", "default.metallib"):\n    path = root / name\n    if path.exists():\n        print(path)\n        break\nelse:\n    raise SystemExit(f"No MLX metallib found under {root}")\nPY\n)"; mkdir -p "$HOME/.local/bin" && cp "$MLX_METALLIB" "$HOME/.local/bin/mlx.metallib" && cp "$MLX_METALLIB" "$HOME/.local/bin/default.metallib"',
+        ],
+      },
+    },
+  },
+
+  // ── Diffusers ────────────────────────────────────────────────────────
+  {
+    backend: 'diffusers',
+    label: 'Any Diffusers image model',
+    match: () => true,
+    variants: {
+      pip:    { commands: ['python -m pip install -U "diffusers[torch]" torchvision accelerate scipy python-multipart'] },
+    },
+  },
+  {
+    backend: 'krea_diffusers',
+    label: 'Latest Diffusers from Git',
+    match: () => true,
+    variants: {
+      pip:    { commands: ['python -m pip install -U git+https://github.com/huggingface/diffusers.git torchvision accelerate scipy python-multipart'] },
+    },
+  },
+  {
+    backend: 'sam_mask',
+    label: 'SAM object mask tools',
+    match: () => true,
+    variants: {
+      pip:    { commands: ['python -m pip install -U torch torchvision transformers accelerate pillow'] },
     },
   },
 
@@ -85,7 +167,7 @@ export function recipeCommands(recipe, variant) {
 // Backends we surface a recipe panel for. Other rows in the Dependencies
 // list keep the existing flat Install/Reinstall button without an expand
 // affordance.
-export const RECIPE_BACKENDS = new Set(['vllm', 'sglang', 'mlx_lm', 'llama_cpp']);
+export const RECIPE_BACKENDS = new Set(['vllm', 'sglang', 'mlx_lm', 'mflux', 'boogu_image_mlx', 'mlx_vlm', 'mlx_lama_swift', 'mlx_ddcolor_swift', 'diffusers', 'krea_diffusers', 'sam_mask', 'llama_cpp']);
 
 // All recipe entries for a given backend, in catalog order. The first one
 // is the model-specific match (when present); the last is always the

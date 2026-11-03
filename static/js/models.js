@@ -5,11 +5,11 @@
  */
 
 import Storage from './storage.js';
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 import dragSortModule from './dragSort.js';
 import spinnerModule from './spinner.js';
-import { modelColor } from './chatRenderer.js';
+import { modelColor } from './chatRenderer.js?v=20260914metricssummary1';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
 
@@ -164,20 +164,30 @@ function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
   return row;
 }
 
-export async function refreshModels(force = false) {
+export async function refreshModels(force = false, opts = {}) {
   const box = document.getElementById('models');
+  const cacheOnly = !!(opts && opts.cacheOnly);
+  const hasCache = _cachedItems.length > 0;
 
   // Skip network fetch if cache is fresh and not forced — still re-render UI
+  // Cache-only is used for cheap picker/settings opens, but it must not turn a
+  // cold page load into an empty model list. If nothing has been fetched in this
+  // tab yet, do one normal load.
   const now = Date.now();
-  const needsFetch = force || _cachedItems.length === 0 || (now - _lastFetchTime) >= _FETCH_CACHE_TTL;
+  const needsFetch = !(cacheOnly && hasCache) && (force || _cachedItems.length === 0 || (now - _lastFetchTime) >= _FETCH_CACHE_TTL);
 
-  if (box) box.innerHTML = '';
+  const hadRenderedRows = !!(box && box.children && box.children.length);
+  if (box && (!needsFetch || !hadRenderedRows)) box.innerHTML = '';
   if (needsFetch) {
     let _loadingSpinner = null;
     if (box) {
-      _loadingSpinner = spinnerModule.create('', 'right', 'wave');
-      box.appendChild(_loadingSpinner.createElement());
-      _loadingSpinner.start();
+      if (hadRenderedRows) {
+        box.classList.add('models-refreshing');
+      } else {
+        _loadingSpinner = spinnerModule.create('', 'right', 'wave');
+        box.appendChild(_loadingSpinner.createElement());
+        _loadingSpinner.start();
+      }
     }
     try {
       if (force) _fetchInflight = null;
@@ -189,7 +199,9 @@ export async function refreshModels(force = false) {
         // ages out. (Bug repro: serve a model, picker is empty for ~30s
         // even though the endpoint is in the DB and online.)
         const _seq = ++_fetchSeq;
-        const _url = `${API_BASE}/api/models` + (force ? '?refresh=true' : '?background=false');
+        const _url = `${API_BASE}/api/models` + (force
+          ? `?refresh=true${opts.waitForRefresh ? '&wait_refresh=true' : ''}`
+          : '?background=false');
         _fetchInflight = fetch(_url, { credentials: 'same-origin' })
           .then(async (res) => {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -208,6 +220,7 @@ export async function refreshModels(force = false) {
       return;
     } finally {
       try { _loadingSpinner && _loadingSpinner.stop && _loadingSpinner.stop(); } catch (_) {}
+      if (box) box.classList.remove('models-refreshing');
       if (box) box.innerHTML = '';
     }
   }
@@ -576,33 +589,12 @@ export async function refreshModels(force = false) {
           + '<span class="muted-sm">Ask an admin to configure model endpoints</span>';
       }
       box.appendChild(noModels);
-      // No endpoints yet: keep the welcome screen focused on first setup.
-      const welcomeSub = document.getElementById('welcome-sub');
-      if (welcomeSub) welcomeSub.innerHTML = 'Type <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">/setup</span> to get started.';
-      const welcomeTip = document.getElementById('welcome-tip');
-      if (welcomeTip) welcomeTip.textContent = 'Type /setup, then choose Local models or API.';
-    } else {
-      // Configured installs should feel ready, not stuck in onboarding.
-      const welcomeSub = document.getElementById('welcome-sub');
-      if (welcomeSub) welcomeSub.textContent = 'Yours for the voyage.';
-      const welcomeTip = document.getElementById('welcome-tip');
-      if (welcomeTip) {
-        const tips = window.innerWidth <= 768
-          ? [
-              'Tip: Long-press a session for rename, delete, and memory options.',
-              'Tip: Tap the eye icon for Nobody mode - no history saved.',
-              'Tip: Switch to Agent mode when you want tools.',
-              'Tip: Attach images or files using the + button next to the input.',
-            ]
-          : [
-              'Tip: Press Ctrl+K to search across all your conversations.',
-              'Tip: Press Ctrl+B to quickly toggle the sidebar.',
-              'Tip: Shift-click the sidebar toggle to swap it to the other side.',
-              'Tip: Drag and drop files onto the chat to attach them.',
-              'Tip: Right-click a session for rename, delete, and memory options.',
-            ];
-        welcomeTip.textContent = tips[Math.floor(Math.random() * tips.length)];
-      }
+      const openAdmin = noModels.querySelector('#models-open-admin');
+      if (openAdmin) openAdmin.addEventListener('click', (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('user-bar-admin');
+        if (btn) btn.click();
+      });
     }
   } catch (e) {
     console.error(e);

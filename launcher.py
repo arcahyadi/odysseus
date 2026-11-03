@@ -14,6 +14,13 @@ import threading
 import time
 import webbrowser
 
+# PyInstaller multiprocessing children re-enter this executable with a private
+# bootstrap argument. Consume it before splash/UI or application imports so a
+# spawn-based worker does not relaunch the full desktop application.
+if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
+
 # Define a dummy NullWriter to suppress standard stream crashes (isatty etc.) in GUI mode
 class NullWriter:
     def write(self, text):
@@ -67,24 +74,8 @@ if getattr(sys, 'frozen', False):
 
 
 def create_tray_image():
+    # Generate a beautiful 64x64 icon matching Odysseus brand red accent (#e06c75)
     from PIL import Image, ImageDraw
-
-    # Prefer the user-supplied brand icon when present (bundled as
-    # static/icon.png by PyInstaller --add-data, or alongside the exe).
-    for _icon_candidate in (
-        getattr(sys, '_MEIPASS', None) and os.path.join(sys._MEIPASS, 'static', 'icon.png'),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'icon.png'),
-        'static/icon.png',
-    ):
-        if _icon_candidate and os.path.exists(_icon_candidate):
-            try:
-                _img = Image.open(_icon_candidate).convert('RGBA')
-                _img.thumbnail((64, 64))
-                return _img
-            except Exception:
-                break
-
-    # Fallback: generate a 64x64 brand-style icon (Odysseus red accent #e06c75)
     image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
     dc = ImageDraw.Draw(image)
     accent_red = (224, 108, 117, 255)
@@ -146,7 +137,7 @@ if __name__ == "__main__":
     from app import app
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
-    bind_port = int(os.getenv("APP_PORT", "7000"))
+    bind_port = int(os.getenv("APP_PORT", "7011"))
     url = f"http://{bind_host}:{bind_port}"
 
     if getattr(sys, 'frozen', False):

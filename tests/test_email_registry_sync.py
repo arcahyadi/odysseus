@@ -51,7 +51,7 @@ def test_plan_mode_classifies_every_email_tool():
     from src.tool_security import plan_mode_disabled_tools
 
     denied = plan_mode_disabled_tools()
-    readonly = {"list_email_accounts", "list_emails", "read_email", "search_emails"}
+    readonly = {"list_email_accounts", "list_emails", "read_email", "search_emails", "scan_email_unsubscribes"}
     for tool in sorted(BUILTIN_EMAIL_TOOLS):
         if tool in readonly:
             assert tool in PLAN_MODE_READONLY_TOOLS, f"{tool} must be explicit read-only"

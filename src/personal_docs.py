@@ -6,6 +6,8 @@ import logging
 from typing import List, Dict, Set, Any, Tuple
 from dataclasses import dataclass
 
+from src.index_walk import prune_index_dirs, is_indexable_file
+
 from src.markitdown_runtime import MARKITDOWN_EXTS
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,10 @@ def extract_office_text(file_path: str) -> str:
     Returns "" when markitdown is missing or extraction fails, mirroring
     extract_pdf_text — the indexer then simply skips the file's content.
     """
+    if file_path.lower().endswith(".doc"):
+        from src.document_processor import _process_legacy_word_document
+        return _process_legacy_word_document(file_path, os.path.basename(file_path))
+
     from src.markitdown_runtime import convert_to_markdown
     return convert_to_markdown(file_path) or ""
 
@@ -42,7 +48,7 @@ class PersonalDocsConfig:
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
     DEFAULT_EXTENSIONS: Tuple[str, ...] = (
-        ".txt", ".md", ".json", ".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".epub",
+        ".txt", ".md", ".json", ".pdf", ".doc", ".docx", ".pptx", ".xlsx", ".xls", ".epub",
     )
     DEFAULT_K: int = 5
     STOP_WORDS: Set[str] = None
@@ -94,13 +100,22 @@ def tokenize(s: str) -> Set[str]:
     return set(t for t in tokens if t not in config.STOP_WORDS and len(t) > 1)
 
 def load_personal_index(
-    personal_dir: str, 
+    personal_dir: str,
     extensions: Tuple[str, ...] = config.DEFAULT_EXTENSIONS
 ) -> List[Dict[str, Any]]:
-    """Load and index personal documents."""
+    """Load and index personal documents.
+
+    Skips hidden and junk directories and hidden files via the shared
+    ``index_walk`` policy, so the keyword index matches the vector index and a
+    real vault/repo does not sweep in ``.obsidian/`` / ``.git/`` /
+    ``node_modules/`` content (#5559).
+    """
     files = []
-    for root, _, names in os.walk(personal_dir):
+    for root, dirs, names in os.walk(personal_dir):
+        prune_index_dirs(dirs)
         for name in sorted(names):
+            if not is_indexable_file(name):
+                continue
             p = os.path.join(root, name)
             if not os.path.isfile(p):
                 continue
@@ -110,7 +125,7 @@ def load_personal_index(
             ext = os.path.splitext(name)[1].lower()
             if ext == ".pdf":
                 text = extract_pdf_text(p)
-            elif ext in MARKITDOWN_EXTS:
+            elif ext == ".doc" or ext in MARKITDOWN_EXTS:
                 text = extract_office_text(p)
             else:
                 text = read_text_file(p)

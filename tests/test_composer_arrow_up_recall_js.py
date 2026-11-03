@@ -4,10 +4,12 @@ Driven through `node --input-type=module` so we exercise the real JS without a
 full Vitest/Jest setup (same approach as test_reply_recipients_js.py). Skips
 when `node` is not installed rather than failing.
 
-Locks in: empty composer recalls last user message; non-empty composer is
-untouched; multiline caret navigation is not hijacked; Shift/Alt/Ctrl/Meta+ArrowUp
-are ignored; IME composition does not trigger recall; last message is read from
-#chat-history (dataset.raw), not session sidebar metadata.
+Locks in: empty composer recalls user messages from the active conversation,
+repeated ArrowUp walks older prompts in that same chat; non-empty composer is
+untouched unless it contains the recalled prompt; multiline caret navigation is
+not hijacked; Shift/Alt/Ctrl/Meta+ArrowUp are ignored; IME composition does not
+trigger recall; messages are read from #chat-history (dataset.raw), not session
+sidebar metadata.
 """
 import json
 import shutil
@@ -36,6 +38,8 @@ function makeComposer(initial = '') {
     },
     dispatchKey(opts = {}) {
       let prevented = false;
+      let stopped = false;
+      let immediateStopped = false;
       const e = {
         key: opts.key ?? 'ArrowUp',
         shiftKey: !!opts.shiftKey,
@@ -44,9 +48,11 @@ function makeComposer(initial = '') {
         metaKey: !!opts.metaKey,
         isComposing: !!opts.isComposing,
         preventDefault() { prevented = true; },
+        stopPropagation() { stopped = true; },
+        stopImmediatePropagation() { immediateStopped = true; },
       };
       for (const fn of listeners) fn(e);
-      return prevented;
+      return { prevented, stopped, immediateStopped };
     },
   };
   return composer;
@@ -58,17 +64,20 @@ function runCase(body) {
     composer.selectionStart = body.caret;
     composer.selectionEnd = body.caretEnd ?? body.caret;
   }
-  const last = body.last ?? 'previous message';
+  const last = body.history ?? body.last ?? 'previous message';
   let resized = false;
   wireArrowUpRecall(composer, () => last, {
     autoResize: () => { resized = true; },
   });
-  const prevented = composer.dispatchKey(body.event ?? {});
+  const events = body.events ?? [body.event ?? {}];
+  const handled = events.map(ev => composer.dispatchKey(ev));
   return {
     value: composer.value,
     selectionStart: composer.selectionStart,
     selectionEnd: composer.selectionEnd,
-    prevented,
+    prevented: handled.map(v => v.prevented),
+    stopped: handled.map(v => v.stopped),
+    immediateStopped: handled.map(v => v.immediateStopped),
     resized,
   };
 }
@@ -100,7 +109,24 @@ def test_empty_composer_recalls_last_user_message():
     assert out["value"] == "hello again"
     assert out["selectionStart"] == len("hello again")
     assert out["selectionEnd"] == len("hello again")
-    assert out["prevented"] is True
+    assert out["prevented"] == [True]
+    assert out["stopped"] == [True]
+    assert out["immediateStopped"] == [True]
+    assert out["resized"] is True
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_repeated_arrow_up_cycles_current_chat_prompts_newest_first():
+    out = _run([{
+        "initial": "",
+        "history": ["third prompt", "second prompt", "first prompt"],
+        "events": [{}, {}, {}, {}],
+    }])[0]
+    assert out["value"] == "first prompt"
+    assert out["selectionStart"] == len("first prompt")
+    assert out["prevented"] == [True, True, True, True]
+    assert out["stopped"] == [True, True, True, True]
+    assert out["immediateStopped"] == [True, True, True, True]
     assert out["resized"] is True
 
 
@@ -108,7 +134,7 @@ def test_empty_composer_recalls_last_user_message():
 def test_non_empty_composer_does_not_recall():
     out = _run([{"initial": "draft in progress", "last": "ignored"}])[0]
     assert out["value"] == "draft in progress"
-    assert out["prevented"] is False
+    assert out["prevented"] == [False]
     assert out["resized"] is False
 
 
@@ -116,7 +142,7 @@ def test_non_empty_composer_does_not_recall():
 def test_whitespace_only_composer_is_not_empty():
     out = _run([{"initial": "   ", "last": "ignored"}])[0]
     assert out["value"] == "   "
-    assert out["prevented"] is False
+    assert out["prevented"] == [False]
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
@@ -126,7 +152,7 @@ def test_multiline_caret_navigation_preserved():
     out = _run([{"initial": text, "caret": len(text), "last": "ignored"}])[0]
     assert out["value"] == text
     assert out["selectionStart"] == len(text)
-    assert out["prevented"] is False
+    assert out["prevented"] == [False]
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
@@ -139,21 +165,21 @@ def test_modified_arrow_up_ignored():
     ]
     for out in _run(cases):
         assert out["value"] == ""
-        assert out["prevented"] is False
+        assert out["prevented"] == [False]
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_ime_composition_does_not_trigger_recall():
     out = _run([{"initial": "", "event": {"isComposing": True}, "last": "ignored"}])[0]
     assert out["value"] == ""
-    assert out["prevented"] is False
+    assert out["prevented"] == [False]
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_no_recall_when_last_message_missing():
     out = _run([{"initial": "", "last": ""}])[0]
     assert out["value"] == ""
-    assert out["prevented"] is False
+    assert out["prevented"] == [False]
     assert out["resized"] is False
 
 
@@ -182,7 +208,10 @@ def test_wire_is_idempotent():
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_get_last_user_message_from_chat_history():
     js = f"""
-    import {{ getLastUserMessageFromChatHistory }} from '{_HELPER_URL}';
+    import {{
+      getLastUserMessageFromChatHistory,
+      getUserMessagesFromChatHistory,
+    }} from '{_HELPER_URL}';
 
     const chatBox = {{
       id: 'chat-history',
@@ -202,6 +231,7 @@ def test_get_last_user_message_from_chat_history():
     console.log(JSON.stringify({{
       fromChat: getLastUserMessageFromChatHistory(doc),
       fromBox: getLastUserMessageFromChatHistory(chatBox),
+      allFromChat: getUserMessagesFromChatHistory(doc),
       empty: getLastUserMessageFromChatHistory({{ getElementById: () => null }}),
       noUsers: getLastUserMessageFromChatHistory({{
         getElementById: () => ({{ querySelectorAll: () => [] }}),
@@ -221,6 +251,7 @@ def test_get_last_user_message_from_chat_history():
     assert json.loads(proc.stdout.strip()) == {
         "fromChat": "last raw",
         "fromBox": "last raw",
+        "allFromChat": ["last raw", "first"],
         "empty": "",
         "noUsers": "",
     }
@@ -231,7 +262,7 @@ def test_integration_recalls_from_chat_history_dom():
     js = f"""
     import {{
       wireArrowUpRecall,
-      getLastUserMessageFromChatHistory,
+      getUserMessagesFromChatHistory,
     }} from '{_HELPER_URL}';
 
     const chatBox = {{
@@ -251,7 +282,7 @@ def test_integration_recalls_from_chat_history_dom():
       _arrowUpRecallWired: false,
       addEventListener(type, fn) {{ if (type === 'keydown') listeners.push(fn); }},
     }};
-    wireArrowUpRecall(composer, () => getLastUserMessageFromChatHistory(doc));
+    wireArrowUpRecall(composer, () => getUserMessagesFromChatHistory(doc));
     let prevented = false;
     listeners[0]({{
       key: 'ArrowUp',
@@ -275,3 +306,24 @@ def test_integration_recalls_from_chat_history_dom():
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout.strip()) == {"value": "stored prompt", "prevented": True}
+
+
+def test_prompt_recall_is_not_duplicated_in_app_js():
+    """Only composerArrowUpRecall.js may own ArrowUp on #message (issue #5862).
+
+    static/app.js once carried a near-verbatim copy of this recall logic, wired
+    as a second capture-phase listener on the same textarea. That copy lacked
+    the draft guard here, and because it called stopImmediatePropagation it won
+    regardless of registration order — so a typed multi-line prompt was replaced
+    by the last sent one instead of the caret moving up a line.
+    """
+    app_js = (_REPO / "static" / "app.js").read_text(encoding="utf-8")
+    for marker in (
+        "_odysseusPromptRecallCapture",
+        "_readComposerPromptHistory",
+        "odysseusRecallIndex",
+    ):
+        assert marker not in app_js, (
+            f"static/app.js reintroduces prompt recall ({marker!r}); "
+            "it belongs to static/js/composerArrowUpRecall.js alone"
+        )

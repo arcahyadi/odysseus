@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import re
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from routes.cookbook_helpers import (
     _llama_cpp_rebuild_cmd,
     _append_vllm_linux_preflight_lines,
     _local_tooling_path_export,
+    _local_windows_bash_env_prefix,
     _pip_install_attempt,
     _pip_install_fallback_chain,
     _ollama_bind_from_cmd,
@@ -31,15 +33,6 @@ from routes.cookbook_helpers import (
     _shell_path,
     run_ssh_command_async,
 )
-from core.platform_compat import find_bash
-
-
-# The pip-install subshell tests below exercise the bash snippets that
-# cookbook_helpers embeds in the container serve scripts. On Windows the
-# PATH-resolved `bash` is often a WSL shim that fails to exec /bin/bash, so
-# use the same real-bash resolver the product uses and skip when none exists.
-_BASH = find_bash()
-_HAS_BASH = _BASH is not None
 
 
 def test_safe_env_prefix_accepts_quoted_venv_path():
@@ -114,6 +107,70 @@ def test_safe_env_prefix_accepts_powershell_activation_path():
         _safe_env_prefix("& 'C:\\Users\\me\\venv\\Scripts\\Activate.ps1'")
         == "& 'C:\\Users\\me\\venv\\Scripts\\Activate.ps1'"
     )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        ("& 'C:\\Users\\me\\venv\\Scripts\\Activate.ps1'", "source /c/Users/me/venv/Scripts/activate"),
+        (r"& C:\Users\me\venv\Scripts\Activate.ps1", "source /c/Users/me/venv/Scripts/activate"),
+        (
+            r"& C:\Users\me\My Envs\venv\Scripts\Activate.ps1",
+            "source '/c/Users/me/My Envs/venv/Scripts/activate'",
+        ),
+        (
+            "& 'C:\\Users\\me\\My Envs\\venv\\Scripts\\Activate.ps1'",
+            "source '/c/Users/me/My Envs/venv/Scripts/activate'",
+        ),
+        (r"& D:/Envs/venv/Scripts/Activate.ps1", "source /d/Envs/venv/Scripts/activate"),
+    ],
+)
+def test_local_windows_bash_env_prefix_converts_powershell_venv_activation(prefix, expected):
+    converted = _local_windows_bash_env_prefix(prefix)
+
+    assert converted == expected
+    assert _safe_env_prefix(converted).startswith('[ -f "')
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        None,
+        "",
+        "source /home/me/venv/bin/activate",
+        "conda activate qwen35",
+        'eval "$(conda shell.bash hook)" && conda activate qwen35',
+        r"& \\server\share\venv\Scripts\Activate.ps1",
+    ],
+)
+def test_local_windows_bash_env_prefix_leaves_other_prefixes_unchanged(prefix):
+    assert _local_windows_bash_env_prefix(prefix) == prefix
+
+
+def test_local_windows_bash_env_prefix_handles_long_whitespace_input():
+    prefix = "\t" * 100_000
+
+    assert _local_windows_bash_env_prefix(prefix) == prefix
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["static/js/cookbookRunning.js", "static/js/cookbookDownload.js"],
+)
+def test_primary_windows_venv_emitters_quote_activation_path(relative_path):
+    source = (Path(__file__).resolve().parents[1] / relative_path).read_text(encoding="utf-8")
+
+    assert "'& ' + _psQuote(" in source
+    assert "_psQuote = shared._psQuote;" in source
+
+
+def test_windows_venv_conversion_stays_scoped_to_local_git_bash_runners():
+    source = (Path(__file__).resolve().parents[1] / "routes/cookbook_routes.py").read_text(encoding="utf-8")
+    guarded_conversion = (
+        "_local_windows_bash_env_prefix(req.env_prefix) if local_windows else req.env_prefix"
+    )
+
+    assert source.count(guarded_conversion) == 2
 
 
 def test_validate_local_dir_accepts_external_drive_paths_with_spaces():
@@ -274,7 +331,6 @@ def test_pip_install_fallback_chain_accepts_python_executable():
     assert 'python -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)"' in chain
 
 
-@pytest.mark.skipif(not _HAS_BASH, reason="pip-install chain test needs a real bash on PATH")
 def test_pip_install_fallback_chain_propagates_failure_in_venv():
     """When base install fails inside a venv, the chain must exit non-zero.
 
@@ -294,14 +350,13 @@ def test_pip_install_fallback_chain_propagates_failure_in_venv():
         "&& echo user_attempt; }"
     )
     result = subprocess.run(
-        [_BASH, "-c", script],
+        ["bash", "-c", script],
         capture_output=True, text=True, timeout=10,
     )
     assert "user_attempt" not in result.stdout
     assert result.returncode != 0, "Chain should propagate failure when base fails in venv"
 
 
-@pytest.mark.skipif(not _HAS_BASH, reason="pip-install chain test needs a real bash on PATH")
 def test_pip_install_fallback_chain_tries_user_outside_venv():
     """When base install fails outside a venv, the chain should try --user."""
     # Force "not in venv" by making venv_check return 1 directly.
@@ -313,7 +368,7 @@ def test_pip_install_fallback_chain_tries_user_outside_venv():
         "'"
     )
     result = subprocess.run(
-        [_BASH, "-c", script],
+        ["bash", "-c", script],
         capture_output=True, text=True, timeout=10,
     )
     assert "user_attempt" in result.stdout, "Chain should try --user when not in venv and base fails"
@@ -429,11 +484,9 @@ def test_pip_install_attempt_no_bare_pipe_tail():
 def test_pip_install_attempt_failure_propagates_real_exit_code():
     """Run the generated snippet against a deliberately broken pip install
     to confirm the subshell exits with pip's non-zero status."""
-    if not _HAS_BASH:
-        pytest.skip("pip-install attempt test needs a real bash on PATH")
     snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
     result = subprocess.run(
-        [_BASH, "-c", snippet],
+        ["bash", "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,
@@ -441,12 +494,11 @@ def test_pip_install_attempt_failure_propagates_real_exit_code():
     assert result.returncode != 0, "pip install of a nonexistent package should fail"
 
 
-@pytest.mark.skipif(not _HAS_BASH, reason="pip-install attempt test needs a real bash on PATH")
 def test_pip_install_attempt_success_exits_zero():
     """When pip succeeds, the subshell should exit 0."""
     snippet = _pip_install_attempt("python3 -c 'pass'")
     result = subprocess.run(
-        [_BASH, "-c", snippet],
+        ["bash", "-c", snippet],
         capture_output=True,
         text=True,
         timeout=15,
@@ -454,12 +506,11 @@ def test_pip_install_attempt_success_exits_zero():
     assert result.returncode == 0
 
 
-@pytest.mark.skipif(not _HAS_BASH, reason="pip-install attempt test needs a real bash on PATH")
 def test_pip_install_attempt_surfaces_stderr_on_failure():
     """On failure, the last 5 lines of pip output should appear in stdout."""
     snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
     result = subprocess.run(
-        [_BASH, "-c", snippet],
+        ["bash", "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,
@@ -738,7 +789,12 @@ def test_local_windows_download_pid_tracks_inner_bash_and_stop_kills_tree():
     routes_src = (Path(__file__).resolve().parents[1] / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
     running_src = (Path(__file__).resolve().parents[1] / "static" / "js" / "cookbookRunning.js").read_text(encoding="utf-8")
 
-    assert 'printf \'%s\\\\n\' \\"$$\\" > {pp}' in routes_src
+    # The Windows-local runner publishes Python's valid Win32 fallback before
+    # allowing Git Bash to replace it with /proc/$$/winpid.
+    assert "_windows_local_pid_record_line(pid_path, pid_ready_path)" in routes_src
+    assert "/proc/$$/winpid" in routes_src
+    assert "pid_ready_path.touch()" in routes_src
+    assert '\\"$$\\" > {pp}' not in routes_src
     assert "function Stop-Tree([int]$Id)" in running_src
     assert "('ParentProcessId = ' + $Id)" in running_src
     assert "Stop-Tree ([int]$p)" in running_src
@@ -839,29 +895,17 @@ def test_cached_model_scan_does_not_launch_ollama_cli_on_windows(tmp_path):
     env = dict(os.environ)
     env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
     env["HOME"] = str(empty_home)
-    # On Windows os.path.expanduser("~") reads USERPROFILE, not HOME. Pin both
-    # so the scanner cannot reach the real user's HF/GGUF caches under %USERPROFILE%.
-    env["USERPROFILE"] = str(empty_home)
-    env["HOMEDRIVE"] = str(empty_home.drive)
-    env["HOMEPATH"] = str(empty_home.root) + str(empty_home).replace(str(empty_home.drive), "", 1).lstrip("\\")
     env.pop("ODYSSEUS_ALLOW_OLLAMA_CLI_SCAN", None)
     proc = subprocess.run(
         [sys.executable, str(scan_py)],
         check=True,
         capture_output=True,
         text=True,
-        encoding="utf-8",
-        errors="replace",
         env=env,
     )
 
     assert marker.exists() is False
-    models = json.loads(proc.stdout)
-    # The fake CLI would contribute "local-model:latest"; assert none of the
-    # returned entries came from that path. Other backend='ollama' entries
-    # can legitimately come from scan_ollama_api() hitting a locally-running
-    # Ollama server, which this guard is not concerned with.
-    assert all(m.get("repo_id") != "local-model:latest" for m in models)
+    assert all(m.get("backend") != "ollama" for m in json.loads(proc.stdout))
 
 
 def test_cached_model_scan_uses_huggingface_cache_env(tmp_path):
@@ -983,3 +1027,36 @@ def test_validate_serve_cmd_rejects_unrelated_subshell_pipelines():
     ]:
         with pytest.raises(HTTPException):
             _validate_serve_cmd(cmd)
+
+
+def _dependency_recipe_pip_commands():
+    src = (Path(__file__).resolve().parents[1] / "static" / "js" / "cookbook-deps-recipes.js").read_text(encoding="utf-8")
+    return re.findall(r"pip:\s*\{\s*commands:\s*\['((?:[^'\\]|\\.)*)'\]\s*\}", src)
+
+
+def test_validate_serve_cmd_accepts_single_line_dependency_recipes():
+    # The Dependencies recipe "Run" button posts these to /api/model/serve.
+    cmds = _dependency_recipe_pip_commands()
+    assert 'uv pip install -U vllm --torch-backend auto' in cmds
+    assert 'uv pip install -U "sglang[all]" --torch-backend auto' in cmds
+    for cmd in cmds:
+        assert _validate_serve_cmd(cmd) == cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "uv run python -c 'print(1)'",
+    "uv tool install ruff",
+    "uv pip uninstall vllm",
+    "uv",
+])
+def test_validate_serve_cmd_allows_uv_only_for_pip_install(cmd):
+    with pytest.raises(HTTPException):
+        _validate_serve_cmd(cmd)
+
+
+def test_dependency_recipe_run_sends_a_valid_pip_repo_id():
+    # A pip-install repo_id must match the server's package-spec regex; the old
+    # "<backend> setup" value had a space and every Run got "Invalid pip package name".
+    src = (Path(__file__).resolve().parents[1] / "static" / "js" / "cookbook.js").read_text(encoding="utf-8")
+    assert "repo_id: `${backend}-setup`," in src
+    assert "repo_id: `${backend} setup`" not in src

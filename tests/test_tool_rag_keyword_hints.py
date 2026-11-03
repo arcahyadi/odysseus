@@ -32,7 +32,7 @@ def test_tell_in_web_query_does_not_force_email_tools():
     """The #1707 repro: a web request that merely contains the word 'tell' must
     NOT drag in the email toolset."""
     ti = _index_without_embeddings()
-    q = "visit https://www.youtube.com/user/PewDiePie and tell me the title of his latest video"
+    q = "visit https://www.youtube.com/user/example and tell me the title of the latest video"
     tools = ti.get_tools_for_query(q)
     leaked = _EMAIL_TOOLS & tools
     assert not leaked, f"'tell me' must not force-include email tools, got {sorted(leaked)}"

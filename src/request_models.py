@@ -12,6 +12,8 @@ class ChatRequest(BaseModel):
     use_research: Optional[bool] = Field(default=False, description="Enable deep research")
     time_filter: Optional[str] = Field(default=None, description="Time filter for search")
     preset_id: Optional[str] = Field(default=None, description="Preset identifier")
+    selected_endpoint_id: Optional[str] = Field(default=None, description="Selected model endpoint ID")
+    reasoning_effort: Optional[str] = Field(default=None, description="Reasoning effort override")
     
     @field_validator('message')
     @classmethod
@@ -68,6 +70,10 @@ class PresetUpdateRequest(BaseModel):
         True,
         description="Whether this character is active"
     )
+    show_persona_name: bool = Field(
+        True,
+        description="Whether to show the persona name in the chat UI"
+    )
     temperature: float = Field(
         1.0,
         ge=0.0,
@@ -94,6 +100,22 @@ class PresetUpdateRequest(BaseModel):
         "",
         max_length=5000,
         description="Text to append to each outgoing user message"
+    )
+    thinking_mode: str = Field(
+        "",
+        pattern="^(|on|off)$",
+        description="Thinking override: empty uses the model default"
+    )
+    persona_memory: str = Field(
+        "",
+        max_length=6000,
+        description="Auto-maintained continuity notes for this persona"
+    )
+    persona_memory_schema: str = Field(
+        "general",
+        max_length=40,
+        pattern="^(general|health)$",
+        description="Schema used by persona memory extraction"
     )
 
 
@@ -130,6 +152,7 @@ class SessionResponse(BaseModel):
     model: str = Field(..., description="Model being used")
     rag: bool = Field(default=False, description="RAG enabled")
     archived: bool = Field(default=False, description="Whether session is archived")
+    cwd: Optional[str] = Field(default=None, description="Persisted workspace cwd")
 
 
 class MemoryResponse(BaseModel):

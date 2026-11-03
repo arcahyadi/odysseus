@@ -92,7 +92,7 @@ def test_strips_every_named_email_tool_fence():
     email_tools = [
         "list_email_accounts", "send_email", "list_emails", "read_email",
         "reply_to_email", "bulk_email", "archive_email", "delete_email",
-        "mark_email_read",
+        "mark_email_read", "scan_email_unsubscribes", "unsubscribe_email",
     ]
     for tool in email_tools:
         fence = f"```{tool}\n{{}}\n```"

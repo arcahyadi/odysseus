@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Odysseus Modal Controls</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101114;
+      --panel: #181a1f;
+      --panel-2: #20232a;
+      --fg: #f4f4f5;
+      --muted: rgba(244,244,245,.58);
+      --border: rgba(255,255,255,.13);
+      --accent: #7dd3fc;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% 12%, rgba(125,211,252,.16), transparent 30%),
+        radial-gradient(circle at 88% 16%, rgba(255,255,255,.08), transparent 26%),
+        linear-gradient(145deg, #0d0e11, #17191f 55%, #0f1013);
+      color: var(--fg);
+      padding: 32px;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0;
+      font-weight: 720;
+    }
+    p {
+      margin: -8px 0 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+      gap: 14px;
+    }
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--panel) 86%, transparent);
+      box-shadow: 0 18px 48px rgba(0,0,0,.32);
+      overflow: hidden;
+    }
+    .label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 680;
+    }
+    .modal {
+      margin: 10px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: color-mix(in srgb, var(--panel-2) 82%, transparent);
+      overflow: hidden;
+    }
+    .header {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 10px 0 14px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, white 4%, transparent);
+    }
+    .title {
+      margin-right: auto;
+      font-size: 13px;
+      font-weight: 680;
+      letter-spacing: 0;
+    }
+    .body {
+      height: 84px;
+      padding: 12px 14px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .ctrl {
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: inherit;
+      cursor: pointer;
+      position: relative;
+      flex: 0 0 auto;
+    }
+    .ctrl::before,
+    .ctrl.close::after {
+      content: "";
+      display: block;
+      background: currentColor;
+      border-radius: 999px;
+    }
+    .ctrl.min::before { width: 9px; height: 1.8px; }
+    .ctrl.close::before,
+    .ctrl.close::after {
+      position: absolute;
+      width: 9px;
+      height: 1.7px;
+      left: 50%;
+      top: 50%;
+    }
+    .ctrl.close::before { transform: translate(-50%, -50%) rotate(45deg); }
+    .ctrl.close::after { transform: translate(-50%, -50%) rotate(-45deg); }
+
+    .v1 .ctrl {
+      background: rgba(255,255,255,.055);
+      border: 1px solid rgba(255,255,255,.13);
+      color: rgba(244,244,245,.68);
+    }
+    .v1 .ctrl:hover {
+      background: rgba(255,255,255,.12);
+      color: var(--fg);
+    }
+
+    .v2 .ctrl {
+      width: 22px;
+      height: 22px;
+      background: rgba(255,255,255,.07);
+      color: rgba(244,244,245,.48);
+    }
+    .v2 .ctrl:hover { color: rgba(244,244,245,.92); }
+    .v2 .ctrl.close:hover { background: #ff5f57; color: rgba(40,15,14,.72); }
+    .v2 .ctrl.min:hover { background: #febc2e; color: rgba(67,44,0,.72); }
+
+    .v3 .controls {
+      display: inline-flex;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 999px;
+      background: rgba(255,255,255,.045);
+    }
+    .v3 .ctrl {
+      width: 22px;
+      height: 22px;
+      color: rgba(244,244,245,.62);
+    }
+    .v3 .ctrl:hover {
+      background: rgba(255,255,255,.11);
+      color: var(--fg);
+    }
+
+    .v4 .ctrl {
+      width: 23px;
+      height: 23px;
+      background: transparent;
+      color: rgba(244,244,245,.48);
+    }
+    .v4 .ctrl:hover {
+      background: color-mix(in srgb, var(--accent) 16%, transparent);
+      color: var(--accent);
+    }
+
+    .v5 .ctrl {
+      width: 22px;
+      height: 22px;
+      background: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.055));
+      box-shadow:
+        inset 0 0 0 1px rgba(255,255,255,.13),
+        0 1px 2px rgba(0,0,0,.25);
+      color: rgba(244,244,245,.62);
+    }
+    .v5 .ctrl:hover {
+      box-shadow:
+        inset 0 0 0 1px rgba(255,255,255,.22),
+        0 2px 5px rgba(0,0,0,.24);
+      color: var(--fg);
+      transform: translateY(-1px);
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>Modal control variants</h1>
+    <p>Pick the one that feels most Odysseus/Apple-sleek, then I’ll apply that globally.</p>
+    <section class="grid">
+      <div class="card v1">
+        <div class="label">A · soft bordered circles</div>
+        <div class="modal">
+          <div class="header"><div class="title">Theme</div><button class="ctrl min"></button><button class="ctrl close"></button></div>
+          <div class="body">Closest to current app styling, just cleaner and softer.</div>
+        </div>
+      </div>
+      <div class="card v2">
+        <div class="label">B · macOS traffic-light hover</div>
+        <div class="modal">
+          <div class="header"><div class="title">Theme</div><button class="ctrl min"></button><button class="ctrl close"></button></div>
+          <div class="body">Neutral until hover, then yellow/red like macOS window controls.</div>
+        </div>
+      </div>
+      <div class="card v3">
+        <div class="label">C · glass capsule group</div>
+        <div class="modal">
+          <div class="header"><div class="title">Theme</div><span class="controls"><button class="ctrl min"></button><button class="ctrl close"></button></span></div>
+          <div class="body">Buttons read as one small Apple-like control cluster.</div>
+        </div>
+      </div>
+      <div class="card v4">
+        <div class="label">D · ghost controls</div>
+        <div class="modal">
+          <div class="header"><div class="title">Theme</div><button class="ctrl min"></button><button class="ctrl close"></button></div>
+          <div class="body">Most minimal. Only shows the round hit area on hover.</div>
+        </div>
+      </div>
+      <div class="card v5">
+        <div class="label">E · subtle liquid glass</div>
+        <div class="modal">
+          <div class="header"><div class="title">Theme</div><button class="ctrl min"></button><button class="ctrl close"></button></div>
+          <div class="body">A little more polished/glassy without becoming colorful.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Odysseus Wave Variants</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #282c34;
+      --panel: #22262e;
+      --line: rgba(255,255,255,.08);
+      --text: #d7dce5;
+      --muted: #8a93a3;
+      --accent: #e06c75;
+      --water: #9cdef2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 50% 18%, rgba(224,108,117,.10), transparent 34%), var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+    }
+    main {
+      width: min(1040px, 100%);
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+    p {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      min-height: 178px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--panel) 92%, black);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      overflow: hidden;
+    }
+    .card header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .tag {
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .stage {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px 10px;
+      min-height: 108px;
+    }
+    .ascii {
+      margin: 0;
+      color: color-mix(in srgb, var(--accent) 78%, white);
+      font: 600 12px/1.05 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+      text-align: center;
+      opacity: .86;
+      transform: translateY(var(--bob, 0));
+      transition: transform .18s ease;
+      text-shadow: 0 0 18px rgba(224,108,117,.12);
+    }
+    .wave {
+      color: color-mix(in srgb, var(--water) 62%, var(--accent));
+      font-weight: 700;
+      opacity: .72;
+    }
+    .ride-wrap {
+      position: relative;
+      display: inline-block;
+      padding-top: 10px;
+    }
+    .ride-dot {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      transform: translate(-50%, var(--ride-y, 0));
+      color: color-mix(in srgb, var(--water) 62%, var(--accent));
+      font-size: 1.24em;
+      line-height: 1;
+    }
+    .note {
+      padding: 9px 12px 11px;
+      border-top: 1px solid var(--line);
+      font-size: 11px;
+      color: var(--muted);
+      min-height: 42px;
+      line-height: 1.35;
+    }
+    .splash {
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #282c34;
+      height: 220px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .splash .ascii {
+      font-size: 13px;
+      opacity: .72;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Odysseus Loader Wave</h1>
+    <p>Ship-on-wave variants for the app splash. Pick the one that feels most like Odysseus sailing instead of just a generic loading wave.</p>
+    <section class="grid" aria-label="Wave variants">
+      <article class="card" data-variant="A">
+        <header><span><span class="tag">A</span> dot boat</span><span>minimal</span></header>
+        <div class="stage"><pre class="ascii" data-ride="dot"></pre></div>
+        <div class="note">Closest to the current loader. The ship is just a small point riding above the wave.</div>
+      </article>
+      <article class="card" data-variant="B">
+        <header><span><span class="tag">B</span> hollow dot</span><span>minimal</span></header>
+        <div class="stage"><pre class="ascii" data-template=" ○
+{wave}"></pre></div>
+        <div class="note">A little more visible than the dot, but still abstract and calm.</div>
+      </article>
+      <article class="card" data-variant="C">
+        <header><span><span class="tag">C</span> mast dot</span><span>tiny</span></header>
+        <div class="stage"><pre class="ascii" data-template=" |
+ •
+{wave}"></pre></div>
+        <div class="note">Still tiny, but reads a bit more like a sail/ship than a random dot.</div>
+      </article>
+      <article class="card" data-variant="D">
+        <header><span><span class="tag">D</span> tiny sail</span><span>balanced</span></header>
+        <div class="stage"><pre class="ascii" data-template=" /\
+ •
+{wave}"></pre></div>
+        <div class="note">Probably the best compromise: a hint of sail, but only two marks above the wave.</div>
+      </article>
+      <article class="card" data-variant="E">
+        <header><span><span class="tag">E</span> tiny hull</span><span>ascii</span></header>
+        <div class="stage"><pre class="ascii" data-template=" /\
+\_/
+{wave}"></pre></div>
+        <div class="note">The smallest actual boat shape. More readable, less subtle.</div>
+      </article>
+      <article class="card" data-variant="F">
+        <header><span><span class="tag">F</span> no boat</span><span>baseline</span></header>
+        <div class="stage"><pre class="ascii" data-template="{wave}"></pre></div>
+        <div class="note">The current direction: pure wave, no Odysseus ship marker.</div>
+      </article>
+    </section>
+    <section class="splash" aria-label="Splash scale preview">
+      <pre class="ascii" id="hero-preview" data-ride="dot"></pre>
+    </section>
+  </main>
+  <script>
+    const waves = [
+      '▁▂▃',
+      '▂▃▄',
+      '▃▄▅',
+      '▄▅▆',
+      '▅▆▅',
+      '▆▅▄',
+      '▅▄▃',
+      '▄▃▂',
+      '▃▂▁'
+    ];
+    const rideFrames = [
+      { wave: '▁▂▃', y: 9 },
+      { wave: '▂▃▄', y: 7 },
+      { wave: '▃▄▅', y: 5 },
+      { wave: '▄▅▆', y: 3 },
+      { wave: '▅▆▅', y: 1 },
+      { wave: '▆▅▄', y: 3 },
+      { wave: '▅▄▃', y: 5 },
+      { wave: '▄▃▂', y: 7 },
+      { wave: '▃▂▁', y: 9 }
+    ];
+    const render = (el, wave, bob, phase) => {
+      if (el.dataset.ride === 'dot') {
+        const ride = rideFrames[phase % rideFrames.length];
+        el.innerHTML = `<span class="ride-wrap" style="--ride-y:${ride.y}px"><span class="ride-dot">•</span><span class="wave">${ride.wave}</span></span>`;
+        el.style.setProperty('--bob', '0px');
+        return;
+      }
+      const template = el.dataset.template || '{wave}';
+      el.innerHTML = template
+        .replace('{wave}', `<span class="wave">${wave}</span>`)
+        .replaceAll('\n', '<br>');
+      el.style.setProperty('--bob', `${bob}px`);
+    };
+    let i = 0;
+    setInterval(() => {
+      const wave = waves[i % waves.length];
+      const bob = i % 4 === 0 ? -1 : i % 4 === 2 ? 1 : 0;
+      document.querySelectorAll('.ascii').forEach(el => render(el, wave, bob, i));
+      i += 1;
+    }, 170);
+    document.querySelectorAll('.ascii').forEach(el => render(el, waves[0], 0, 0));
+  </script>
+</body>
+</html>

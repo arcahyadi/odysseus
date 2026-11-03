@@ -2,22 +2,19 @@
 // Slash command handlers and dispatcher, extracted from chat.js
 
 import Storage from './storage.js';
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 import modelsModule from './models.js';
-import chatRenderer from './chatRenderer.js';
+import chatRenderer from './chatRenderer.js?v=20260914metricssummary1';
 import spinnerModule from './spinner.js';
-import themeModule from './theme.js';
-import documentModule from './document.js';
+import themeModule from './theme.js?v=20260911organsrain1';
+import documentModule from './document.js?v=20260916docctx2';
 import workspaceModule from './workspace.js';
-import settingsModule from './settings.js';
+import settingsModule from './settings.js?v=20260912writingstyle3';
 import cookbookModule from './cookbook.js';
-import { EVAL_PROMPTS } from './compare/index.js';
+import { EVAL_PROMPTS } from './compare/index.js?v=20260909mobilepaneaddscroll1';
 import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
-// Installing this module also registers `window.cancelActiveTour` (see the
-// bottom of tour-core.js), so multi-phase handlers can still call the global
-// teardown on modal-close without importing the function directly.
-import { ensureTourStyles, clearComposer, makeHalo, runTour } from './tour-core.js';
+import { getSettings } from './appConfig.js';
 
 // ── Module state ──────────────────────────────────────────────────────
 
@@ -283,8 +280,14 @@ function _setupProviderPrompt() {
 // -----------------------------------------------------------------------
 
 /** Persist a message to the current session (fire-and-forget) */
-function _persistMsg(role, content, metadata) {
-  const sid = sessionModule.getCurrentSessionId();
+async function _persistMsg(role, content, metadata) {
+  let sid = sessionModule.getCurrentSessionId();
+  if (!sid && sessionModule.hasPendingChat?.()) {
+    try {
+      await sessionModule.materializePendingSession?.();
+      sid = sessionModule.getCurrentSessionId();
+    } catch (_) {}
+  }
   if (!sid || !content) return;
   const payload = { role, content };
   if (metadata) payload.metadata = metadata;
@@ -296,6 +299,7 @@ function _persistMsg(role, content, metadata) {
 }
 
 function slashReply(text) {
+  _hideWelcomeScreen();
   const chatBox = document.getElementById('chat-history');
   const div = document.createElement('div');
   div.className = 'msg msg-ai';
@@ -1248,19 +1252,22 @@ async function _cmdWorkspace(args, ctx) {
   const rest = args.slice(1).join(' ').trim();
   const cur = workspaceModule.getWorkspace();
   if (!sub || sub === 'show' || sub === 'status' || sub === 'info') {
-    slashReply(cur ? `Workspace: <code>${uiModule.esc(cur)}</code>` : 'No workspace set. <code>/workspace pick</code> or <code>/workspace set /path</code>.');
+    slashReply(cur ? `Workspace: <code>${uiModule.esc(cur)}</code>` : 'No workspace set. Configure a backend default or use <code>/workspace &lt;path&gt;</code> / <code>/workspace pick</code>.');
     return true;
   }
-  if (sub === 'set' || sub === 'cd' || sub === 'use') {
-    if (!rest) { slashReply('Usage: <code>/workspace set /absolute/path</code>'); return true; }
+  const setWorkspace = (path) => {
+    if (!path) { slashReply('Usage: <code>/workspace &lt;path&gt;</code>'); return true; }
     // Validate server-side before persisting so the pill never claims a
     // workspace the backend will refuse to bind (typo, file path, deleted
     // folder, sensitive dir, filesystem root).
-    workspaceModule.vetAndSetWorkspace(rest).then(({ ok, path }) => {
-      if (ok) slashReply(`Workspace set: <code>${uiModule.esc(path)}</code>`);
-      else slashReply(`Not a usable workspace folder: <code>${uiModule.esc(rest)}</code>. It must be an existing directory, not a filesystem root or sensitive path.`);
+    workspaceModule.vetAndSetWorkspace(path).then(({ ok, path: resolvedPath }) => {
+      if (ok) slashReply(`Workspace set: <code>${uiModule.esc(resolvedPath)}</code>`);
+      else slashReply(`Not a usable workspace folder on the Odysseus backend: <code>${uiModule.esc(path)}</code>. If Odysseus is running in Docker, use the container path, usually <code>/app</code>, or use <code>/workspace pick</code>.`);
     });
     return true;
+  };
+  if (sub === 'set' || sub === 'cd' || sub === 'use') {
+    return setWorkspace(rest);
   }
   if (sub === 'clear' || sub === 'off' || sub === 'none' || sub === 'unset') {
     workspaceModule.clearWorkspace();
@@ -1271,8 +1278,8 @@ async function _cmdWorkspace(args, ctx) {
     workspaceModule.openWorkspaceBrowser();
     return true;
   }
-  slashReply('Usage: <code>/workspace</code> · <code>set /path</code> · <code>clear</code> · <code>pick</code>');
-  return true;
+  // Match the TUI's short form: /workspace /path (relative paths work too).
+  return setWorkspace(args.join(' ').trim());
 }
 
 async function _cmdToggleShow(args, ctx) {
@@ -1365,6 +1372,7 @@ async function _cmdOpen(args, ctx) {
       brain: ['tool-memory-btn', 'rail-memory'],
       memory: ['tool-memory-btn', 'rail-memory'],
       memories: ['tool-memory-btn', 'rail-memory'],
+      skills: ['tool-skills-btn', 'rail-skills'],
       research: ['tool-research-btn', 'rail-research'],
       compare: ['tool-compare-btn', 'rail-compare'],
       theme: ['tool-theme-btn', 'rail-theme'],
@@ -2016,12 +2024,12 @@ async function _cmdUsage(args, ctx) {
   const messageCount = Number(session?.message_count || 0);
   const totalTokens = Number(session?.total_tokens || 0);
   const costTracked = chatRenderer.isCostTrackedEndpoint ? chatRenderer.isCostTrackedEndpoint(endpointUrl) : true;
-  const cost = costTracked && chatRenderer.getSessionCost ? Number(chatRenderer.getSessionCost(sid) || 0) : 0;
-  const costLine = costTracked
-    ? (cost > 0
-      ? `Estimated local cost: $${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}`
-      : 'Estimated local cost: unavailable or zero')
-    : 'Estimated local cost: not tracked for this endpoint';
+  const cost = chatRenderer.getSessionCost ? Number(chatRenderer.getSessionCost(sid) || 0) : 0;
+  const costLine = cost > 0
+    ? `Estimated local cost: $${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}`
+    : costTracked
+      ? 'Estimated local cost: unavailable or zero'
+      : 'Estimated local cost: no billable usage recorded';
 
   slashReply(`<pre>${[
     `Session: ${ctx.esc(session?.name || 'Current chat')}`,
@@ -2707,7 +2715,7 @@ async function _cmdTourCompare(args, ctx) {
     { sel: '#compare-model-overlay .compare-parallel-toggle',
       text: '<b>Parallel</b> runs side by side, toggle to <b>Sequential</b> as well.' },
     { sel: '#compare-model-overlay .compare-dice-toggle',
-      text: '<b>Shuffle</b> picks the models in your entire list of endpoints. Combine with <b>Blind Mode</b> and you get the cleanest evaluation.' },
+      text: '<b>Shuffle</b> picks the models in your entire list of endpoints. Combine with <b>Blind Mode</b> for the cleanest comparison.' },
   ];
 
   for (let i = 0; i < phase1.length; i++) {
@@ -2776,7 +2784,7 @@ async function _cmdTourCompare(args, ctx) {
     { sel: '#compare-shuffle-btn',
       text: 'After adding, <b>Shuffle</b> to randomize the order again.' },
     { sel: '#cmp-eval-btn',
-      text: 'When you’re ready to test, feel free to use curated <b>evaluation prompts</b>.',
+      text: 'When you’re ready to test, use the curated <b>comparison prompts</b>.',
       advanceOnClick: true },
   ];
 
@@ -3172,34 +3180,205 @@ async function _cmdTourNotes(args, ctx) {
   });
 }
 
-// ── Tour: Brain ──
+// ── Tour: Memory ──
 async function _cmdTourBrain(args, ctx) {
-  const _tab = (name) => document.querySelector(`.memory-tab[data-memory-tab="${name}"]`)?.click();
+  const _msgEl = document.getElementById('message');
+  if (_msgEl) {
+    _msgEl.value = '';
+    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
+  }
 
-  return runTour({
-    modalId: 'memory-modal',
-    openerIds: ['tool-memory-btn', 'rail-memory'],
-    bailMessage: 'Could not open Brain. Try clicking the Brain tool first.',
-    haloTracksAppear: true,
-    steps: [
-      { sel: '#memory-modal .memory-modal-content',
-        text: '<b>Brain</b> is where your memories are. You can edit them, or add new ones under <b>Add</b>. Wow.',
-        before: () => _tab('browse'),
-        placement: 'center-above' },
-      { sel: '#memory-tidy-btn',
-        text: '<b>Tidy</b> runs your model to clear out irrelevant memories and duplicates. It also triggers automatically from Tasks.',
-        before: () => _tab('browse') },
-      { sel: '.memory-tab-panel[data-memory-panel="skills"]',
-        text: '<b>Skills</b> are basically your AI’s memory for improving its abilities.',
-        before: () => _tab('skills') },
-      { sel: '.memory-tab-panel[data-memory-panel="settings"]',
-        text: '<b>Settings</b> lets you turn off auto extraction and set how strong skills need to be before they are tagged.',
-        before: () => _tab('settings') },
-    ],
-    doneText: 'That’s Brain — memories, skills, tidy, and settings in one place.',
-    reply: slashReply,
-    done: typewriterReply,
-  });
+  if (!document.getElementById('tour-styles')) {
+    const s = document.createElement('style');
+    s.id = 'tour-styles';
+    s.textContent =
+      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
+      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
+      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
+      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
+      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
+      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
+      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
+      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
+      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
+      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
+      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
+      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
+      '.tour-btn-arrow:hover{opacity:1}' +
+      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
+      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
+      '.tour-btn-skip:hover{opacity:0.6}';
+    document.head.appendChild(s);
+  }
+
+  let modal = document.getElementById('memory-modal');
+  if (!modal || modal.classList.contains('hidden')) {
+    const opener = document.getElementById('tool-memory-btn') || document.getElementById('rail-memory');
+    if (opener) opener.click();
+    for (let i = 0; i < 25; i++) {
+      await new Promise(r => setTimeout(r, 80));
+      modal = document.getElementById('memory-modal');
+      if (modal && !modal.classList.contains('hidden')) break;
+    }
+  }
+  if (!modal || modal.classList.contains('hidden')) {
+    slashReply('Could not open Memory. Try clicking the Memory tool first.');
+    return true;
+  }
+
+  document.body.classList.add('tour-active');
+  const tooltip = document.createElement('div');
+  tooltip.id = 'tour-tooltip';
+  document.body.appendChild(tooltip);
+
+  let _halos = [];
+  function _makeHalo(target) {
+    const halo = document.createElement('div');
+    halo.className = 'tour-halo';
+    document.body.appendChild(halo);
+    const update = () => {
+      const r = target.getBoundingClientRect();
+      halo.style.top    = (r.top - 4) + 'px';
+      halo.style.left   = (r.left - 4) + 'px';
+      halo.style.width  = (r.width + 8) + 'px';
+      halo.style.height = (r.height + 8) + 'px';
+    };
+    update();
+    const _tStart = performance.now();
+    let _rafId = 0;
+    const tick = () => {
+      update();
+      if (performance.now() - _tStart < 500) _rafId = requestAnimationFrame(tick);
+    };
+    _rafId = requestAnimationFrame(tick);
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
+    return { destroy() {
+      if (_rafId) cancelAnimationFrame(_rafId);
+      window.removeEventListener('resize', update);
+      window.removeEventListener('scroll', update, true);
+      halo.remove();
+    } };
+  }
+  function _clearHalos() {
+    _halos.forEach(h => h.destroy());
+    _halos = [];
+    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
+  }
+  const _clear = () => {
+    _clearHalos();
+    tooltip.remove();
+    document.body.classList.remove('tour-active');
+  };
+
+  function _positionTooltip(target, placement) {
+    tooltip.style.visibility = 'hidden';
+    tooltip.style.display = '';
+    const tw = tooltip.offsetWidth || 260;
+    const th = tooltip.offsetHeight || 100;
+    if (placement === 'center-above') {
+      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
+      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
+      tooltip.style.top = top + 'px';
+      tooltip.style.left = left + 'px';
+      tooltip.style.visibility = '';
+      return;
+    }
+    const r = target.getBoundingClientRect();
+    const gap = 12;
+    let top, left;
+    if (r.bottom + gap + th < window.innerHeight - 10) {
+      top = r.bottom + gap;
+      left = r.left + r.width / 2 - tw / 2;
+    } else if (r.top - gap - th > 10) {
+      top = r.top - gap - th;
+      left = r.left + r.width / 2 - tw / 2;
+    } else {
+      top = r.top + r.height / 2 - th / 2;
+      left = r.right + gap;
+      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
+    }
+    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
+    if (left < 10) left = 10;
+    if (top < 10) top = 10;
+    tooltip.style.top = top + 'px';
+    tooltip.style.left = left + 'px';
+    tooltip.style.visibility = '';
+  }
+
+  function _showStep(sel, text, opts) {
+    opts = opts || {};
+    const isFirst = !!opts.isFirst;
+    const isLast = !!opts.isLast;
+    const before = opts.before;
+    const placement = opts.placement;
+    return new Promise(resolve => {
+      _clearHalos();
+      if (before) { try { before(); } catch (_) {} }
+      setTimeout(() => {
+        const target = document.querySelector(sel);
+        if (!target) return resolve('skip');
+        _halos.push(_makeHalo(target));
+        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+        tooltip.classList.remove('tour-fade-in');
+        tooltip.innerHTML =
+          '<div class="tour-text">' + text + '</div>' +
+          '<div class="tour-nav">' +
+            '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
+            '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
+            '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
+          '</div>';
+        requestAnimationFrame(() => {
+          _positionTooltip(target, placement);
+          tooltip.classList.add('tour-fade-in');
+        });
+
+        const onClick = (e) => {
+          const hit = e.target.closest && e.target.closest('[data-act]');
+          const act = hit && hit.dataset.act;
+          if (!act) return;
+          tooltip.removeEventListener('click', onClick);
+          resolve(act);
+        };
+        tooltip.addEventListener('click', onClick);
+      }, before ? 180 : 0);
+    });
+  }
+
+  const _tab = (name) => document.querySelector(`.memory-tab[data-memory-tab="${name}"]`)?.click();
+  const steps = [
+    { sel: '#memory-modal .memory-modal-content',
+      text: '<b>Memory</b> is where your memories are. You can edit them, or add new ones under <b>Add</b>. Wow.',
+      before: () => _tab('browse'),
+      placement: 'center-above' },
+    { sel: '#memory-tidy-btn',
+      text: '<b>Tidy</b> runs your model to clear out irrelevant memories and duplicates. It also triggers automatically from Tasks.',
+      before: () => _tab('browse') },
+    { sel: '.memory-tab-panel[data-memory-panel="skills"]',
+      text: '<b>Skills</b> are basically your AI’s memory for improving its abilities.',
+      before: () => _tab('skills') },
+    { sel: '.memory-tab-panel[data-memory-panel="settings"]',
+      text: '<b>Settings</b> lets you turn off auto extraction and set how strong skills need to be before they are tagged.',
+      before: () => _tab('settings') },
+  ];
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const res = await _showStep(step.sel, step.text, {
+      isFirst: i === 0,
+      isLast: i === steps.length - 1,
+      before: step.before,
+      placement: step.placement,
+    });
+    if (res === 'skip') { _clear(); return true; }
+    if (res === 'back') { if (i > 0) i -= 2; continue; }
+  }
+
+  _clear();
+  await typewriterReply('That’s Memory — memories, skills, tidy, and settings in one place.');
+  return true;
 }
 
 // ── Task tours ──
@@ -4018,16 +4197,22 @@ function _clearSetupCommandInput() {
   }
 }
 
-async function _setupProviderDeviceFlow(providerKey) {
+async function _setupProviderDeviceFlow(providerKey, options = {}) {
   _clearSetupGuideMessages();
   const config = PROVIDER_DEVICE_FLOWS[providerKey];
   if (!config) {
     await _setupReply('Provider not recognised.');
     return;
   }
-  await _setupReply(`Starting ${config.label} sign-in...`);
+  // `/setup chatgpt-subscription codex00` labels the new account so several
+  // ChatGPT subscriptions stay distinguishable. The label is cosmetic only.
+  const accountLabel = providerKey === 'chatgpt-subscription' ? String(options.label || '').trim().slice(0, 40) : '';
+  const formData = new FormData();
+  if (accountLabel) formData.append('label', accountLabel);
+  await _setupReply(`Starting ${config.label} sign-in${accountLabel ? ` for "${accountLabel}"` : ''}...`);
   try {
     const result = await runProviderDeviceFlow(providerKey, {
+      formData,
       onStart: async ({ start, authUrl }) => {
         const place = providerKey === 'copilot' ? 'GitHub' : 'OpenAI';
         const action = providerKey === 'copilot' ? 'approve the request' : 'enter the code';
@@ -4050,7 +4235,8 @@ async function _setupProviderDeviceFlow(providerKey) {
     });
     if (result.status === 'authorized') {
       const n = ((result.endpoint && result.endpoint.models) || []).length;
-      await _setupReply(`Connected - ${n} ${config.label} model${n !== 1 ? 's' : ''} available.`);
+      const connectedName = (result.endpoint && result.endpoint.name) || config.label;
+      await _setupReply(`Connected ${connectedName} - ${n} model${n !== 1 ? 's' : ''} available.`);
       if (modelsModule) modelsModule.refreshModels(true);
       return;
     }
@@ -4074,7 +4260,7 @@ async function _cmdSetup(args, ctx) {
   const topicArgs = args.slice(1);
   const deviceAuthProvider = _setupDeviceAuthProviderFromInput(topic);
   if (deviceAuthProvider) {
-    await _setupProviderDeviceFlow(deviceAuthProvider);
+    await _setupProviderDeviceFlow(deviceAuthProvider, { label: topicArgs.join(' ') });
     return true;
   }
   const provider = _setupProviderFromInput(topic);
@@ -4199,7 +4385,6 @@ async function _cmdShortcuts(args, ctx) {
   // Try to load user keybinds from settings
   let keybinds = {
     search: 'ctrl+k',
-    toggle_sidebar: 'ctrl+b',
     new_session: 'ctrl+alt+n',
     star_session: 'ctrl+alt+s',
     delete_session: 'ctrl+alt+d',
@@ -4208,8 +4393,7 @@ async function _cmdShortcuts(args, ctx) {
   };
 
   try {
-    const res = await fetch(`${API_BASE}/api/auth/settings`, { credentials: 'same-origin' });
-    const settings = await res.json();
+    const settings = await getSettings();
     if (settings.keybinds) {
       keybinds = { ...keybinds, ...settings.keybinds };
     }
@@ -4225,7 +4409,6 @@ async function _cmdShortcuts(args, ctx) {
 
   const entries = [
     [formatCombo(keybinds.search), 'Search conversations'],
-    [formatCombo(keybinds.toggle_sidebar), 'Toggle sidebar'],
     [formatCombo(keybinds.new_session), 'New session'],
     [formatCombo(keybinds.star_session), 'Star / unstar session'],
     [formatCombo(keybinds.delete_session), 'Delete session'],
@@ -4315,6 +4498,29 @@ function _eggRender(html) {
   uiModule.scrollHistory();
 }
 
+// Delegated handlers for egg commands that used inline onclick (blocked by
+// Firefox CSP script-src-attr). Dice re-roll + color copy.
+if (!window._eggDelegatedBound) {
+  window._eggDelegatedBound = true;
+  document.addEventListener('click', (e) => {
+    const dice = e.target.closest && e.target.closest('.egg-dice');
+    if (dice) {
+      const sides = Math.min(parseInt(dice.dataset.diceSides) || 6, 1000);
+      dice.style.animation = 'none';
+      void dice.offsetHeight;
+      dice.textContent = Math.floor(Math.random() * sides) + 1;
+      dice.style.animation = 'egg-shake 0.3s ease';
+      return;
+    }
+    const swatch = e.target.closest && e.target.closest('.egg-color-copy');
+    if (swatch) {
+      navigator.clipboard.writeText(swatch.dataset.color || '');
+      swatch.style.transform = 'scale(0.9)';
+      setTimeout(() => { swatch.style.transform = ''; }, 150);
+    }
+  });
+}
+
 async function _cmdFlip(args, ctx) {
   const isHeads = Math.random() < 0.5;
   const edge = Math.random() < 0.001;
@@ -4352,7 +4558,7 @@ async function _cmdRoll(args, ctx) {
   const results = Array.from({ length: count }, () => Math.floor(Math.random() * sides) + 1);
   const total = results.reduce((a, b) => a + b, 0);
   const dice = results.map((v, i) => {
-    return `<div style="min-width:42px;height:42px;border-radius:6px;border:2px solid var(--border);background:var(--panel);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--red);animation:egg-spin 0.5s ease-out ${i*0.08}s both;cursor:pointer" title="d${sides}" onclick="this.style.animation='none';this.offsetHeight;var r=Math.floor(Math.random()*${sides})+1;this.textContent=r;this.style.animation='egg-shake 0.3s ease'">${v}</div>`;
+    return `<div style="min-width:42px;height:42px;border-radius:6px;border:2px solid var(--border);background:var(--panel);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--red);animation:egg-spin 0.5s ease-out ${i*0.08}s both;cursor:pointer" class="egg-dice" data-dice-sides="${sides}" title="d${sides}">${v}</div>`;
   }).join('');
   const totalHtml = count > 1 ? `<div style="font-size:0.8em;opacity:0.5;margin-top:4px">${count}d${sides} = ${total}</div>` : '';
   _eggRender(`<div style="display:flex;flex-direction:column;align-items:center;gap:4px"><div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center">${dice}</div>${totalHtml}</div>`);
@@ -4669,7 +4875,7 @@ async function _cmdColor(args, ctx) {
   const hex = args[0] || '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0');
   const c = hex.startsWith('#') ? hex : '#' + hex;
   _eggRender(`<div style="display:flex;align-items:center;gap:12px;animation:egg-fade 0.3s ease-out">
-    <div style="width:48px;height:48px;border-radius:4px;border:1px solid var(--border);background:${ctx.esc(c)};cursor:pointer" title="Click to copy" onclick="navigator.clipboard.writeText('${ctx.esc(c)}');this.style.transform='scale(0.9)';setTimeout(()=>this.style.transform='',150)"></div>
+    <div style="width:48px;height:48px;border-radius:4px;border:1px solid var(--border);background:${ctx.esc(c)};cursor:pointer" class="egg-color-copy" data-color="${ctx.esc(c)}" title="Click to copy"></div>
     <div style="display:flex;flex-direction:column;gap:2px"><code style="font-size:1.1em">${ctx.esc(c)}</code>
       <span style="font-size:0.75em;opacity:0.4">click swatch to copy</span>
     </div>
@@ -4699,7 +4905,7 @@ async function _cmdHelp(args, ctx) {
       categories[cat].push(`  ${usage.padEnd(21)}${desc}`);
     }
   }
-  const order = ['Getting started', 'Tours', 'Chats', 'Settings', 'Memory', 'Productivity', 'AI Tools'];
+  const order = ['Getting started', 'Tours', 'Chats', 'Settings', 'Memory', 'Skills', 'Productivity', 'AI Tools'];
   let lines = [];
   for (const cat of order) {
     if (categories[cat] && categories[cat].length) {
@@ -4798,14 +5004,14 @@ const COMMANDS = {
   },
   skills: {
     alias: ['skill'],
-    category: 'Memory',
+    category: 'Skills',
     help: 'List, search, inspect, or run skills',
     handler: _cmdSkills,
     usage: '/skills list | search query | view name | use name request',
   },
   'reload-skills': {
     alias: ['reload_skills'],
-    category: 'Memory',
+    category: 'Skills',
     help: 'Refresh the slash skill catalog',
     handler: _cmdReloadSkills,
     usage: '/reload-skills',
@@ -4929,7 +5135,7 @@ const COMMANDS = {
   'tour-brain': {
     alias: ['brain-tour', 'tour-memory', 'memory-tour'],
     category: 'Tours',
-    help: 'Brain tour: memories, tidy, skills, settings',
+    help: 'Memory tour: memories, tidy, skills, settings',
     handler: _cmdTourBrain,
     usage: '/tour-brain'
   },
@@ -5007,7 +5213,7 @@ const COMMANDS = {
   brain: {
     alias: ['memories'],
     category: 'Tools',
-    help: 'Open Brain',
+    help: 'Open Memory',
     handler: (args, ctx) => _cmdToolPanel('brain', args, ctx),
     usage: '/brain'
   },

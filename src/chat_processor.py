@@ -89,6 +89,77 @@ class ChatProcessor:
 
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
+    MEMORY_CONTEXT_LIMIT = 5
+    PINNED_MEMORY_LIMIT = MEMORY_CONTEXT_LIMIT
+    CORE_MEMORY_AUTO_INJECT_LIMIT = 5
+
+    def _is_core_memory(self, memory: Dict[str, Any]) -> bool:
+        """Return whether a pinned memory is safe to keep globally available."""
+        category = (memory.get("category") or "").lower()
+        if category in {"identity", "contact"}:
+            return True
+        text = (memory.get("text") or "").lower()
+        return any(marker in text for marker in (
+            "my name is",
+            "name is",
+            "call me",
+            "i am ",
+            "i'm ",
+            "email",
+            "phone",
+            "address",
+        ))
+
+    def _select_pinned_memories(self, message: str, pinned: list) -> list:
+        """Keep pinned memories high-priority without injecting all of them.
+
+        Pinned used to mean "always send every pinned memory to the model".
+        That bloats every request and leaks unrelated personal context into
+        tasks that do not need it. Now only a small set of core identity/contact
+        memories is always available; other pinned memories must match the
+        current request, but are retrieved before ordinary memories.
+        """
+        if not pinned:
+            return []
+
+        core = [
+            m for m in pinned
+            if self._is_core_memory(m)
+        ][:self.CORE_MEMORY_AUTO_INJECT_LIMIT]
+
+        core_ids = {m.get("id") for m in core if m.get("id")}
+        contextual_candidates = [
+            m for m in pinned
+            if not (m.get("id") and m.get("id") in core_ids)
+        ]
+        remaining_slots = max(self.PINNED_MEMORY_LIMIT - len(core), 0)
+        contextual = self._hybrid_retrieve(
+            message,
+            contextual_candidates,
+            k=remaining_slots,
+        ) if remaining_slots else []
+
+        selected = []
+        seen = set()
+        for memory in [*core, *contextual]:
+            key = memory.get("id") or memory.get("text")
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(memory)
+        return selected[:self.PINNED_MEMORY_LIMIT]
+
+    @staticmethod
+    def _is_memory_management_request(message: str) -> bool:
+        """Do not preload memory for an explicit memory-management command."""
+        text = re.sub(r"\s+", " ", str(message or "").strip().lower())
+        if not text or not re.search(r"\bmemories?\b|\bremember\b", text):
+            return False
+        return bool(re.search(
+            r"\b(list|show|find|search|look up|lookup|what do you remember|"
+            r"delete|remove|edit|update|add|save|store|forget|clear)\b",
+            text,
+        ))
 
     def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5) -> list:
         """Retrieve memories relevant to the message.
@@ -206,6 +277,7 @@ class ChatProcessor:
         preset_system_prompt: Optional[str] = None,
         owner: Optional[str] = None,
         character_name: Optional[str] = None,
+        persona_memory: Optional[str] = None,
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
@@ -243,28 +315,44 @@ class ChatProcessor:
             "content": UNTRUSTED_CONTEXT_POLICY,
         })
 
-        # Memory: pinned (always included) + extended (RAG-retrieved when relevant)
+        if character_name and persona_memory:
+            preface.append(untrusted_context_message(
+                "persona memory: continuity notes",
+                (
+                    f"Continuity notes for the active persona, {character_name}. "
+                    "Use these only to maintain established context for this persona; "
+                    "do not mention them unless relevant.\n"
+                    f"{persona_memory}"
+                ),
+            ))
+
+        # Memory: core pinned facts + relevant pinned/extended recall.
         self._last_used_memories = []  # track what was injected
-        if use_memory:
+        if use_memory and not self._is_memory_management_request(message):
             mem_entries = self.memory_manager.load(owner=owner)
 
             pinned = [m for m in mem_entries if m.get("pinned")]
             extended = [m for m in mem_entries if not m.get("pinned")]
 
             _used_ids: list = []
-            if pinned:
-                pinned_text = "\n- ".join([m["text"] for m in pinned])
+            selected_pinned = self._select_pinned_memories(message, pinned)
+            if selected_pinned:
+                pinned_text = "\n- ".join([m["text"] for m in selected_pinned])
                 preface.append(untrusted_context_message(
-                    "saved memory: pinned user facts",
-                    f"Core facts about the user:\n- {pinned_text}",
+                    "saved memory: pinned context",
+                    (
+                        "Pinned memory context. Some pinned memories are only "
+                        f"included when relevant:\n- {pinned_text}"
+                    ),
                 ))
-                for m in pinned:
+                for m in selected_pinned:
                     self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "pinned"})
                     if m.get("id"):
                         _used_ids.append(m["id"])
 
-            if extended:
-                relevant = self._hybrid_retrieve(message, extended, k=3)
+            remaining_memory_slots = max(self.MEMORY_CONTEXT_LIMIT - len(self._last_used_memories), 0)
+            if extended and remaining_memory_slots:
+                relevant = self._hybrid_retrieve(message, extended, k=remaining_memory_slots)
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
                     preface.append(untrusted_context_message(
@@ -359,7 +447,10 @@ class ChatProcessor:
                         )
                         if len(rag_content) > 10000:
                             rag_content = rag_content[:10000] + "\n[Truncated]"
-                        preface.append(untrusted_context_message("retrieved documents", rag_content))
+                        preface.append(untrusted_context_message(
+                            "retrieved documents",
+                            rag_content,
+                        ))
             except Exception as e:
                 logger.warning(f"RAG retrieval failed: {e}")
 
@@ -437,12 +528,49 @@ class ChatProcessor:
         skip_url_fetch = len(message) > 2000 or len(non_yt_urls) > 3
         if not skip_url_fetch:
             for url in non_yt_urls:
-                result = fetch_webpage_content(url)
+                try:
+                    result = fetch_webpage_content(url)
+                except Exception:
+                    # The URL and exception can both contain signed-query
+                    # credentials or response-controlled text. Keep the log
+                    # diagnostic stable as well as the model-facing context.
+                    logger.warning("Automatic URL fetch failed while building context")
+                    result = {"success": False, "error": ""}
                 if result.get('success'):
                     content = result.get('content', '')[:10000]
                     preface.append(untrusted_context_message(
                         f"web page: {url}",
                         f"Content from {url}:\n\n{content}",
+                        provenance_origin="external",
+                    ))
+                    # Automatic exact-URL reads are real network evidence even
+                    # though they happen before the agent loop.  Publish the
+                    # source through the same provenance channel as web search
+                    # so the UI and persisted message do not make a grounded
+                    # answer look like an unsupported no-tool response.
+                    if not any(source.get("url") == url for source in web_sources):
+                        web_sources.append({
+                            "url": url,
+                            "title": str(result.get("title") or url),
+                            "acquisition": "automatic_url_fetch",
+                        })
+                else:
+                    # A failed automatic URL fetch is context too. Never pass
+                    # exception text or response-controlled diagnostics back to
+                    # the model: reduce the result to a small transport-owned
+                    # status and explicitly state that the page was not read.
+                    error = str(result.get("error") or "")
+                    status = "the page was unavailable"
+                    status_match = re.match(r"^HTTP\s+(\d{3})\b", error)
+                    if status_match:
+                        status = f"the server returned HTTP {status_match.group(1)}"
+                    elif error.startswith("TooLarge:"):
+                        status = "the response exceeded the fetch size limit"
+                    elif error.startswith("Rate limit"):
+                        status = "the request was rate limited"
+                    preface.append(untrusted_context_message(
+                        "web page fetch failure",
+                        f"A linked page was not read: {status}.",
                     ))
 
         # Skills index — progressive disclosure. Only injected when the
@@ -466,6 +594,9 @@ class ChatProcessor:
                     for s in sorted(by_cat[cat], key=lambda x: x["name"]):
                         desc = s.get("description") or ""
                         lines.append(f"    - {s['name']}: {desc}" if desc else f"    - {s['name']}")
-                preface.append(untrusted_context_message("available skills index", "\n".join(lines)))
+                preface.append(untrusted_context_message(
+                    "available skills index",
+                    "\n".join(lines),
+                ))
 
         return preface, rag_sources, web_sources
