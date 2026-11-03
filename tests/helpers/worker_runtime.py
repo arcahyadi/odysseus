@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -68,4 +69,11 @@ def isolated_runtime(worker="main"):
                 patcher.setenv(name, str(tmp))
             # tempfile may already have cached the caller's directory.
             patcher.setattr(tempfile, "tempdir", str(tmp))
-            yield root
+            try:
+                yield root
+            finally:
+                for handler in list(logging.getLogger().handlers):
+                    filename = getattr(handler, "baseFilename", None)
+                    if filename and Path(filename).is_relative_to(root):
+                        logging.getLogger().removeHandler(handler)
+                        handler.close()
