@@ -32,6 +32,64 @@ class TimestampMixin:
     def updated_at(cls):
         return Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
 
+
+# ── Multi-model conversation threads ─────────────────────────────────────────
+
+
+class MultiModelThread(TimestampMixin, Base):
+    """Tracks multi-model conversation thread metadata."""
+    __tablename__ = "multi_model_threads"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)  # username; null = legacy/shared
+    model_ids = Column(JSON, nullable=False)  # List of model IDs
+    endpoint_urls = Column(JSON, nullable=False)  # List of endpoint URLs
+    session_id = Column(String, nullable=True)  # Optional parent session ID for UI linking
+    prompt = Column(Text, nullable=False)  # The original user prompt
+    status = Column(String, nullable=False, default="pending")  # pending/running/completed/failed/partial
+    message_count = Column(Integer, nullable=False, default=0)  # Messages per model
+    has_errors = Column(Boolean, nullable=False, default=False)  # Any model failed?
+    completed_at = Column(DateTime, nullable=True)  # When thread completed
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
+
+    # Relationship to messages
+    messages = relationship("MultiModelMessage", back_populates="thread", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index('ix_mm_threads_owner', 'owner'),
+        Index('ix_mm_threads_session', 'session_id'),
+        Index('ix_mm_threads_owner_status', 'owner', 'status'),
+        Index('ix_mm_threads_owner_created', 'owner', 'created_at', 'status'),
+    )
+
+
+class MultiModelMessage(Base):
+    """Stores individual messages per model in a multi-model thread."""
+    __tablename__ = "multi_model_messages"
+
+    id = Column(String, primary_key=True, index=True)
+    thread_id = Column(String, ForeignKey("multi_model_threads.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=True, index=True)  # For explicit ownership checks
+    model_id = Column(String, nullable=False)
+    endpoint_url = Column(String, nullable=False)
+    role = Column(String, nullable=False)  # "user" or "assistant"
+    content = Column(Text, nullable=False)
+    meta_data = Column("metadata", Text, nullable=True)  # JSON string for metrics: {"token_count": {"input": int, "output": int}, "latency_ms": int, "provider": string, "model_id": string}
+    timestamp = Column(DateTime, default=utcnow_naive)  # timestamps are naive UTC for consistency with existing Session and ChatMessage tables
+    message_index = Column(Integer, nullable=False)  # Position in thread (0-based, aligned across models)
+
+    # Relationship to thread
+    thread = relationship("MultiModelThread", back_populates="messages")
+
+    __table_args__ = (
+        Index('ix_mm_thread_index', 'thread_id', 'message_index'),
+        Index('ix_mm_thread_role', 'thread_id', 'role'),
+        Index('ix_mm_messages_owner', 'owner'),
+        Index('ix_mm_messages_model', 'model_id'),
+        UniqueConstraint('thread_id', 'message_index', 'model_id', name='uq_mm_thread_model_index'),
+    )
+
+
 # Ensure the writable data directory exists before SQLite connects.
 from src.constants import DATA_DIR, AUTH_FILE, MEMORY_FILE, USER_PREFS_FILE, SETTINGS_FILE
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -807,6 +865,9 @@ class PlanStep(TimestampMixin, Base):
     retry_count  = Column(Integer, default=0)
     started_at   = Column(DateTime, nullable=True)
     ended_at     = Column(DateTime, nullable=True)
+    # Document-aware execution (both null for ordinary text steps)
+    doc_id       = Column(String, nullable=True)
+    doc_action   = Column(String, nullable=True)   # create | update | edit | suggest | read
 
     plan    = relationship("Plan", back_populates="steps")
     session = relationship("Session", backref=backref("plan_steps"))
@@ -1051,6 +1112,31 @@ def _migrate_add_document_archived_column():
             logging.getLogger(__name__).info("Migrated: added 'archived' to documents")
     except Exception as e:
         logging.getLogger(__name__).warning(f"documents.archived migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _migrate_add_plan_step_doc_columns():
+    """Add doc_id / doc_action to plan_steps (document-aware steps). Guarded + idempotent."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(plan_steps)")
+        columns = [row[1] for row in cursor.fetchall()]
+        for col_name in ("doc_id", "doc_action"):
+            if col_name not in columns:
+                conn.execute(f"ALTER TABLE plan_steps ADD COLUMN {col_name} TEXT")
+                conn.commit()
+                logging.getLogger(__name__).info(f"Migrated: added '{col_name}' to plan_steps")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"plan_steps doc-columns migration failed: {e}")
     finally:
         try:
             conn.close()
@@ -2114,6 +2200,7 @@ def init_db():
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
+    _migrate_add_plan_step_doc_columns()
     _migrate_add_last_message_at_column()
     _migrate_add_folder_column()
     _migrate_add_token_columns()
