@@ -138,6 +138,7 @@ build/
 /diary/
 /.accio/
 **/agent-core/
+/.agents/
 
 # The app's own store (data/memory.json, data/app.db) is already covered by the
 # data/ rule above. A frozen build writes to %USERPROFILE%\.odysseus instead.
