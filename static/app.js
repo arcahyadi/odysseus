@@ -47,6 +47,7 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import * as multiModelModule from './js/multiModel/index.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -54,6 +55,7 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+window.multiModelModule = multiModelModule;
 
 function _isMobileChatInput() {
   return window.innerWidth <= 768;

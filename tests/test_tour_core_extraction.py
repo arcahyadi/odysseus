@@ -163,12 +163,18 @@ def test_precache_includes_tour_core():
 
 
 def test_cache_name_bumped_for_tour_core():
+    import re
     sw = SW.read_text(encoding="utf-8")
-    # v347 was the last cache before tour-core landed. If someone adds a new
-    # precached module without bumping, existing installs will serve a stale
-    # shell. Pin the current value; bump alongside the file.
-    assert "odysseus-v348" in sw
-    assert "odysseus-v347" not in sw
+    # tour-core.js landed alongside a bump to v348 (last was v347). Any later
+    # precached module must keep the cache version at or above that, or existing
+    # installs serve a stale shell. Guard the minimum rather than an exact pin so
+    # a legitimate future bump (e.g. adding multiModel/index.js) doesn't break it.
+    m = re.search(r"CACHE_NAME\s*=\s*'odysseus-v(\d+)'", sw)
+    assert m, "sw.js must define CACHE_NAME = 'odysseus-v<NNN>'"
+    assert int(m.group(1)) >= 348, (
+        f"cache version {m.group(1)} is below the tour-core bump (348); "
+        "adding a precached module requires bumping CACHE_NAME"
+    )
 
 
 def test_autoplay_map_covers_all_linear_tour_modals():
