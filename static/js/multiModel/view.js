@@ -1,0 +1,220 @@
+// multiModel/view.js — Multi-model thread view controller
+/**
+ * Main controller for multi-model thread view.
+ * Handles API calls, UI rendering, and scroll synchronization.
+ */
+
+import { createMultiModelThread, getMultiModelThread, listMultiModelThreads, deleteMultiModelThread } from './api.js';
+import { createScrollSyncManager } from './scrollSync.js';
+import { renderMultiModelContainer, updatePaneStatus, addMessageToPane, renderFailedModel, syncPanesToMessageIndex } from './renderer.js';
+
+/**
+ * Multi-model thread view controller.
+ */
+class MultiModelView {
+  constructor(apiBase) {
+    this.apiBase = apiBase;
+    this.activeThread = null;
+    this.scrollSyncManager = null;
+    this.modelIds = [];
+    this.messagesByModel = {};
+    this.isInitialized = false;
+  }
+
+  /**
+   * Load and render a multi-model thread.
+   * @param {string} threadId - The thread ID to load
+   * @returns {Promise<void>}
+   */
+  async loadThread(threadId) {
+    try {
+      this.activeThread = await getMultiModelThread(threadId);
+      this.modelIds = this.activeThread.model_ids;
+      this.messagesByModel = this.activeThread.messages_by_model;
+
+      // Render the thread UI
+      const container = renderMultiModelContainer(
+        threadId,
+        this.modelIds,
+        this.messagesByModel
+      );
+
+      // Insert into DOM
+      const mainContent = document.querySelector('.main-content');
+      if (mainContent) {
+        mainContent.innerHTML = '';
+        mainContent.appendChild(container);
+      }
+
+      // Initialize scroll sync
+      this.scrollSyncManager = createScrollSyncManager(container);
+      this.scrollSyncManager.panes.forEach(pane => {
+        pane.addEventListener('scroll', () => this.scrollSyncManager.syncScroll());
+      });
+
+      // Add tab switching functionality
+      this._setupTabSwitching(container);
+
+      // Add close button functionality
+      this._setupCloseButton(container, threadId);
+
+      this.isInitialized = true;
+    } catch (error) {
+      console.error('Failed to load multi-model thread:', error);
+      this._renderError(error.message);
+    }
+  }
+
+  /**
+   * Create a new multi-model thread.
+   * @param {string[]} modelIds - List of model IDs to execute
+   * @param {string} prompt - User prompt
+   * @returns {Promise<{threadId: string, status: string}>}
+   */
+  async createThread(modelIds, prompt) {
+    try {
+      const result = await createMultiModelThread({
+        modelIds,
+        prompt,
+      });
+      return result;
+    } catch (error) {
+      console.error('Failed to create multi-model thread:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * List all multi-model threads.
+   * @returns {Promise<Array>} - List of threads
+   */
+  async listThreads() {
+    try {
+      return await listMultiModelThreads();
+    } catch (error) {
+      console.error('Failed to list multi-model threads:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a multi-model thread.
+   * @param {string} threadId - The thread ID to delete
+   * @returns {Promise<void>}
+   */
+  async deleteThread(threadId) {
+    try {
+      await deleteMultiModelThread(threadId);
+      this.activeThread = null;
+      this.isInitialized = false;
+    } catch (error) {
+      console.error('Failed to delete multi-model thread:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Render error message.
+   * @param {string} message - Error message
+   */
+  _renderError(message) {
+    const mainContent = document.querySelector('.main-content');
+    if (mainContent) {
+      mainContent.innerHTML = `
+        <div class="error-message">
+          <h2>Error</h2>
+          <p>${escapeHtml(message)}</p>
+          <button onclick="window.location.reload()">Reload</button>
+        </div>
+      `;
+    }
+  }
+
+  /**
+   * Setup tab switching between models.
+   * @param {HTMLElement} container - Main container
+   */
+  _setupTabSwitching(container) {
+    const tabs = container.querySelectorAll('.multi-model-tab');
+    const panes = container.querySelectorAll('.multi-model-pane');
+
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        // Update active tab
+        tabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+
+        // Update active pane
+        const modelIndex = parseInt(tab.dataset.modelIndex, 10);
+        panes.forEach((pane, idx) => {
+          pane.classList.remove('active');
+          if (idx === modelIndex) {
+            pane.classList.add('active');
+          }
+        });
+
+        // Sync scroll to active pane
+        this.scrollSyncManager.syncScroll();
+      });
+    });
+  }
+
+  /**
+   * Setup close button functionality.
+   * @param {HTMLElement} container - Main container
+   * @param {string} threadId - Thread ID
+   */
+  _setupCloseButton(container, threadId) {
+    const closeBtn = container.querySelector('.multi-model-close-btn');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', async () => {
+        try {
+          await this.deleteThread(threadId);
+          // Navigate back to session list
+          window.location.href = '/sessions';
+        } catch (error) {
+          console.error('Failed to delete thread:', error);
+          alert('Failed to close thread: ' + error.message);
+        }
+      });
+    }
+  }
+
+  /**
+   * Update pane status.
+   * @param {number} modelIndex - Model index
+   * @param {'pending'|'streaming'|'completed'|'failed'} status - Status
+   * @param {string} message - Optional status message
+   */
+  updatePaneStatus(modelIndex, status, message = '') {
+    const panes = this.scrollSyncManager?.panes || [];
+    if (panes[modelIndex]) {
+      updatePaneStatus(panes[modelIndex], status, message);
+    }
+  }
+
+  /**
+   * Add a new message to a pane.
+   * @param {number} modelIndex - Model index
+   * @param {Object} message - Message object
+   */
+  addMessageToPane(modelIndex, message) {
+    const panes = this.scrollSyncManager?.panes || [];
+    if (panes[modelIndex]) {
+      addMessageToPane(panes[modelIndex], message);
+      this.scrollSyncManager.syncScroll();
+    }
+  }
+
+  /**
+   * Sync panes to show same message index.
+   * @param {number} messageIndex - Message index to sync to
+   */
+  syncToMessageIndex(messageIndex) {
+    const panes = this.scrollSyncManager?.panes || [];
+    syncPanesToMessageIndex(panes, messageIndex);
+  }
+}
+
+// Export singleton instance
+export const multiModelView = new MultiModelView();

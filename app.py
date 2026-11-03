@@ -900,6 +900,10 @@ from routes.session_share import public_router as share_public_router
 app.include_router(share_router)
 app.include_router(share_public_router)
 
+# Multi-model conversation threads
+from routes.multi_model_routes import setup_multi_model_routes
+app.include_router(setup_multi_model_routes(session_manager))
+
 # ========= ROUTES (kept in app.py) =========
 
 @app.get("/")
