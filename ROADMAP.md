@@ -151,6 +151,103 @@ still ride along; further slimming remains open.
   propose safer caching/prefetch/batching without breaking multi-account state.
 - Provider setup/probing audit for Anthropic, Gemini, Groq, xAI, OpenRouter, OpenAI, and DeepSeek.
 
+## Media Suite (Photoshop → Video) — subsections of Odysseus, not a standalone project
+
+> **"Write text. Receive a documentary."** — an image/video capability area
+> that lives *inside* Odysseus. Every piece below is a feature of the app and
+> is built by **reusing Odysseus's existing substrate** (agent tools +
+> `tool_index`, `PlanExecutor`, `bg_jobs`, Cookbook service discovery, hwfit,
+> `tts_routes`, the Gallery asset store). It is deliberately **not** a separate
+> CLI, repo, or `main.py`. Zero-cost local-first policy throughout: no paid
+> APIs, subscriptions, prepaid credits, or rented GPUs are valid production
+> dependencies. Cloud is off by default; if no practical zero-cost backend is
+> available the pipeline *waits* rather than calling a paid service.
+
+**Shared foundation to build on (all already in the app):**
+- **Orchestration** — `services/planning/executor.py` `PlanExecutor` (episode =
+  a plan, shot = a step; resumable, per-step status/error, live progress UI in
+  `plan-tracker.js` / `plans-panel.js`) + `src/bg_jobs.py` for multi-minute
+  render legs (`#!bg` auto-reinvoke, never blocks chat).
+- **Image backends** — Cookbook discovers/serves ComfyUI / A1111 / Forge
+  (`src/tools/cookbook.py`); `scripts/diffusion_server.py` serves SDXL / SD3.5
+  / Flux via an OpenAI-compatible `/v1/images/generations`; `services/hwfit`
+  picks the model that fits the box's VRAM/RAM.
+- **Voiceover** — `routes/tts_routes.py`. **Output/media** — the Gallery store.
+- **Entry surface** — a `/documentary <topic|outline>` slash command + agent
+  tools registered in `tool_index`/`tool_schemas`, so it composes with memory,
+  documents, and Deep Research and respects context-window tiering.
+- **Providers** stay thin adapters over the routing above (ImageProvider→
+  endpoint, TTSProvider→tts_routes, LLM→agent model routing) with `Mock*`
+  variants for a no-GPU dry run. No parallel provider stack.
+
+### 1. Photoshop (image editor) — mostly DONE
+The gallery editor (`static/js/editor/` + `static/js/galleryEditor.js`, backend
+`src/tools/image.py::do_edit_image`) is already a layered, Photoshop-class
+editor: layer + mask system, brush, clone, transform, crop, filters, curves,
+histogram, and AI inpaint / rembg / harmonize (`ai-inpaint.js`, `ai-rembg.js`,
+`harmonize-masks.js`).
+Remaining pro gap (polish, not a rebuild):
+- Fuller type/text tool (only a stub today — 1 reference), paragraph/leading
+  controls, and text-on-a-layer as editable vector.
+- Adjustment layers + non-destructive curves/levels/colour-balance (curve code
+  is minimal today), smart-object-style re-editable transforms.
+- Selection refine (feather/contract/select-inverse parity) and channel/mask
+  workflows surfaced in the UI.
+
+### 2. Documentary compiler (formerly "Understanding Studio") — NEW, not started
+Turns a high-level outline — or just a **topic**, which Odysseus can research
+into an outline via Deep Research/web/memory — into a narrated MP4 episode.
+As an episode `Plan` executed by `PlanExecutor`:
+
+- **Screenplay / shot expansion** — LLM expands the outline into an ordered
+  shot list (target ≈60 shots / ~8 min) validated by strict Pydantic schemas so
+  fields cannot hallucinate; exponential backoff on local-provider rate limits.
+- **Continuity (the hard part)** — a first-class per-episode **"bible"**
+  (characters, style tokens, palette, locked seeds) persisted in the doc store
+  and injected into every shot prompt; + IP-Adapter / reference-image when
+  ComfyUI is present. This is what makes dozens of sequential shots feel
+  authored rather than random.
+- **Stills** — generate per shot through the local image backend chosen by
+  hwfit (diffusion_server today; ComfyUI when a live graph is available).
+- **Motion + assembly** — deterministic camera moves (pan / zoom / dolly /
+  fade / Ken-Burns) applied to stills via **FFmpeg**, then auto-assemble
+  voiceover + motion clips into a timeline / concatenated MP4 landed in Gallery.
+
+**Rendering modes (both run inside Odysseus, no separate CLI):**
+- *Production*: local diffusion_server / ComfyUI → FFmpeg motion. Cloud off by
+  default; a HuggingFace free tier only behind an explicit
+  `UNDERSTANDING_ENABLE_FREE_CLOUD=1` after confirming no payment path. Paid
+  providers (Runway, Stability) are never selected.
+- *Dry run*: `MockImageProvider` + `MockTTSProvider` (placeholder frames +
+  silent audio) validate screenplay → shot-plan → FFmpeg assembly end-to-end
+  with **no GPU / no API calls** — the first milestone to build, since it
+  proves the pipeline shape against the existing executor.
+
+**Deferred / gated:**
+- **Real text-to-video** (LTX-Video / SVD / Wan) stays isolated from production.
+  The **OpenVINO LTX-Video gate** proves a single local, zero-cost clip on an
+  Intel GPU first (INT8; dims divisible by 32, frames divisible by 8 + 1; own
+  venv; emits `real_video.avi` + `report.json`; **passes only when a real clip
+  exists**, with perf + peak RSS captured for the continue/stop call). Whether
+  a box even attempts it is decided by **hwfit**, not a hand-run script.
+- **Audio polish** — background music with automatic ducking under narration,
+  plus generated SRT subtitle tracks.
+- **Screenplay enhancement** — tune prompts for more compelling, emotionally
+  resonant documentary pacing.
+
+### 3. Video editor / NLE ("Premiere-style") — NEW, not started
+An editor for manual assembly and polish on top of (or independent of) compiled
+episodes. **Better path than a browser GPU-compositor:** the compiler emits an
+**editable timeline as data (JSON / EDL)**; the NLE is a thin timeline UI that
+delegates all pixel/audio work back to server-side FFmpeg via `bg_jobs`, so it
+stays re-editable without shipping a rendering engine in JS.
+- Multi-track timeline (video + audio), clip trim / split / ripple, transitions.
+- Keyframeable transforms + the same camera-motion vocabulary the compiler uses
+  (pan/zoom/fade), so compiled episodes are re-editable, not final-only.
+- Audio tracks reusing the ducking/mixer from the compiler's audio-polish item.
+- Export presets (res / codec / container) run through `#!bg` background jobs so
+  long renders never block the chat.
+
 ## Refactor Targets
 - CSS cleanup. `static/style.css` basically Calypso's island atm.
 - Tour core helper. The onboarding tours have too much copy-pasted scaffolding; promote a shared `tour-core.js` helper before adding more tours.
