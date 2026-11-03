@@ -178,6 +178,10 @@ DEFAULT_SETTINGS = {
     # ntfy (JSON mode), or any service that accepts a POST with a JSON body.
     "reminder_webhook_integration_id": "",
     "reminder_webhook_payload_template": "",
+    # Morning Digest
+    "morning_digest_enabled": False,      # user must opt in
+    "morning_digest_time": "07:00",       # local HH:MM for the daily cron
+    "morning_digest_delivery": "session", # "session" | "notification" | "email" | "ntfy"
     # Email triage scanner rules. Running/paused state and schedule live in
     # Tasks via the built-in `check_email_urgency` task.
     "urgent_email_prompt": (

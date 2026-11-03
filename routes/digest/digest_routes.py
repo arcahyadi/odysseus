@@ -14,6 +14,8 @@ from pydantic import BaseModel
 
 from services.digest.digest_service import digest_service
 from src.auth_helpers import get_current_user
+from services.digest.digest_service import morning_digest_service
+from src.settings import get_setting, save_settings, load_settings
 from src.task_endpoint import resolve_task_endpoint
 
 logger = logging.getLogger(__name__)
@@ -27,7 +29,80 @@ class GenerateRequest(BaseModel):
     endpoint_url: Optional[str] = None
 
 
-# NOTE: /search must be registered BEFORE /{date} to avoid path ambiguity.
+# NOTE: static routes (/morning, /config, /search, /generate) must be
+# registered BEFORE /{date} to avoid path ambiguity.
+
+@router.get("/morning")
+async def get_morning_digest(request: Request):
+    """Return today's morning digest, generating it on-demand if not yet available.
+
+    - If a complete digest for today already exists: return it immediately.
+    - If no digest exists yet: generate one in the background and return
+      {"status": "generating"} so the frontend can poll.
+    """
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    existing = morning_digest_service.get_today(user)
+    if existing and existing.get("status") == "complete":
+        return existing
+
+    # Not yet generated — kick off generation and return pending status
+    asyncio.create_task(morning_digest_service.generate(user))
+    if existing:
+        return {**existing, "status": "generating"}
+    return {"status": "generating", "date": None, "content": None}
+
+
+@router.get("/config")
+def get_digest_config(request: Request):
+    """Return current morning digest configuration for this user."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    settings = load_settings()
+    return {
+        "enabled":  bool(settings.get("morning_digest_enabled", False)),
+        "time":     settings.get("morning_digest_time", "07:00"),
+        "delivery": settings.get("morning_digest_delivery", "session"),
+    }
+
+
+@router.put("/config")
+async def update_digest_config(request: Request):
+    """Update morning digest configuration."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid JSON body")
+
+    settings = load_settings()
+    if "enabled" in body:
+        settings["morning_digest_enabled"] = bool(body["enabled"])
+    if "time" in body:
+        t = str(body["time"]).strip()
+        # Validate HH:MM format
+        import re as _re
+        if not _re.match(r"^\d{1,2}:\d{2}$", t):
+            raise HTTPException(status_code=422, detail="time must be HH:MM format")
+        settings["morning_digest_time"] = t
+    if "delivery" in body:
+        allowed = {"session", "notification", "email", "ntfy"}
+        d = str(body["delivery"]).strip()
+        if d not in allowed:
+            raise HTTPException(status_code=422, detail=f"delivery must be one of {allowed}")
+        settings["morning_digest_delivery"] = d
+    save_settings(settings)
+    return {"ok": True, "config": {
+        "enabled":  settings.get("morning_digest_enabled"),
+        "time":     settings.get("morning_digest_time"),
+        "delivery": settings.get("morning_digest_delivery"),
+    }}
+
 
 @router.get("/search")
 def search_digests(request: Request, q: str = ""):
