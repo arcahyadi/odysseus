@@ -168,7 +168,10 @@ class PlanExecutor:
         """
         Execute a single PlanStep.
 
-        Stub implementation: output = "Completed: {step.description}".
+        If step.doc_action is set, executes document-aware operations
+        (create/update/edit/suggest/read) using the document tools.
+        Otherwise, defaults to text-based execution: output = "Completed: {step.description}".
+
         Sets step.status to 'running', then 'done' on success, 'failed' on
         exception. Persists started_at, ended_at, and output before marking done.
 
@@ -185,9 +188,21 @@ class PlanExecutor:
             db_step.started_at = utcnow_naive()
             db.commit()
 
-            # --- Stub execution ---
-            description = db_step.description or db_step.title
-            output = f"Completed: {description}"
+            # --- Document-aware execution ---
+            output = None
+            if db_step.doc_action and db_step.doc_id:
+                try:
+                    result = await self._execute_document_step(db_step, owner, model)
+                    output = result.get("output")
+                    if result.get("error"):
+                        raise RuntimeError(result["error"])
+                except Exception as doc_exc:
+                    logger.error(f"Document step failed: {doc_exc}")
+                    raise
+            else:
+                # Default text-based execution
+                description = db_step.description or db_step.title
+                output = f"Completed: {description}"
 
             # Persist output
             db_step.output = output
@@ -213,6 +228,95 @@ class PlanExecutor:
             raise
         finally:
             db.close()
+
+    async def _execute_document_step(
+        self,
+        step: PlanStep,
+        owner: str,
+        model: str,
+    ) -> dict:
+        """
+        Execute a document-aware step using the appropriate document tool.
+
+        Supports: create, update, edit, suggest, read
+        """
+        import asyncio
+        from src.agent_tools.document_tools import (
+            CreateDocumentTool, UpdateDocumentTool, EditDocumentTool,
+            SuggestDocumentTool, ManageDocumentTool
+        )
+
+        ctx = {"owner": owner, "session_id": step.session_id, "model": model}
+
+        if step.doc_action == "create":
+            # CreateDocumentTool expects content as the first arg
+            # Use step.description as the document content or title
+            content = step.description or step.title or "Untitled"
+            result = await CreateDocumentTool().execute(content, ctx)
+
+        elif step.doc_action == "update":
+            ctx["doc_id"] = step.doc_id
+            # UpdateDocumentTool expects full new content
+            content = step.description or ""
+            result = await UpdateDocumentTool().execute(content, ctx)
+
+        elif step.doc_action == "edit":
+            ctx["doc_id"] = step.doc_id
+            # EditDocumentTool expects FIND/REPLACE blocks in content
+            content = step.description or ""
+            result = await EditDocumentTool().execute(content, ctx)
+
+        elif step.doc_action == "suggest":
+            ctx["doc_id"] = step.doc_id
+            # SuggestDocumentTool expects content for suggestions
+            content = step.description or ""
+            result = await SuggestDocumentTool().execute(content, ctx)
+
+        elif step.doc_action == "read":
+            # ManageDocumentTool can read a document
+            ctx["doc_id"] = step.doc_id
+            result = await ManageDocumentTool().execute("", ctx)
+
+        else:
+            return {"error": f"Unknown doc_action: {step.doc_action}"}
+
+        # Convert result to output string
+        if result.get("error"):
+            return {"error": result["error"]}
+
+        if step.doc_action == "create":
+            return {
+                "output": f"Created document '{result.get('title', 'Untitled')}' with ID {result.get('doc_id', 'N/A')}",
+                "doc_id": result.get("doc_id"),
+            }
+        elif step.doc_action == "update":
+            return {
+                "output": f"Updated document '{result.get('title', 'Untitled')}' to version {result.get('version', 1)}",
+                "doc_id": result.get("doc_id"),
+            }
+        elif step.doc_action == "edit":
+            applied = result.get("applied", 0)
+            skipped = result.get("skipped", 0)
+            return {
+                "output": f"Applied {applied} edit(s) to document '{result.get('title', 'Untitled')}', skipped {skipped}",
+                "doc_id": result.get("doc_id"),
+            }
+        elif step.doc_action == "suggest":
+            return {
+                "output": f"Suggestions generated for document '{result.get('title', 'Untitled')}'",
+                "doc_id": result.get("doc_id"),
+            }
+        elif step.doc_action == "read":
+            docs = result.get("documents", [])
+            if docs:
+                doc = docs[0] if isinstance(docs, list) else docs
+                return {
+                    "output": f"Read document '{doc.get('title', 'Untitled')}' (version {doc.get('version', 1)})",
+                    "doc_id": doc.get("id"),
+                }
+            return {"output": "No documents found"}
+
+        return {"output": "Document operation completed"}
 
     # ------------------------------------------------------------------
     # DB helper methods

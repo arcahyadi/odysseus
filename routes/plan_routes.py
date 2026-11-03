@@ -58,6 +58,19 @@ class CreateStepRequest(BaseModel):
     title: str
     description: Optional[str] = None
     order_index: Optional[int] = None
+    # Document-aware execution context (optional)
+    doc_id: Optional[str] = None
+    doc_action: Optional[str] = None  # "create" | "update" | "edit" | "suggest" | "read"
+
+
+class CreateDocumentStepRequest(BaseModel):
+    """Create a document-aware step (alternative to CreateStepRequest)."""
+    title: str
+    description: Optional[str] = None
+    order_index: Optional[int] = None
+    doc_id: str
+    doc_action: str  # "create" | "update" | "edit" | "suggest" | "read"
+    session_id: Optional[str] = None
 
 
 class FromDocumentRequest(BaseModel):
@@ -118,6 +131,8 @@ def _step_dict(step: PlanStep) -> dict:
         "retry_count": step.retry_count,
         "started_at": step.started_at.isoformat() if step.started_at else None,
         "ended_at": step.ended_at.isoformat() if step.ended_at else None,
+        "doc_id": step.doc_id,
+        "doc_action": step.doc_action,
     }
 
 
@@ -576,6 +591,77 @@ def update_step(plan_id: str, step_id: str, body: UpdateStepRequest, request: Re
         db.rollback()
         logger.exception("Step update failed: %s", exc)
         raise HTTPException(status_code=500, detail="Step update failed")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/plans/{plan_id}/steps/document — create document-aware step
+# ---------------------------------------------------------------------------
+
+@router.post("/api/plans/{plan_id}/steps/document", status_code=201)
+def create_document_step(plan_id: str, body: CreateDocumentStepRequest, request: Request):
+    """
+    Create a document-aware step that will execute document operations
+    (create/update/edit/suggest/read) using existing document tools.
+
+    Requirements: Document-to-action pipeline support
+    """
+    from core.database import Document as _DocModel
+
+    user = get_current_user(request)
+    db = SessionLocal()
+    try:
+        plan = _get_plan_for_user(db, plan_id, user)
+
+        # Verify document ownership
+        doc = db.query(_DocModel).filter(_DocModel.id == body.doc_id).first()
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if user and doc.owner and doc.owner != user:
+            raise HTTPException(status_code=403, detail="Document access denied")
+
+        # Validate doc_action
+        valid_actions = ("create", "update", "edit", "suggest", "read")
+        if body.doc_action not in valid_actions:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid doc_action. Must be one of: {', '.join(valid_actions)}",
+            )
+
+        # Determine order_index
+        if body.order_index is not None:
+            order_index = body.order_index
+        else:
+            last = (
+                db.query(PlanStep)
+                .filter_by(plan_id=plan.id)
+                .order_by(PlanStep.order_index.desc())
+                .first()
+            )
+            order_index = (last.order_index + 1) if last else 0
+
+        step = PlanStep(
+            id=str(uuid.uuid4()),
+            plan_id=plan.id,
+            order_index=order_index,
+            title=body.title[:120],
+            description=body.description,
+            doc_id=body.doc_id,
+            doc_action=body.doc_action,
+            session_id=body.session_id,
+            status="pending",
+        )
+        db.add(step)
+        db.commit()
+        db.refresh(step)
+        return _step_dict(step)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Document step creation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Document step creation failed")
     finally:
         db.close()
 

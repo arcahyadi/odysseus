@@ -84,6 +84,46 @@ export class PlanTracker {
     statusBadge.textContent = plan.status || '';
     wrap.appendChild(statusBadge);
 
+    // Render document-aware steps
+    const docSteps = steps.filter(s => s.doc_id && s.doc_action);
+    if (docSteps.length > 0) {
+      const docSection = document.createElement('div');
+      docSection.className = 'plan-progress__doc-steps';
+      docSection.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--border);';
+      
+      const docTitle = document.createElement('span');
+      docTitle.className = 'plan-progress__doc-title';
+      docTitle.textContent = `${docSteps.length} document step(s):`;
+      docTitle.style.cssText = 'font-size:0.85em;font-weight:600;color:color-mix(in srgb, var(--fg) 70%, transparent);';
+      docSection.appendChild(docTitle);
+      
+      docSteps.forEach(s => {
+        const stepBadge = document.createElement('span');
+        stepBadge.className = 'plan-progress__doc-step';
+        stepBadge.style.cssText = 'display:inline-block;margin-right:8px;padding:2px 6px;background:color-mix(in srgb, var(--accent) 15%, transparent);border-radius:3px;font-size:0.8em;';
+        
+        const actionBadge = document.createElement('span');
+        actionBadge.style.cssText = 'margin-right:4px;font-weight:600;';
+        actionBadge.textContent = s.doc_action?.toUpperCase() || '';
+        
+        const actionLabel = document.createElement('span');
+        const actionLabels = {
+          'create': 'create',
+          'update': 'update',
+          'edit': 'edit',
+          'suggest': 'suggest',
+          'read': 'read',
+        };
+        actionLabel.textContent = actionLabels[s.doc_action] || s.doc_action || '';
+        
+        stepBadge.appendChild(actionBadge);
+        stepBadge.appendChild(actionLabel);
+        docSection.appendChild(stepBadge);
+      });
+      
+      wrap.appendChild(docSection);
+    }
+
     this.containerEl.appendChild(wrap);
   }
 }

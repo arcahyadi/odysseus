@@ -5,6 +5,7 @@
  */
 import uiModule from './ui.js';
 import { PlanTracker } from './plan-tracker.js';
+import { openDocStepBuilder } from './docStepBuilder.js';
 
 const PLANS_API = '/api/plans';
 const DOCS_API = '/api/documents/library';
@@ -150,6 +151,15 @@ export class PlansPanel {
             });
             top.appendChild(btn);
           });
+          // Add document step button
+          const addStepBtn = document.createElement('button');
+          addStepBtn.className = 'btn-secondary';
+          addStepBtn.textContent = 'Add step';
+          addStepBtn.style.cssText = 'padding:3px 10px;font-size:0.78em;';
+          addStepBtn.addEventListener('click', () => {
+            openDocStepBuilder(plan.id, plan.title || plan.goal || plan.id);
+          });
+          top.appendChild(addStepBtn);
           row.appendChild(top);
           // PlanTracker progress widget (phase 1) — polls while active.
           const progHost = document.createElement('div');
