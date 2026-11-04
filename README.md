@@ -31,12 +31,12 @@
 git clone https://github.com/odysseus-dev/odysseus.git
 cd odysseus
 cp .env.example .env
-docker compose up -d --build
+docker compose up -d
 ```
 
 Open `http://localhost:7011` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
 
-The compose files pull the official multi-arch image `ghcr.io/odysseus-dev/odysseus` (published by CI on every push to `main` and `dev`) and only build locally if the pull fails — so this also works on hosts without a build toolchain, e.g. as a [Portainer](https://www.portainer.io/) stack.
+The compose files pull the official multi-arch image `ghcr.io/odysseus-dev/odysseus` (published by CI on every push to `main` and `dev`) and build locally if the pull fails. Use `docker compose up -d --build` when you specifically want to build the image from this checkout.
 
 **Production deployments:** pin the immutable tag instead of `:latest`. `:latest` and bare `:X.Y.Z` tags move on every push to `main`, but `:X.Y.Z-<sha>` (e.g. `1.0.2-7c8070f`) always refers to one specific build:
 
@@ -57,6 +57,40 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 - **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
 - **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
 
+## Architecture
+
+- **Application:** [`app.py`](app.py) starts the FastAPI server. [`routes/`](routes/) contains HTTP endpoints, [`core/`](core/) holds persistence and session management, and [`src/`](src/) and [`services/`](services/) implement model, agent, and integration behavior.
+- **Browser UI:** [`static/`](static/) contains the served HTML, CSS, JavaScript modules, and service worker. Modules maintained in [`frontend/src/`](frontend/src/) are copied to declared `static/js/` paths using [`frontend/modules.json`](frontend/modules.json); source and deployment files are committed together.
+- **Compose services:** [`docker-compose.yml`](docker-compose.yml) starts Odysseus, ChromaDB for vector storage, SearXNG for search, and ntfy for notifications. The web UI binds to `127.0.0.1:7011` by default; change `APP_BIND` only when you intend to expose it through a trusted network or reverse proxy.
+- **Persistent data:** The default database is SQLite at `./data/app.db`. Compose mounts `./data` and `./logs` into the app, with named volumes for ChromaDB, SearXNG, and ntfy. Keep these volumes when replacing containers or updating the image.
+
+## Configuration and operations
+
+Copy [`.env.example`](.env.example) to `.env` for deployment overrides. Common settings are `APP_BIND` and `APP_PORT` for the web listener, `AUTH_ENABLED` for sign-in, `DATABASE_URL` for the app database, `APP_DATA_DIR` and `APP_LOGS_DIR` for bind mounts, and `ODYSSEUS_IMAGE` for an immutable container image pin. Model endpoints and user-facing integrations can be configured in Settings. The [setup guide](website/setup.md) covers native installs, GPUs, HTTPS, and provider setup.
+
+```bash
+docker compose ps
+docker compose logs --tail=120 odysseus
+curl -fsS http://127.0.0.1:7011/api/ready
+```
+
+`/api/health` is a liveness check; `/api/ready` reports whether critical startup dependencies are ready and returns HTTP 503 when they are not.
+
+## Development checks
+
+Python 3.11+ is required for a native development install. Run the full pytest suite on Linux; some tests use POSIX-only APIs. The repository's test and frontend checks can be run from the root:
+
+```bash
+python -m compileall -q app.py core routes src services
+python -m pytest -q
+npm ci
+node scripts/check_frontend.mjs
+python scripts/build_frontend.py --check
+docker compose config
+```
+
+The frontend publisher is a checked-in source-to-deployment copy step; run `python scripts/build_frontend.py` after changing a module owned by `frontend/src/`. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and focused checks.
+
 ## Demo
 
 A full hover-to-play tour lives on the [Odysseus landing page](https://odysseus-dev.github.io/odysseus/). Its source lives under [`website/`](website/).
@@ -73,34 +107,6 @@ Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled
 - Keep `LOCALHOST_BYPASS=false` outside local development.
 
 Deployment details are in the [setup guide](website/setup.md#security-notes).
-
-## Community & Growth
-
-<p align="center">
-  <a href="https://trendshift.io/repositories/43167">
-      <a href="https://trendshift.io/repositories/43167?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-43167" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/43167/monthly" alt="odysseus-dev%2Fodysseus | Trendshift" width="230"/></a>
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://star-history.dera.page/#odysseus-dev/odysseus&type=date&legend=top-left">
-    <picture>
-      <source
-        media="(prefers-color-scheme: dark)"
-        srcset="https://star-history.dera.page/svg?repos=odysseus-dev/odysseus&type=date&theme=dark&legend=top-left"
-      />
-      <source
-        media="(prefers-color-scheme: light)"
-        srcset="https://star-history.dera.page/svg?repos=odysseus-dev/odysseus&type=date&legend=top-left"
-      />
-      <img
-        src="https://star-history.dera.page/svg?repos=odysseus-dev/odysseus&type=date&legend=top-left"
-        alt="Odysseus GitHub star history"
-        width="100%"
-      />
-    </picture>
-  </a>
-</p>
 
 ## License
 
