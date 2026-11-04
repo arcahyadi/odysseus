@@ -4,6 +4,13 @@
  * ASCII Spinner Module for AI thinking/processing status
  */
 
+// How long a canvas spinner may keep animating before its element has ever
+// been inserted into the document. start() runs synchronously, before the
+// caller appends the element, so frame 1 is always disconnected. Callers do
+// append in the same task, so anything past this window means the element is
+// never coming and the frames are drawing for nobody.
+const UNATTACHED_GRACE_MS = 2000;
+
 class Spinner {
   constructor(message = "AI is processing", style = "right", animation = "spinner") {
     // Different animation frames
@@ -21,6 +28,9 @@ class Spinner {
     this.intervalId = null;
     this.rafId = null;
     this.element = null;
+    this._wpWasConnected = false;
+    this._wpUnattachedSince = null;
+    this._visHandler = null;
   }
 
   /**
@@ -74,6 +84,7 @@ class Spinner {
   }
 
   _drawSineWave() {
+    if (!this.isRunning) return;
     const ctx = this._ctx;
     const W = this._canvas.width;
     const H = this._canvas.height;
@@ -120,9 +131,7 @@ class Spinner {
     ctx.fillStyle = 'rgba(156, 222, 242, 0.9)';
     ctx.fill();
 
-    if (this.isRunning) {
-      this.rafId = requestAnimationFrame(() => this._drawSineWave());
-    }
+    if (this.isRunning) this._requestFrame();
   }
 
   _createWhirlpoolElement() {
@@ -152,24 +161,25 @@ class Spinner {
 
     this._wpCanvas = canvas;
     this._wpCtx = canvas.getContext('2d');
-    this._wpFrame = 60;
+    this._wpStartedAt = null;
     this.element = wrapper;
     return wrapper;
   }
 
   _drawWhirlpool() {
+    if (!this.isRunning) return;
     const ctx = this._wpCtx;
     const W = this._wpCanvas.width;
     const H = this._wpCanvas.height;
     const cx = W / 2, cy = H / 2;
     const maxR = Math.min(W, H) / 2 - 1;
     const lw = W > 30 ? 3 : W > 20 ? 2 : 1.5;
-    const TOTAL_TURNS = 4;
-    const TAIL_LEN = 0.45;
-    const SPIN_SPEED = 0.08;
-    const LAYERS = 12;
-    const STEPS = 50;
-    const t = this._wpFrame;
+    const TOTAL_TURNS = 2.7;
+    const STEPS = 84;
+    const LOOP_MS = 1100;
+    if (!this._wpStartedAt) this._wpStartedAt = performance.now();
+    const loop = ((performance.now() - this._wpStartedAt) % LOOP_MS) / LOOP_MS;
+    const rot = loop * Math.PI * 2;
 
     // Colors from CSS vars — read ONCE and cache. Calling getComputedStyle every
     // frame forces a full style recalc per frame, which janks/freezes the canvas
@@ -185,8 +195,9 @@ class Spinner {
     const fg = this._wpColors.fg;
     const track = this._wpColors.track;
 
-    function spiralPoint(frac, rot) {
-      const r = maxR * (1 - frac);
+    function spiralPoint(frac) {
+      const eased = Math.pow(frac, 0.82);
+      const r = maxR * eased;
       const angle = frac * TOTAL_TURNS * Math.PI * 2 + rot;
       return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r };
     }
@@ -202,61 +213,103 @@ class Spinner {
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    const headPos = (t * 0.008) % 1;
-
-    // overlapping sub-paths for smooth fade
+    // Rotating a single continuous spiral keeps the loop seamless: the start
+    // and end frames are the same shape, just one full turn apart.
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    for (let layer = LAYERS - 1; layer >= 0; layer--) {
-      const endFrac = (layer + 1) / LAYERS;
-      const stepsForLayer = Math.ceil(STEPS * endFrac);
-      const alpha = Math.pow(1 - endFrac, 2) * 0.7;
-
+    for (let i = 1; i <= STEPS; i++) {
+      const a = (i - 1) / STEPS;
+      const b = i / STEPS;
+      const p0 = spiralPoint(a);
+      const p1 = spiralPoint(b);
       ctx.beginPath();
-      let started = false;
-      let prevPos = -1;
-      for (let i = 0; i <= stepsForLayer; i++) {
-        const frac = i / STEPS;
-        let pos = headPos - frac * TAIL_LEN;
-        if (pos < 0) pos += 1;
-        if (started && prevPos < 0.3 && pos > 0.7) {
-          ctx.stroke();
-          ctx.beginPath();
-          started = false;
-        }
-        const pt = spiralPoint(pos, t * SPIN_SPEED);
-        if (!started) { ctx.moveTo(pt.x, pt.y); started = true; }
-        else ctx.lineTo(pt.x, pt.y);
-        prevPos = pos;
-      }
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
       ctx.strokeStyle = fg;
-      ctx.lineWidth = lw * 0.8;
-      ctx.globalAlpha = alpha;
+      ctx.lineWidth = lw * (0.52 + b * 0.32);
+      ctx.globalAlpha = 0.12 + Math.pow(b, 1.8) * 0.72;
       ctx.stroke();
     }
 
-    // bright dot at head
-    const head = spiralPoint(headPos, t * SPIN_SPEED);
+    const head = spiralPoint(1);
     ctx.beginPath();
-    ctx.arc(head.x, head.y, Math.max(1, lw * 0.45), 0, Math.PI * 2);
+    ctx.arc(head.x, head.y, Math.max(1.05, lw * 0.48), 0, Math.PI * 2);
     ctx.fillStyle = fg;
     ctx.globalAlpha = 0.9;
     ctx.fill();
     ctx.globalAlpha = 1;
 
-    this._wpFrame++;
-    if (!this.isRunning) return;
-    // Leak-safe self-terminate: stop once our element WAS in the DOM and then
-    // got removed (e.g. a loading row replaced by results). But keep spinning
-    // before it's first appended — start() runs synchronously, before the
-    // caller inserts the element, so it isn't connected on frame 1.
+    // Leak-safe self-terminate. "Nobody can see this spinner" has two shapes
+    // and we have to catch both:
+    //   1. the element WAS in the DOM and then got removed (a loading row
+    //      replaced by results);
+    //   2. the element was NEVER inserted, and the grace window for inserting
+    //      it has expired. The caller started a spinner and then took an early
+    //      return (aborted request, panel that resolved from cache), so no
+    //      frame we draw will ever be observed.
+    // Case 2 is why this needs a deadline at all: while the element has never
+    // been connected, `!this._wpWasConnected` stays true forever, so without
+    // the grace check the loop re-arms until the tab closes.
     const connected = !!(this.element && this.element.isConnected);
-    if (connected) this._wpWasConnected = true;
-    if (connected || !this._wpWasConnected) {
-      this.rafId = requestAnimationFrame(() => this._drawWhirlpool());
-    } else {
-      this.isRunning = false;
+    if (connected) {
+      this._wpWasConnected = true;
+      this._wpUnattachedSince = null;
+    } else if (!this._wpWasConnected) {
+      if (this._wpUnattachedSince === null) this._wpUnattachedSince = performance.now();
+      if (performance.now() - this._wpUnattachedSince > UNATTACHED_GRACE_MS) {
+        this.stop();
+        return;
+      }
     }
+
+    if (connected || !this._wpWasConnected) {
+      this._requestFrame();
+    } else {
+      this.stop();
+    }
+  }
+
+  /**
+   * Arm the next animation frame. Clearing rafId as the callback enters keeps
+   * it a truthful "a frame is pending" flag, which is what stop() and the
+   * visibility handler cancel against.
+   */
+  _requestFrame() {
+    this.rafId = requestAnimationFrame(() => {
+      this.rafId = null;
+      if (this.animation === 'sinewave') this._drawSineWave();
+      else this._drawWhirlpool();
+    });
+  }
+
+  /**
+   * Stop drawing while the tab is hidden. Browsers throttle background rAF but
+   * do not reliably stop the canvas work, and a spinner nobody is looking at
+   * should cost nothing. The listener is owned by start()/stop() so it is never
+   * left behind on a dead spinner.
+   */
+  _armVisibilityPause() {
+    if (this._visHandler) return;
+    this._visHandler = () => {
+      if (document.hidden) {
+        if (this.rafId) {
+          cancelAnimationFrame(this.rafId);
+          this.rafId = null;
+        }
+      } else if (this.isRunning && !this.rafId) {
+        // Reset the wave clock so the hidden interval doesn't arrive as one
+        // huge dt and skip the animation forward.
+        this._wavePrev = performance.now();
+        this._requestFrame();
+      }
+    };
+    document.addEventListener('visibilitychange', this._visHandler);
+  }
+
+  _disarmVisibilityPause() {
+    if (!this._visHandler) return;
+    document.removeEventListener('visibilitychange', this._visHandler);
+    this._visHandler = null;
   }
 
   /**
@@ -288,12 +341,15 @@ class Spinner {
 
     if (this.animation === 'sinewave') {
       this._wavePrev = performance.now();
+      this._armVisibilityPause();
       this._drawSineWave();
       return;
     }
 
     if (this.animation === 'whirlpool') {
-      this._wpFrame = 60;
+      this._wpStartedAt = performance.now();
+      this._wpUnattachedSince = null;
+      this._armVisibilityPause();
       this._drawWhirlpool();
       return;
     }
@@ -318,6 +374,7 @@ class Spinner {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    this._disarmVisibilityPause();
   }
 
   /**

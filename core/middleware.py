@@ -4,10 +4,14 @@
 import logging
 import os
 import secrets
+from collections.abc import Mapping
 
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+from starlette.routing import get_route_path
+
+from src.owner_identity import INTERNAL_TOOL_USER, auth_disabled
 
 
 logger = logging.getLogger(__name__)
@@ -83,6 +87,39 @@ def is_cors_preflight(method: str, headers) -> bool:
     return method == "OPTIONS" and "access-control-request-method" in headers
 
 
+def get_application_route_path(scope: Mapping[str, object]) -> str:
+    """Return the application-relative path used by Starlette routing.
+
+    Uvicorn prefixes ``scope["path"]`` with a configured ASGI ``root_path``;
+    Starlette removes that prefix before matching routes. Middleware policy
+    must use the same path form or a deployment prefix can change which policy
+    applies to an otherwise unchanged application route.
+    """
+    return get_route_path(scope)
+
+
+def with_asgi_root_path(scope: Mapping[str, object], path: str) -> str:
+    """Prefix an application path for a client-facing redirect target."""
+    root_path = scope.get("root_path", "")
+    if not isinstance(root_path, str) or not root_path:
+        return path
+    return f"{root_path.rstrip('/')}{path}"
+
+
+def path_is_route_or_child(path: str, prefix: str) -> bool:
+    """Return whether ``path`` is exactly ``prefix`` or below that route."""
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def is_cors_preflight(method: str, headers) -> bool:
+    """True for a genuine CORS preflight: an OPTIONS request carrying the
+    Access-Control-Request-Method header. Such requests are credential-less by
+    design and must reach CORSMiddleware to be answered -- gating them on auth
+    401s the preflight and breaks every cross-origin browser/WebView client.
+    Pure so it can be unit-tested without standing up the app."""
+    return method == "OPTIONS" and "access-control-request-method" in headers
+
+
 def require_admin(request: Request):
     """Raise 403 if the current user isn't an admin.
     Allows access when auth is explicitly disabled, or when the request carries
@@ -102,7 +139,7 @@ def require_admin(request: Request):
         pass
 
     auth_mgr = getattr(request.app.state, "auth_manager", None)
-    if os.getenv("AUTH_ENABLED", "true").lower() == "false":
+    if auth_disabled():
         return
     if not auth_mgr or not auth_mgr.is_configured:
         raise HTTPException(403, "Admin only")
@@ -174,8 +211,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 # vendored). KaTeX + Mermaid are local since 2026-10-03, so
                 # style-src and font-src no longer need the CDN.
                 f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; "
-                "style-src 'self' 'unsafe-inline'; "
-                "font-src 'self'; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "font-src 'self' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
                 "connect-src 'self'; "

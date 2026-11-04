@@ -24,7 +24,7 @@ import inspect
 
 import src.tool_implementations as ti
 
-# 33 do_* tool functions
+# Historical do_* tool functions.
 _EXPECTED = [
     "do_adopt_served_model", "do_api_call", "do_app_api", "do_cancel_download",
     "do_download_model", "do_edit_image", "do_list_cached_models",

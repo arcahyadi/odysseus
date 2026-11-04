@@ -69,7 +69,7 @@ def _build_context_harness(monkeypatch, chat_helpers, history):
             temperature=0.7, max_tokens=1024, system_prompt="You are Odysseus.", character_name=None,
         )
 
-    def fake_add_user_message(sess, chat_handler, preprocessed, incognito=False):
+    def fake_add_user_message(sess, chat_handler, preprocessed, incognito=False, **kwargs):
         sess.messages.append({"role": "user", "content": preprocessed.user_content})
 
     async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None):
@@ -302,29 +302,11 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
     task_endpoint_mod.resolve_task_endpoint = lambda url, model, headers, owner=None: (url, model, headers)
     monkeypatch.setitem(sys.modules, "src.task_endpoint", task_endpoint_mod)
 
-    # Stub the knowledge-graph store too — this test is about the sequential
-    # dispatch gate, not graph semantics; without a stub it would try to reach
-    # the real services.memory.graph module.
-    graph_mod = types.ModuleType("services.memory.graph")
-    graph_store_mod = types.ModuleType("services.memory.graph.graph_store")
-    calls["graph"] = 0
-
-    async def fake_graph_extract(*a, **k):
-        calls["graph"] += 1
-
-    graph_store_mod.extract_and_store = fake_graph_extract
-    graph_mod.graph_store = graph_store_mod
-    monkeypatch.setitem(sys.modules, "services.memory.graph", graph_mod)
-    monkeypatch.setitem(sys.modules, "services.memory.graph.graph_store", graph_store_mod)
-
-    captured_jobs = {"names": []}
+    captured_jobs = {}
 
     async def fake_sequential_runner(session_id, jobs, max_wait_s=120.0):
         captured_jobs["session_id"] = session_id
-        # The memory+skill batch and the graph batch are dispatched as separate
-        # sequential-runner invocations; aggregate across all of them so no
-        # single call can overwrite the others' evidence.
-        captured_jobs["names"].extend(name for name, _ in jobs)
+        captured_jobs["names"] = [name for name, _ in jobs]
         for _, job in jobs:
             await job
 
@@ -344,18 +326,18 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
         sess, session_manager, "sess-Y", "hello", "hi there", None,
         {"auto_memory": True, "auto_skills": True}, memory_manager=MagicMock(), memory_vector=MagicMock(),
         webhook_manager=None,
-        agent_rounds=3, agent_tool_calls=3, skills_manager=MagicMock(), owner="tester",
+        agent_rounds=3, agent_tool_calls=4, skills_manager=MagicMock(), owner="tester",
         extract_skills=True,
     )
 
     # Let the scheduled background task run.
     await asyncio.sleep(0.05)
 
-    # Every extractor was queued through the sequential gate — not fired
-    # directly via asyncio.create_task — and each ultimately ran exactly once.
+    # Both extractors were queued through the sequential gate — not fired
+    # directly via asyncio.create_task — and both ultimately ran exactly once.
     assert captured_jobs.get("session_id") == "sess-Y"
-    assert captured_jobs.get("names") == ["memory", "skill", "graph"]
-    assert calls == {"memory": 1, "skill": 1, "graph": 1}
+    assert captured_jobs.get("names") == ["memory", "skill"]
+    assert calls == {"memory": 1, "skill": 1}
 
 
 # --------------------------------------------------------------------------- #

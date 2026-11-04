@@ -14,12 +14,15 @@ const API_BASE = window.location.origin;
  * @param {string} [sessionId] - Optional parent session ID for UI linking
  * @returns {Promise<{threadId: string, status: string, modelsExecuted: number}>}
  */
-export async function createMultiModelThread({ modelIds, prompt, endpointUrls, sessionId }) {
+export async function createMultiModelThread({ modelIds, prompt, endpointUrls, endpointIds, sessionId }) {
   const formData = new FormData();
   formData.append('prompt', prompt);
   formData.append('model_ids', JSON.stringify(modelIds));
   if (endpointUrls) {
     formData.append('endpoint_urls', JSON.stringify(endpointUrls));
+  }
+  if (endpointIds) {
+    formData.append('endpoint_ids', JSON.stringify(endpointIds));
   }
   if (sessionId) {
     formData.append('session_id', sessionId);

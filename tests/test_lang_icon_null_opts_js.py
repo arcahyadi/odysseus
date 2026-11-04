@@ -15,7 +15,7 @@ _HAS_NODE = shutil.which("node") is not None
 
 def _icon(lang, size, opts):
     js = f"""
-    import {{ langIcon }} from '{_HELPER.as_uri()}';
+    import {{ langIcon }} from '{_HELPER.as_posix()}';
     console.log(langIcon({json.dumps(lang)}, {json.dumps(size)}, {json.dumps(opts)}));
     """
     proc = subprocess.run(

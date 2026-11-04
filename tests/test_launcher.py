@@ -1,10 +1,20 @@
 # tests/test_launcher.py
 import sys
 import os
+from pathlib import Path
 from unittest import mock
 import pytest
 
 from launcher import NullWriter, create_tray_image, on_open_browser, on_exit, open_browser
+
+
+def test_frozen_multiprocessing_bootstrap_precedes_gui_and_app_imports():
+    source = Path("launcher.py").read_text(encoding="utf-8")
+
+    freeze = source.index("multiprocessing.freeze_support()")
+    splash = source.index("if getattr(sys, 'frozen', False):")
+    app_import = source.index("from app import app")
+    assert freeze < splash < app_import
 
 
 def test_null_writer():
@@ -20,12 +30,7 @@ def test_create_tray_image():
         from PIL import Image
         img = create_tray_image()
         assert isinstance(img, Image.Image)
-        # The function either returns a generated 64x64 fallback or the brand
-        # icon resized via Image.thumbnail((64, 64)) — thumbnail preserves
-        # aspect, so the returned image's longest side is 64 while the other
-        # can be smaller on non-square brand icons.
-        assert max(img.size) == 64
-        assert min(img.size) > 0
+        assert img.size == (64, 64)
     except ImportError:
         pytest.skip("Pillow/PIL not installed in test environment")
 

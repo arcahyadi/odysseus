@@ -20,7 +20,7 @@ def _client_with_admin_gate(monkeypatch, gate, tmp_path=None):
 
     app = FastAPI()
     app.include_router(diag.setup_diagnostics_routes(
-        rag_manager=None, rag_available=False,
+        rag_manager=None, rag_available=False, research_handler=None,
         memory_vector=None))
     return TestClient(app, raise_server_exceptions=False)
 

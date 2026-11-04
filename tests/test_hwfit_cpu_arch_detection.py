@@ -11,10 +11,6 @@ def _clear_hwfit_cache(monkeypatch):
     monkeypatch.setattr(hardware, "_remote_host", None)
     monkeypatch.setattr(hardware, "_remote_platform", None)
     monkeypatch.setattr(hardware, "_is_containerized", lambda: False)
-    # On native Windows detect_system takes the _detect_windows() branch and
-    # bypasses every probe below. Return None so it falls through to the
-    # generic path this test file is designed to exercise.
-    monkeypatch.setattr(hardware, "_detect_windows", lambda *a, **k: None)
     yield
     hardware._cache_by_host.clear()
 

@@ -17,9 +17,13 @@ through the standard agent_tools.py pipeline.
 import asyncio
 import json
 import logging
+import re
 import uuid
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+
+from src.constants import GENERATED_IMAGES_DIR
+from src.memory import MemoryStoreUnreadable
 
 from src.constants import GENERATED_IMAGES_DIR
 
@@ -71,9 +75,10 @@ def set_rag_manager(rag_mgr, personal_docs_mgr=None):
 # ---------------------------------------------------------------------------
 
 from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime
+from src.image_model_ids import looks_like_image_generation_model, model_id_leaf
 
 
-def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Dict]:
+def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[str] = None) -> Tuple[str, str, Dict]:
     """Resolve a model specifier to (endpoint_url, model_id, headers).
 
     Accepts:
@@ -97,9 +102,29 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
     else:
         model_name = spec
 
+    def _json_list(value) -> list[str]:
+        try:
+            data = json.loads(value or "[]")
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [str(x) for x in data if isinstance(x, (str, int, float)) and str(x)]
+
+    def _image_like(name: str) -> bool:
+        n = (name or "").lower()
+        if looks_like_image_generation_model(n):
+            return True
+        return any(k in n for k in (
+            "qwen-image", "qwen/image", "z-image", "flux", "stable-diffusion",
+            "sdxl", "hidream", "boogu", "krea-2", "image-edit",
+        ))
+
     db = SessionLocal()
     try:
         query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if model_type:
+            query = query.filter(ModelEndpoint.model_type == model_type)
         if target_endpoint_name:
             query = query.filter(ModelEndpoint.name.ilike(f"%{target_endpoint_name}%"))
         if owner:
@@ -129,11 +154,13 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                     return build_chat_url(base), matched, headers
             else:
                 # OpenAI-compatible and native Ollama: probe the provider's model list.
+                endpoint_reachable = False
                 try:
                     models_url = build_models_url(base)
                     if models_url:
                         r = httpx.get(models_url, headers=headers, timeout=5)
                         r.raise_for_status()
+                        endpoint_reachable = True
                         data = r.json()
                         items = data if isinstance(data, list) else (data.get("data") or [])
                         model_ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
@@ -144,9 +171,25 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                                 if m.get("name") or m.get("model")
                             ]
                     else:
+                        endpoint_reachable = True
                         model_ids = json.loads(ep.cached_models or "[]")
                 except Exception:
                     model_ids = []
+
+                # Manual/local image endpoints are often registered with pinned
+                # model ids, while /models may return a runtime alias or only the
+                # served internal id. Include pinned/cached ids in the match set
+                # so chat sessions using the HF repo id still resolve. Do not use
+                # stale cached aliases when the endpoint itself is unreachable.
+                if endpoint_reachable:
+                    # Gateway image models may live in a dedicated catalogue,
+                    # so explicitly pinned IDs are valid on mixed endpoints too.
+                    extras = _json_list(getattr(ep, "pinned_models", None))
+                    if model_type == "image":
+                        extras += _json_list(getattr(ep, "cached_models", None))
+                    for extra in extras:
+                        if extra not in model_ids:
+                            model_ids.append(extra)
 
                 # Exact match first
                 for mid in model_ids:
@@ -157,6 +200,13 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                 for mid in model_ids:
                     if model_name.lower() in mid.lower() or mid.lower() in model_name.lower():
                         return build_chat_url(base), mid, headers
+
+                # Last resort for local image endpoints: if the requested model
+                # name is clearly an image model, use the endpoint's first known
+                # image model id. This prevents a harmless alias mismatch from
+                # blocking image generation.
+                if model_type == "image" and _image_like(model_name) and model_ids:
+                    return build_chat_url(base), model_ids[0], headers
 
         raise ValueError(f"Model '{spec}' not found on any configured endpoint")
     finally:
@@ -282,7 +332,10 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
         }
     except Exception as e:
         logger.error(f"pipeline failed at step {len(step_outputs) + 1}: {e}")
-        return {"error": f"Pipeline failed at step {len(step_outputs) + 1}: {e}"}
+        return {
+            "error": f"Pipeline failed at step {len(step_outputs) + 1}: {e}",
+            "untrusted_content": True,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +345,44 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
 # ---------------------------------------------------------------------------
 # Memory management tool
 # ---------------------------------------------------------------------------
+
+def _manage_memory_lines(content: str) -> list[str]:
+    """Normalize the public JSON contract to the legacy line protocol."""
+    raw_content = content.strip()
+    if not raw_content.startswith("{"):
+        return raw_content.split("\n")
+    try:
+        payload = json.loads(raw_content)
+    except (TypeError, json.JSONDecodeError):
+        return raw_content.split("\n")
+    if not isinstance(payload, dict):
+        return raw_content.split("\n")
+    action = str(payload.get("action") or "").strip().lower()
+    command = payload.get("command")
+    if not action and isinstance(command, str) and command.strip():
+        return command.strip().split("\n")
+    command_lines: list[str] = []
+    if isinstance(command, str) and command.strip():
+        command_lines = command.strip().split("\n")
+        if command_lines and command_lines[0].strip().lower() == action:
+            command_lines = command_lines[1:]
+    if action == "list":
+        return [action, str(payload.get("category") or "")]
+    if action == "add":
+        text = payload.get("text") or (command_lines[0] if command_lines else "")
+        category = payload.get("category") or (command_lines[1] if len(command_lines) > 1 else "fact")
+        return [action, str(text), str(category)]
+    if action == "edit":
+        memory_id = payload.get("memory_id") or payload.get("id") or (command_lines[0] if command_lines else "")
+        text = payload.get("text") or ("\n".join(command_lines[1:]) if len(command_lines) > 1 else "")
+        return [action, str(memory_id), str(text)]
+    if action == "delete":
+        memory_id = payload.get("memory_id") or payload.get("id") or (command_lines[0] if command_lines else "")
+        return [action, str(memory_id)]
+    if action == "search":
+        query = payload.get("text") or payload.get("query") or "\n".join(command_lines)
+        return [action, str(query)]
+    return [action] if action else raw_content.split("\n")
 
 async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage memories: list, add, edit, delete, search.
@@ -310,7 +401,12 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
     if not _memory_manager:
         return {"error": "Memory manager not available"}
 
-    lines = content.strip().split("\n")
+    from src.agent_runtime.owned_resources import active_owned_operation
+    bound = active_owned_operation()
+    if bound is not None:
+        bound.validate()
+
+    lines = _manage_memory_lines(content)
     if not lines:
         return {"error": "Need at least 1 line: action"}
 
@@ -343,7 +439,15 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             return {"error": "Memory text cannot be empty"}
 
         entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
-        memories = _memory_manager.load_all()
+        # Strict load: this is a read-modify-write, and it is the path an
+        # ordinary "remember that I prefer X" takes. Degrading to [] here would
+        # save just this one entry over a store we only failed to read,
+        # atomically destroying every memory in it (issue #5673).
+        try:
+            memories = _memory_manager.load_all_for_update()
+        except MemoryStoreUnreadable as e:
+            logger.error("Refusing to add memory, store unreadable: %s", e)
+            return {"error": "Memory store is temporarily unreadable — nothing was saved."}
         memories.append(entry)
         _memory_manager.save(memories)
 
@@ -367,13 +471,15 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             return {"error": "Edit needs line 2: memory_id, line 3: new text"}
         memory_id = lines[1].strip()
         new_text = lines[2].strip()
+        if not memory_id:
+            return {"error": "Edit needs line 2: memory_id"}
         if not new_text:
             return {"error": "New text cannot be empty"}
 
         memories = _memory_manager.load_all()
         found = False
         for m in memories:
-            if m.get("id", "").startswith(memory_id):
+            if (m.get("id", "") == memory_id if bound is not None else m.get("id", "").startswith(memory_id)):
                 # Verify ownership
                 if owner and m.get("owner") != owner:
                     return {"error": f"Memory '{memory_id}' not found"}
@@ -400,13 +506,15 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         if len(lines) < 2:
             return {"error": "Delete needs line 2: memory_id"}
         memory_id = lines[1].strip()
+        if not memory_id:
+            return {"error": "Delete needs line 2: memory_id"}
 
         memories = _memory_manager.load_all()
         original_len = len(memories)
         full_id = None
         delete_id = None
         for m in memories:
-            if m.get("id", "").startswith(memory_id):
+            if (m.get("id", "") == memory_id if bound is not None else m.get("id", "").startswith(memory_id)):
                 # Verify ownership
                 if owner and m.get("owner") != owner:
                     return {"error": f"Memory '{memory_id}' not found"}
@@ -436,7 +544,16 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         query_lower = query.lower()
         exact_results = [m for m in memories if query_lower in (m.get("text", "").lower())]
 
-        if hasattr(_memory_manager, 'get_relevant_memories'):
+        # An exact marker is commonly used to identify one record for an
+        # edit/delete workflow.  Do not mix fuzzy neighbors into that result:
+        # a semantically related record must never be mistaken for the exact
+        # target of a destructive operation.
+        exact_marker_query = bool(
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{12,}", query)
+        )
+        if exact_results or exact_marker_query:
+            vector_results = []
+        elif hasattr(_memory_manager, 'get_relevant_memories'):
             vector_results = _memory_manager.get_relevant_memories(query, memories, threshold=0.05, max_items=20)
         else:
             vector_results = []
@@ -450,6 +567,29 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             results.append(m)
             if len(results) >= 20:
                 break
+
+        # Keep a lexical safety net for short preference/identity queries. A
+        # vector-only top-k result can bury an exact fact such as "Maya uses
+        # Pacific time" beneath several related Maya fixture facts.
+        if not exact_results and not exact_marker_query and len(results) < 20:
+            query_terms = {
+                token for token in re.findall(r"[a-z0-9]+", query_lower)
+                if len(token) >= 4 and token not in {"what", "does", "with", "saved", "memory", "search", "look"}
+            }
+            lexical = []
+            for memory in memories:
+                text_lower = str(memory.get("text") or "").lower()
+                overlap = sum(1 for token in query_terms if token in text_lower)
+                if overlap:
+                    lexical.append((overlap, memory))
+            for _, memory in sorted(lexical, key=lambda item: (-item[0], str(item[1].get("id", "")))):
+                mid = memory.get("id")
+                if mid in seen:
+                    continue
+                seen.add(mid)
+                results.append(memory)
+                if len(results) >= 20:
+                    break
 
         if not results:
             return {"results": f"No memories found matching '{query}'."}
@@ -571,9 +711,10 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
       toggle <name> <on|off>  — Toggle a setting (web, bash, rag, research, incognito, document_editor)
       set_mode <agent|chat>   — Switch between agent and chat mode
       switch_model <model>    — Change the model for the current session
-      set_theme <preset>      — Apply a built-in theme preset (dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
+      set_theme <preset>      — Apply a built-in theme preset (dark, light, midnight, cyberpunk, retrowave, forest, ocean, ume, terminal, organs, gpt, claude, cute, eclipse, porcelain, arcade, blueprint, monolith, yoyo)
       create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
-      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook)
+      get_theme               — Return the last server-synchronized theme for this user
+      open_panel <name> [view] — Open a panel; Cookbook views are download/models, launch/serve, active/running, dependencies, settings
       open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text] — Open a reply draft document for an email; does not send. ALWAYS append the body text when the user told you what to say (one-shot draft); only omit body when the user just asked to "open a reply" without content.
       get_toggles             — Return current toggle states (server-side knowledge)
     """
@@ -581,6 +722,16 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
     if not lines:
         return {"error": "No action specified"}
 
+    theme_args = None
+    if content.lstrip().startswith('{'):
+        import json
+        try:
+            theme_args = json.loads(content)
+        except ValueError:
+            return {"error": "Invalid UI action JSON."}
+        if not isinstance(theme_args, dict) or theme_args.get('action') != 'create_theme':
+            return {"error": "Structured UI action must be create_theme."}
+        lines = ['create_theme']
     parts = lines[0].strip().split(None, 2)
     action = parts[0].lower()
 
@@ -667,26 +818,41 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         }
 
     elif action == "set_theme":
-        theme_name = parts[1].lower() if len(parts) > 1 else ""
+        theme_name = content.strip().partition(' ')[2].strip().lower().replace(' ', '-')
         # Theme colors are defined in static/js/theme.js on the frontend.
         # We pass the name; the frontend looks it up from presets + custom themes.
         # Also check user's custom themes stored in prefs.
         # Must match the THEMES keys in static/js/theme.js.
-        known_presets = [
-            "dark", "light", "midnight", "paper", "cyberpunk", "retrowave",
-            "forest", "ocean", "ume", "copper", "terminal", "organs",
-            "lavender", "gpt", "claude", "cute",
-        ]
+        from src.theme_palette import THEME_PRESETS
+        known_presets = THEME_PRESETS
         custom_themes = {}
         try:
-            from routes.prefs_routes import _load as _load_prefs
-            custom_themes = _load_prefs().get("custom-themes", {}) or {}
+            from routes.prefs_routes import _load_for_user
+            custom_themes = _load_for_user(owner).get("custom-themes", {}) or {}
         except Exception:
             pass
         all_known = set(known_presets) | set(custom_themes.keys())
         if theme_name not in all_known:
             custom_label = f" | Custom: {', '.join(sorted(custom_themes.keys()))}" if custom_themes else ""
             return {"error": f"Unknown theme '{theme_name}'. Available: {', '.join(sorted(known_presets))}{custom_label}"}
+        try:
+            from routes.prefs_routes import _load_for_user, _save_for_user
+            prefs = _load_for_user(owner)
+            previous = prefs.get("theme") if isinstance(prefs.get("theme"), dict) else {}
+            stored = {"name": theme_name}
+            if previous.get("name") == theme_name and isinstance(previous.get("colors"), dict):
+                stored["colors"] = previous["colors"]
+            elif isinstance(custom_themes.get(theme_name), dict):
+                stored["colors"] = custom_themes[theme_name]
+            theme_source = custom_themes.get(theme_name)
+            if not theme_source and previous.get('name') == theme_name:
+                theme_source = previous
+            if isinstance(theme_source, dict):
+                stored.update({k: v for k, v in theme_source.items() if k.startswith('bgEffect') or k in ('bgPattern', 'frosted')})
+            prefs["theme"] = stored
+            _save_for_user(owner, prefs)
+        except Exception:
+            pass
         return {
             "ui_event": "set_theme",
             "theme_name": theme_name,
@@ -694,8 +860,24 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         }
 
     elif action == "create_theme":
-        # Re-split without limit to get all parts
-        parts = lines[0].strip().split()
+        import shlex
+        try:
+            if theme_args is not None:
+                from src.theme_palette import normalize_theme_colors
+                palette = normalize_theme_colors(theme_args.get('colors'))
+                theme_name = theme_args.get('name')
+                if not isinstance(theme_name, str) or not theme_name.strip():
+                    return {"error": "name must be a nonempty theme name."}
+                base = ('bg', 'fg', 'panel', 'border', 'accent')
+                parts = ['create_theme', theme_name.strip(), *(palette[k] for k in base)]
+                parts.extend(f'{k}={v}' for k, v in palette.items() if k not in base)
+                from src.theme_palette import normalize_theme_background
+                background = normalize_theme_background(theme_args.get('background'), palette['accent'])
+                parts.extend(f'{k}={v}' for k, v in background.items())
+            else:
+                parts = shlex.split(content.strip())
+        except ValueError as exc:
+            return {"error": f"Invalid theme arguments: {exc}"}
         # create_theme <name> <bg> <fg> <panel> <border> <accent> [key=value ...]
         if len(parts) < 7:
             return {"error": "create_theme needs: create_theme <name> <bg> <fg> <panel> <border> <accent> (all hex colors). Optional advanced color key=value pairs (userBubbleBg, aiBubbleBg, bubbleBorder, sidebarBg, sectionAccent, brandColor, inputBg, inputBorder, sendBtnBg, sendBtnHover, codeBg, codeFg, toggleBg, toggleActive, accentPrimary, accentError). Optional background EFFECTS: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num e.g. 1>, bgEffectSize=<num e.g. 1>, frosted=true|false"}
@@ -717,7 +899,8 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         # Background-effect fields (animated pattern + frosted glass). Different
         # value types than the hex-only advanced keys, so parse separately.
         _BG_PATTERNS = {"none", "dots", "synapse", "rain", "constellations",
-                        "perlin-flow", "petals", "sparkles", "embers"}
+                        "perlin-flow", "petals", "sparkles", "embers",
+                        "starfield-depth", "ascii-fireflies"}
         bg = {}
         for part in parts[7:]:
             if "=" not in part:
@@ -735,15 +918,30 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
                 if not _re.match(r'^#[0-9a-fA-F]{6}$', av):
                     return {"error": f"Invalid hex color for bgEffectColor: '{av}'. Use format #RRGGBB"}
                 bg["effectColor"] = av
-            elif ak in ("bgEffectIntensity", "bgEffectSize"):
+            elif ak in ("bgEffectIntensity", "bgEffectSize", "bgEffectSpeed"):
                 try:
-                    bg["effectIntensity" if ak == "bgEffectIntensity" else "effectSize"] = float(av)
+                    bg[ak[2].lower() + ak[3:]] = float(av)
                 except ValueError:
                     return {"error": f"Invalid number for {ak}: '{av}'"}
             elif ak == "frosted":
                 bg["frosted"] = av.lower() in ("true", "1", "yes", "on")
         if advanced:
             colors["advanced"] = advanced
+        try:
+            from routes.prefs_routes import _load_for_user, _save_for_user
+            prefs = _load_for_user(owner)
+            custom_themes = prefs.get("custom-themes")
+            custom_themes = dict(custom_themes) if isinstance(custom_themes, dict) else {}
+            custom_themes[name] = dict(colors)
+            prefs["custom-themes"] = custom_themes
+            prefs["theme"] = {"name": name, "colors": dict(colors)}
+            for key, value in bg.items():
+                stored_key = 'frosted' if key == 'frosted' else 'bg' + key[0].upper() + key[1:]
+                custom_themes[name][stored_key] = value
+                prefs['theme'][stored_key] = value
+            _save_for_user(owner, prefs)
+        except Exception:
+            return {"error": "Could not save the theme. No theme change was applied; retry when preferences storage is available."}
         return {
             "ui_event": "create_theme",
             "theme_name": name,
@@ -774,8 +972,11 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
 
     elif action == "open_panel":
         # Open a top-level panel/modal: documents/library, gallery,
-        # email, sessions, notes, memories, skills, settings, cookbook.
+        # calendar, email, sessions, notes, tasks, memories, skills, settings, theme, cookbook.
         panel = parts[1].lower() if len(parts) > 1 else ""
+        view = ""
+        view_label = ""
+        target_date = ""
         _panel_aliases = {
             "documents": "documents",
             "document": "documents",
@@ -785,6 +986,9 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             "doclib": "documents",
             "gallery": "gallery",
             "images": "gallery",
+            "calendar": "calendar",
+            "cal": "calendar",
+            "schedule": "calendar",
             "email": "email",
             "emails": "email",
             "inbox": "email",
@@ -796,12 +1000,17 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             "note": "notes",
             "todo": "notes",
             "todos": "notes",
+            "tasks": "tasks",
+            "task": "tasks",
             "memories": "memories",
             "memory": "memories",
             "brain": "memories",
             "skills": "skills",
             "settings": "settings",
             "preferences": "settings",
+            "theme": "theme",
+            "themes": "theme",
+            "appearance": "theme",
             "cookbook": "cookbook",
             "models": "cookbook",
             "llm": "cookbook",
@@ -810,12 +1019,55 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         }
         target = _panel_aliases.get(panel)
         if not target:
-            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, settings, cookbook."}
-        return {
+            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, calendar, email, sessions, notes, tasks, memories, skills, settings, theme, cookbook."}
+        if target == "cookbook":
+            cookbook_views = {
+                "models": ("Search", "models"), "model": ("Search", "models"),
+                "download": ("Search", "models"), "search": ("Search", "models"),
+                "serve": ("Serve", "launch"), "serving": ("Serve", "launch"),
+                "launch": ("Serve", "launch"),
+                "active": ("Running", "running"), "running": ("Running", "running"),
+                "dependencies": ("Dependencies", "dependencies"),
+                "dependency": ("Dependencies", "dependencies"),
+                "settings": ("Settings", "settings"),
+            }
+            requested_view = parts[2].strip().lower() if len(parts) > 2 else ""
+            # A panel alias can carry the subview intent by itself. Previously
+            # `models` and `serve` were silently collapsed to bare Cookbook.
+            resolved_view = cookbook_views.get(requested_view) or cookbook_views.get(panel)
+            if resolved_view:
+                view, view_label = resolved_view
+        if target == "calendar":
+            view_words = {"day", "week", "month", "year", "agenda"}
+            tail_text = ""
+            if len(parts) > 2:
+                tail_text = parts[2]
+            if len(lines) > 1:
+                tail_text = " ".join(p for p in [tail_text, " ".join(line.strip() for line in lines[1:] if line.strip())] if p)
+            tail = [p.strip().lower() for p in tail_text.split() if p.strip()]
+            for i, token in enumerate(tail):
+                if token in view_words:
+                    view = token
+                    target_date = " ".join(t for t in tail[i + 1:] if t != "view").strip()
+                    break
+            if not view and tail and tail[0] in view_words:
+                view = tail[0]
+                target_date = " ".join(tail[1:]).strip()
+        payload = {
             "ui_event": "open_panel",
             "panel": target,
             "results": f"Opening {target} panel",
         }
+        if panel != target:
+            payload["requested_panel"] = panel
+        if view:
+            payload["view"] = view
+            if view_label:
+                payload["view_label"] = view_label
+            payload["results"] = f"Opening {target} panel in {view_label or view} view"
+        if target_date:
+            payload["target_date"] = target_date
+        return payload
 
     elif action == "open_email_reply":
         # Two forms supported:
@@ -867,6 +1119,37 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             result["body"] = body
         return result
 
+    elif action == "get_theme":
+        from src.theme_palette import BACKGROUND_PATTERNS, THEME_PRESETS
+        prefs = {}
+        try:
+            from routes.prefs_routes import _load_for_user
+            prefs = _load_for_user(owner)
+            saved = prefs.get("theme")
+        except Exception:
+            saved = None
+        available = {'presets': list(THEME_PRESETS),
+                     'custom_themes': sorted((prefs.get('custom-themes') or {}).keys()),
+                     'background_patterns': list(BACKGROUND_PATTERNS)}
+        name = str(saved.get("name") or "").strip() if isinstance(saved, dict) else ""
+        if not name:
+            return {
+                "results": "The current client theme has not been synchronized to the server.",
+                "theme_known": False,
+                **available,
+            }
+        return {
+            "results": f"Current theme: {name}",
+            "current_theme": name,
+            "theme_known": True,
+            'colors': saved.get('colors'),
+            'background': {k: v for k, v in saved.items() if k.startswith('bg') or k == 'frosted'},
+            **available,
+        }
+        if body:
+            result["body"] = body
+        return result
+
     elif action == "get_toggles":
         return {
             "results": (
@@ -877,21 +1160,97 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         }
 
     else:
-        return {"error": f"Unknown action '{action}'. Use: toggle, set_mode, switch_model, set_theme, highlight, clear_highlight, get_toggles"}
+        return {"error": f"Unknown action '{action}'. Use: toggle, set_mode, switch_model, set_theme, create_theme, get_theme, highlight, clear_highlight, get_toggles"}
 
 
 # ---------------------------------------------------------------------------
 # Image generation
 # ---------------------------------------------------------------------------
 
-async def do_generate_image(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+# Message used whenever a generative image edit (object add/remove/replace,
+# image generation) is requested but no image provider is configured. The
+# photo-editor agent and the image tools surface this verbatim so the user gets
+# a plain, actionable explanation instead of a silent substitute edit.
+IMAGE_PROVIDER_REQUIRED_MESSAGE = (
+    "Removing/adding objects needs an image generation provider; enable one in "
+    "Settings > Models."
+)
+
+
+def image_editing_provider_available(owner: Optional[str] = None) -> bool:
+    """True when an enabled, owner-visible image endpoint can serve AI edits.
+
+    Generative operations (object add/remove/replace, image generation) require
+    a configured image model. Local transforms (remove-bg, upscale, denoise,
+    enhance-face) do not, but the photo-editor agent gates the whole generative
+    request on this so it never falls back to deterministic approximations.
+    """
+    try:
+        from src.settings import get_user_setting, load_settings
+
+        if not load_settings().get("image_gen_enabled", True) or not get_user_setting("image_gen_enabled", owner=owner or "", default=True):
+            return False
+    except Exception:
+        pass
+    try:
+        from src.database import SessionLocal, ModelEndpoint
+        from src.auth_helpers import owner_filter
+
+        db = SessionLocal()
+        try:
+            q = db.query(ModelEndpoint).filter(
+                ModelEndpoint.is_enabled == True,  # noqa: E712
+                ModelEndpoint.model_type == "image",
+            )
+            q = owner_filter(q, ModelEndpoint, owner)
+            return q.first() is not None
+        finally:
+            db.close()
+    except Exception:
+        return False
+
+
+def _uses_openrouter_chat_images(model_id: str) -> bool:
+    # GPT-5 Image is an LLM wrapper, unlike native gpt-image-* image models.
+    leaf = model_id_leaf(model_id).lower()
+    return leaf.startswith("gpt-") and "-image" in leaf and not leaf.startswith("gpt-image-")
+
+
+def _chat_image_results(data: dict) -> list:
+    images = []
+    for choice in data.get("choices") or []:
+        message = choice.get("message") or {}
+        for item in message.get("images") or []:
+            url = (item.get("image_url") or {}).get("url")
+            if not isinstance(url, str):
+                continue
+            if url.startswith("data:image/") and ";base64," in url:
+                images.append({"b64_json": url.split(",", 1)[1]})
+            elif url.startswith(("https://", "http://")):
+                images.append({"url": url})
+    return images
+
+
+def _image_response_error(data: dict, model_id: str) -> Optional[str]:
+    errors = [data.get("error")]
+    errors.extend(choice.get("error") for choice in data.get("choices") or [])
+    for error in errors:
+        if not error:
+            continue
+        message = str(error.get("message") or "Image provider failed") if isinstance(error, dict) else str(error)
+        hint = " Choose a currently supported image model in AI settings." if "deprecated" in message.lower() else ""
+        return f"Image provider failed for '{model_id}': {message}{hint}"
+    return None
+
+
+async def do_generate_image(content: str, session_id: Optional[str] = None, owner: Optional[str] = None, *, incognito: bool = False) -> Dict:
     """Generate an image using an image-capable model (e.g. gpt-image-1).
 
     Content format:
       Line 1: prompt describing the image
       Line 2: model name (optional, default auto-detects: prefers gpt-image-1.5 > gpt-image-1)
       Line 3: size (optional, defaults to 1024x1024)
-      Line 4: quality (optional, defaults to medium — options: low, medium, high, auto)
+      Line 4: quality (optional, defaults to configured quality or medium — low, medium, high, auto)
     """
     import base64
     import httpx
@@ -899,27 +1258,48 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     from pathlib import Path
     from src.url_safety import check_outbound_url
 
-    lines = content.strip().split("\n")
-    prompt = lines[0].strip() if lines else ""
-    model_spec = lines[1].strip() if len(lines) > 1 and lines[1].strip() else ""
-    size = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024"
-    quality = lines[3].strip() if len(lines) > 3 and lines[3].strip() else "medium"
+    if content.lstrip().startswith('{'):
+        try:
+            args = json.loads(content)
+        except (TypeError, ValueError):
+            return {"error": "Image arguments must be a JSON object"}
+        if not isinstance(args, dict):
+            return {"error": "Image arguments must be a JSON object"}
+        prompt = str(args.get('prompt') or '').strip()
+        model_spec = str(args.get('model') or '').strip()
+        size = str(args.get('size') or '1024x1024')
+        quality = str(args.get('quality') or '')
+    else:
+        lines = content.strip().split("\n")
+        prompt = lines[0].strip() if lines else ""
+        model_spec = lines[1].strip() if len(lines) > 1 and lines[1].strip() else ""
+        size = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024"
+        quality = lines[3].strip() if len(lines) > 3 and lines[3].strip() else ""
 
     if not prompt:
         return {"error": "Image prompt is required (line 1)"}
 
-    # Load admin settings for defaults
+    # Load settings for defaults
     try:
-        from src.settings import load_settings
+        from src.settings import get_user_setting, load_settings
         _settings = load_settings()
     except Exception:
         _settings = {}
+        def get_user_setting(key, owner="", default=None):
+            return default
 
-    # Use admin-configured model/quality if not specified by the tool call
+    # The administrator's global image-generation disable switch is authoritative.
+    # Non-admin preferences cannot re-enable generation when disabled globally.
+    if not _settings.get("image_gen_enabled", True):
+        return {"error": "Image generation is disabled by the administrator."}
+    if not get_user_setting("image_gen_enabled", owner=owner or "", default=True):
+        return {"error": "Image generation is disabled by user preference."}
+
+    # Use user- or admin-configured model/quality if not specified by the tool call
     if not model_spec:
-        model_spec = _settings.get("image_model", "")
-    if quality == "medium" and _settings.get("image_quality"):
-        quality = _settings["image_quality"]
+        model_spec = get_user_setting("image_model", owner=owner, default="") or ""
+    if not quality:
+        quality = get_user_setting("image_quality", owner=owner, default="medium") or "medium"
 
     # Auto-detect best available image model if still not set
     if not model_spec:
@@ -967,21 +1347,63 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
         if not model_spec:
             return {"error": "No image model found. Configure one in Admin → Image Generation."}
 
+    async def _resolve_image_model(model_name: str):
+        def _call():
+            # Try a plain by-name lookup first. Gateway endpoints (OpenRouter)
+            # register as `llm` yet serve image models, and the image-typed
+            # query's last-resort fallback would otherwise hijack a cloud model
+            # onto the local image endpoint (gpt-5-image -> qwen-image-edit).
+            try:
+                return _resolve_model(model_name, owner=owner)
+            except ValueError:
+                pass
+            try:
+                return _resolve_model(model_name, owner=owner, model_type="image")
+            except TypeError as exc:
+                if "model_type" not in str(exc):
+                    raise
+                return _resolve_model(model_name, owner=owner)
+        return await asyncio.to_thread(_call)
+
     # Resolve the model to find the right endpoint
     try:
-        url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+        try:
+            url, model_id, headers = await _resolve_image_model(model_spec)
+        except ValueError:
+            _lower_model_spec = model_spec.lower()
+            if not (
+                any(_name in _lower_model_spec for _name in ("gpt-image", "dall-e"))
+                or looks_like_image_generation_model(_lower_model_spec)
+            ):
+                raise
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
     except ValueError:
         return {"error": f"No endpoint found with image model '{model_spec}'. "
                 "Configure an OpenAI-compatible endpoint with image generation support."}
 
     # Detect if this is a GPT image model vs DALL-E vs local diffusion
-    is_gpt_image = "gpt-image" in model_id.lower()
-    is_dalle = "dall-e" in model_id.lower()
+    _model_leaf = model_id_leaf(model_id)
+    is_gpt_image = _model_leaf.startswith("gpt-image") or (_model_leaf.startswith("gpt-") and "-image" in _model_leaf)
+    is_dalle = _model_leaf.startswith("dall-e")
     is_local_diffusion = not is_gpt_image and not is_dalle
 
     # Build the images endpoint URL from the chat completions URL
     base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
     images_url = base_url + "/images/generations"
+    from src.model_capability_readers.base import detect_vendor
+    chat_images = detect_vendor(url) == "openrouter" and _uses_openrouter_chat_images(model_id)
+    if detect_vendor(url) == "openrouter":
+        images_url = base_url + "/images"
+    if chat_images:
+        images_url = base_url + "/chat/completions"
+
+    # Capture the requested geometry before older OpenAI size restrictions.
+    from src.image_model_ids import image_aspect_ratio
+    try:
+        requested_width, requested_height = (int(value) for value in size.lower().split("x"))
+        requested_ratio = image_aspect_ratio(requested_width, requested_height)
+    except (TypeError, ValueError):
+        requested_ratio = "1:1"
 
     # Validate size for cloud image models (local diffusion accepts any WxH)
     valid_gpt_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}
@@ -997,6 +1419,9 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
         "n": 1,
         "size": size,
     }
+    if detect_vendor(url) == "openrouter":
+        payload.pop("size", None)
+        payload["aspect_ratio"] = requested_ratio
 
     # GPT image models and local diffusion support quality; DALL-E does not
     if is_gpt_image or is_local_diffusion:
@@ -1005,12 +1430,21 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
         else:
             payload["quality"] = "medium"
 
-    logger.info(f"Image generation: model={model_id}, size={size}, quality={quality}, prompt={prompt[:80]}")
+    logger.info(f"Image generation: model={model_id}, size={size}, quality={quality}, prompt={'[private]' if incognito else prompt[:80]}")
 
     try:
         # GPT image models can take 30-120s+ depending on quality
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
-            resp = await client.post(images_url, json=payload, headers=headers)
+            request_payload = payload
+            if chat_images:
+                request_payload = {
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "modalities": ["image", "text"],
+                    "stream": False,
+                    "image_config": {"aspect_ratio": requested_ratio},
+                }
+            resp = await client.post(images_url, json=request_payload, headers=headers)
 
             if resp.status_code != 200:
                 error_text = resp.text[:500]
@@ -1019,12 +1453,21 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                     error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
                 except Exception:
                     pass
-                return {"error": f"Image generation failed ({resp.status_code}): {error_text}"}
+                return {
+                    "error": f"Image generation failed ({resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
 
             data = resp.json()
-            images = data.get("data", [])
+            provider_error = _image_response_error(data, model_id)
+            if provider_error:
+                return {"error": provider_error, "untrusted_content": True}
+            images = _chat_image_results(data) if chat_images else data.get("data", [])
             if not images:
-                return {"error": "No images returned from API"}
+                return {"error": (
+                    f"Image model '{model_id}' returned no image. "
+                    "Choose another image generation model in AI settings."
+                )}
 
             img = images[0]
             image_url = None
@@ -1053,15 +1496,22 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                     logger.warning(f"Failed to save gallery record: {_ge}")
                     return ""
 
-            # GPT image models always return b64_json; DALL-E may return url
-            if img.get("b64_json"):
+            def _store_image(image_bytes):
+                if incognito:
+                    return 'data:image/png;base64,' + base64.b64encode(image_bytes).decode('ascii'), None
                 img_dir = Path(GENERATED_IMAGES_DIR)
                 img_dir.mkdir(parents=True, exist_ok=True)
                 filename = f"{uuid.uuid4().hex[:12]}.png"
                 img_path = img_dir / filename
-                img_path.write_bytes(base64.b64decode(img.get("b64_json")))
-                image_url = f"/api/generated-image/{filename}"
-                image_id = _save_to_gallery(filename)
+                img_path.write_bytes(image_bytes)
+                if owner:
+                    from src.generated_images import register_generated_image
+                    register_generated_image(filename, owner)
+                return f"/api/generated-image/{filename}", _save_to_gallery(filename)
+
+            # Private results stay in the response, never in the gallery or on disk.
+            if img.get("b64_json"):
+                image_url, image_id = _store_image(base64.b64decode(img['b64_json']))
 
             elif img.get("url"):
                 # Download external URL and save locally (DALL-E returns temp URLs)
@@ -1075,13 +1525,7 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                 try:
                     dl_resp = httpx.get(result_url, timeout=60)
                     if dl_resp.status_code == 200:
-                        img_dir = Path(GENERATED_IMAGES_DIR)
-                        img_dir.mkdir(parents=True, exist_ok=True)
-                        filename = f"{uuid.uuid4().hex[:12]}.png"
-                        img_path = img_dir / filename
-                        img_path.write_bytes(dl_resp.content)
-                        image_url = f"/api/generated-image/{filename}"
-                        image_id = _save_to_gallery(filename)
+                        image_url, image_id = _store_image(dl_resp.content)
                     else:
                         image_url = result_url  # fallback to external URL
                 except Exception as _dl_e:
@@ -1103,7 +1547,365 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     except httpx.TimeoutException:
         return {"error": "Image generation timed out (300s). The model may be overloaded — try again or use quality=low."}
     except Exception as e:
-        return {"error": f"Image generation error: {str(e)}"}
+        return {
+            "error": f"Image generation error: {str(e)}",
+            "untrusted_content": True,
+        }
+
+
+async def do_edit_image(
+    prompt: str,
+    image_path: str,
+    model_spec: str = "",
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    size: str = "auto",
+    quality: Optional[str] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    incognito: bool = False,
+) -> Dict:
+    """Edit an uploaded image using the configured image endpoint."""
+    import base64
+    import httpx
+    import mimetypes
+    import os
+    from pathlib import Path
+    from src.url_safety import check_outbound_url
+
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return {"error": "Image edit prompt is required"}
+    path = Path(image_path)
+    if not path.exists() or not path.is_file():
+        return {"error": "Attached image file was not found"}
+
+    try:
+        from src.settings import get_user_setting, load_settings
+        _settings = load_settings()
+    except Exception:
+        _settings = {}
+        def get_user_setting(key, owner="", default=None):
+            return default
+
+    if not model_spec:
+        model_spec = get_user_setting("image_edit_model", owner=owner) or get_user_setting("image_model", owner=owner, default="")
+    if quality is None:
+        quality = get_user_setting("image_quality", owner=owner, default="medium") or "medium"
+    if not model_spec:
+        return {"error": "No image model selected for image editing"}
+
+    try:
+        try:
+            def _call():
+                try:
+                    return _resolve_model(model_spec, owner=owner)
+                except ValueError:
+                    pass
+                try:
+                    return _resolve_model(model_spec, owner=owner, model_type="image")
+                except TypeError as exc:
+                    if "model_type" not in str(exc):
+                        raise
+                    return _resolve_model(model_spec, owner=owner)
+            url, model_id, headers = await asyncio.to_thread(_call)
+        except ValueError:
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+    except ValueError:
+        return {"error": f"No endpoint found with image model '{model_spec}'."}
+
+    requested_edit_size = size
+    if not size or size == "auto":
+        from PIL import Image
+        from src.image_model_ids import image_edit_size
+        try:
+            with Image.open(path) as source:
+                width, height = source.size
+                # EXIF rotation changes the displayed portrait/landscape shape.
+                if source.getexif().get(274) in {5, 6, 7, 8}:
+                    width, height = height, width
+            size = image_edit_size(model_id, width, height)
+        except (OSError, ValueError, Image.DecompressionBombError):
+            return {"error": "Could not read the attached image dimensions. Try a PNG, JPEG, or WebP image."}
+
+    base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
+    edits_url = base_url + "/images/edits"
+    from src.model_capability_readers.base import detect_vendor
+    is_openrouter = detect_vendor(url) == "openrouter"
+    mime = mimetypes.guess_type(str(path))[0] or "image/png"
+    payload = {
+        "model": model_id,
+        "prompt": prompt,
+        "n": "1",
+        "size": size,
+        "quality": quality if quality in ("low", "medium", "high", "auto") else "medium",
+        "response_format": "b64_json",
+    }
+    request_id = uuid.uuid4().hex
+    payload["request_id"] = request_id
+
+    logger.info("Image edit: model=%s, size=%s, quality=%s, image=%s, prompt=%s", model_id, size, quality, '[private]' if incognito else path.name, '[private]' if incognito else prompt[:80])
+
+    def _save_edited_image_to_gallery(filename: str) -> str:
+        try:
+            from src.database import SessionLocal as _GallerySL, GalleryImage
+            new_id = str(uuid.uuid4())
+            _gdb = _GallerySL()
+            _gdb.add(GalleryImage(
+                id=new_id,
+                filename=filename,
+                prompt=prompt,
+                model=model_id,
+                size=size,
+                quality=payload.get("quality", "medium"),
+                session_id=session_id,
+                owner=owner,
+            ))
+            _gdb.commit()
+            _gdb.close()
+            return new_id
+        except Exception as _ge:
+            logger.warning("Failed to save edited image gallery record: %s", _ge)
+            return ""
+
+    def _save_image_bytes(image_bytes: bytes, suffix: str = ".png") -> tuple[str, str]:
+        nonlocal size
+        from io import BytesIO
+        from PIL import Image
+        with Image.open(BytesIO(image_bytes)) as output:
+            size = f"{output.width}x{output.height}"
+            image_mime = Image.MIME.get(output.format, 'image/png')
+        if incognito:
+            return 'data:' + image_mime + ';base64,' + base64.b64encode(image_bytes).decode('ascii'), ''
+        img_dir = Path(GENERATED_IMAGES_DIR)
+        img_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex[:12]}{suffix}"
+        (img_dir / filename).write_bytes(image_bytes)
+        if owner:
+            from src.generated_images import register_generated_image
+            register_generated_image(filename, owner)
+        return f"/api/generated-image/{filename}", _save_edited_image_to_gallery(filename)
+
+    async def _try_local_img2img_fallback(client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
+        """Try Odysseus' local diffusion img2img endpoint.
+
+        Some self-hosted SD/SDXL endpoints expose text-to-image plus
+        `/images/harmonize`/img2img, but not OpenAI's multipart
+        `/images/edits`. For chat uploads ("image + prompt"), this gives the
+        expected instruction-edit behavior instead of stopping at a 400.
+        """
+        harmonize_url = base_url + "/images/harmonize"
+        try:
+            image_bytes = path.read_bytes()
+            image_b64 = base64.b64encode(image_bytes).decode()
+            fallback_payload = {
+                "image": image_b64,
+                "prompt": prompt,
+                "strength": 0.35,
+                "steps": 0,
+                "max_side": 1024,
+            }
+            if progress_callback:
+                await progress_callback({
+                    "status": "running",
+                    "message": "Trying image-to-image fallback",
+                    "step": 0,
+                    "total": 0,
+                })
+            fallback_resp = await client.post(harmonize_url, json=fallback_payload, headers=headers)
+            if fallback_resp.status_code == 404:
+                return None
+            if fallback_resp.status_code != 200:
+                error_text = fallback_resp.text[:500]
+                try:
+                    err_json = fallback_resp.json()
+                    error_text = err_json.get("detail") or err_json.get("error") or error_text
+                except Exception:
+                    pass
+                return {
+                    "error": f"Image edit fallback failed ({fallback_resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
+            fallback_data = fallback_resp.json()
+            image_b64 = fallback_data.get("image")
+            if not image_b64:
+                return {"error": "Image edit fallback returned no image"}
+            image_url, image_id = _save_image_bytes(base64.b64decode(image_b64))
+            return {
+                "results": f"Edited image for: {prompt[:100]}",
+                "image_url": image_url,
+                "image_id": image_id,
+                "image_prompt": prompt,
+                "image_model": model_id,
+                "image_size": size,
+                "image_quality": payload.get("quality", "medium"),
+                "edit_route": "img2img",
+            }
+        except httpx.TimeoutException:
+            return {"error": "Image edit fallback timed out. The model may still be loading or overloaded."}
+        except Exception as fallback_error:
+            logger.warning("Image edit fallback failed: %s", fallback_error)
+            return {"error": f"Image edit fallback error: {fallback_error}"}
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=60.0, pool=30.0)) as client:
+            progress_task = None
+            if progress_callback and not is_openrouter:
+                progress_url = base_url + f"/images/progress/{request_id}"
+
+                async def _poll_progress():
+                    last_sig = None
+                    while True:
+                        try:
+                            pr = await client.get(progress_url, headers=headers, timeout=5.0)
+                            if pr.status_code == 404:
+                                return
+                            if pr.status_code == 200:
+                                data = pr.json()
+                                sig = (data.get("status"), data.get("step"), data.get("total"), data.get("percent"))
+                                if sig != last_sig:
+                                    last_sig = sig
+                                    await progress_callback(data)
+                                if data.get("status") in {"done", "error"}:
+                                    return
+                        except Exception:
+                            return
+                        await asyncio.sleep(1)
+
+                progress_task = asyncio.create_task(_poll_progress())
+            try:
+                if is_openrouter:
+                    # OpenRouter's Image API uses JSON reference images for
+                    # edits, not OpenAI's multipart /images/edits protocol.
+                    image_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+                    edit_payload = {
+                        "model": model_id,
+                        "prompt": prompt,
+                        "n": 1,
+                        "size": size,
+                        "quality": payload["quality"],
+                        "output_format": "png",
+                        "input_references": [{
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{image_b64}"},
+                        }],
+                    }
+                    from src.image_model_ids import image_aspect_ratio
+                    from PIL import Image as ReferenceImage
+                    with ReferenceImage.open(path) as reference:
+                        reference_width, reference_height = reference.size
+                        if reference.getexif().get(274) in {5, 6, 7, 8}:
+                            reference_width, reference_height = reference_height, reference_width
+                    if requested_edit_size and requested_edit_size != "auto":
+                        try:
+                            reference_width, reference_height = (int(value) for value in requested_edit_size.lower().split("x"))
+                        except (TypeError, ValueError):
+                            pass
+                    edit_payload.pop("size", None)
+                    edit_payload["aspect_ratio"] = image_aspect_ratio(reference_width, reference_height)
+                    if _uses_openrouter_chat_images(model_id):
+                        edit_payload = {
+                            "model": model_id,
+                            "messages": [{"role": "user", "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {
+                                    "url": f"data:{mime};base64,{image_b64}",
+                                }},
+                            ]}],
+                            "modalities": ["image", "text"],
+                            "stream": False,
+                            "image_config": {"aspect_ratio": edit_payload["aspect_ratio"]},
+                        }
+                        resp = await client.post(base_url + "/chat/completions", json=edit_payload, headers=headers)
+                    else:
+                        resp = await client.post(base_url + "/images", json=edit_payload, headers=headers)
+                else:
+                    with path.open("rb") as f:
+                        files = {"image": (path.name, f, mime)}
+                        resp = await client.post(edits_url, data=payload, files=files, headers=headers)
+            finally:
+                if progress_task:
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except asyncio.CancelledError:
+                        pass
+
+            if resp.status_code != 200:
+                error_text = resp.text[:500]
+                try:
+                    err_json = resp.json()
+                    err = err_json.get("error")
+                    error_text = (
+                        err.get("message", error_text)
+                        if isinstance(err, dict)
+                        else str(err or err_json.get("detail") or error_text)
+                    )
+                except Exception:
+                    pass
+                if not is_openrouter and resp.status_code in (400, 404, 405, 422):
+                    fallback = await _try_local_img2img_fallback(client)
+                    if fallback:
+                        return fallback
+                    if resp.status_code == 404:
+                        return {
+                            "error": (
+                                f"The configured endpoint returned 404 for image editing with '{model_id}'. "
+                                "Use it without an attached image for text-to-image generation, or serve an edit/img2img "
+                                "model for attached-image prompts."
+                            )
+                        }
+                return {
+                    "error": f"Image edit failed ({resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
+
+            data = resp.json()
+            provider_error = _image_response_error(data, model_id)
+            if provider_error:
+                return {"error": provider_error, "untrusted_content": True}
+            images = (_chat_image_results(data)
+                      if is_openrouter and _uses_openrouter_chat_images(model_id)
+                      else data.get("data", []))
+            if not images:
+                return {"error": "No image returned from edit API"}
+
+            img = images[0]
+            image_url = None
+            image_id = None
+
+            if img.get("b64_json"):
+                image_url, image_id = _save_image_bytes(base64.b64decode(img.get("b64_json")))
+            elif img.get("url"):
+                result_url = img["url"]
+                ok, reason = check_outbound_url(
+                    result_url,
+                    block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+                )
+                if not ok:
+                    return {"error": f"Image edit API returned unsafe image URL: {reason}"}
+                dl_resp = httpx.get(result_url, timeout=60)
+                if dl_resp.status_code != 200:
+                    return {"error": f"Could not download edited image ({dl_resp.status_code})"}
+                image_url, image_id = _save_image_bytes(dl_resp.content)
+            else:
+                return {"error": "Image edit API returned unexpected format (no b64_json or url)"}
+
+            return {
+                "results": f"Edited image for: {prompt[:100]}",
+                "image_url": image_url,
+                "image_id": image_id,
+                "image_prompt": prompt,
+                "image_model": model_id,
+                "image_size": size,
+                "image_quality": payload.get("quality", "medium"),
+            }
+    except httpx.TimeoutException:
+        return {"error": "Image edit timed out. The model may still be loading or overloaded."}
+    except Exception as e:
+        return {
+            "error": f"Image edit error: {str(e)}",
+            "untrusted_content": True,
+        }
 
 
 # ---------------------------------------------------------------------------

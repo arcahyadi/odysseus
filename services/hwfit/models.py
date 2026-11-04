@@ -145,7 +145,7 @@ def is_prequantized(model):
         or re.search(r"(^|[-_/])fp8($|[-_/\s])", text) is not None
         or (not (model.get("is_gguf") or model.get("gguf_sources")) and re.search(r"(^|[-_/])(?:int)?8bit($|[-_/\s])", text) is not None)
         or any(x in text for x in ("awq", "gptq", "mlx"))
-        or any(q.startswith(p) for p in PREQUANTIZED_PREFIXES)
+        or any(isinstance(q, str) and q.startswith(p) for p in PREQUANTIZED_PREFIXES)
     )
 
 
@@ -155,7 +155,7 @@ def params_b(model):
         return raw / 1_000_000_000.0
 
     pc = model.get("parameter_count", "")
-    if pc:
+    if isinstance(pc, str) and pc:
         pc = pc.strip().upper()
         m = re.match(r"^([\d.]+)\s*([BKMGT]?)$", pc)
         if m:
@@ -282,7 +282,7 @@ def reset_model_cache():
 def refresh_dynamic_catalogs(force=False):
     """Refresh API-backed model catalogs and invalidate the merged cache.
 
-    The bundled JSON files remain the offline fallback. Dynamic catalogs live
+    The bundled JSON lists are intentionally empty. Dynamic catalogs live
     under DATA_DIR so runtime refreshes do not dirty the source tree.
     """
     from services.hwfit.hf_discovery import (
@@ -324,6 +324,7 @@ def get_models():
                 seen.add(name)
                 rows.append(_normalize_model_entry(model))
 
+        _append_models(_load_model_file(model_catalog_path()))
         for model in _load_model_file(data_path):
             if not isinstance(model, dict):
                 continue
@@ -340,4 +341,6 @@ def get_models():
 
 
 def model_catalog_path():
-    return os.path.join(os.path.dirname(__file__), "data", "hf_models.json")
+    """Mutable user catalog populated by the maintenance scripts."""
+    from src.constants import DATA_DIR
+    return os.path.join(DATA_DIR, "hwfit", "hf_models.json")

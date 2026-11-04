@@ -3,7 +3,7 @@
  * Renders multi-model thread UI with synchronized panes.
  */
 
-import uiModule from '../ui.js';
+import uiModule from '../ui.js?v=20260916largetoolscroll1';
 
 const escapeHtml = uiModule.esc;
 

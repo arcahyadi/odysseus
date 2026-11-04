@@ -21,7 +21,7 @@ def _strip_list_prefix(text: str) -> str:
         return text
     return _LIST_PREFIX_RE.sub("", text, count=1).strip()
 
-from services.memory import MemoryManager
+from services.memory import MemoryManager, MemoryStoreUnreadable
 from core.session_manager import SessionManager
 from src.request_models import MemoryAddRequest
 from core.database import SessionLocal
@@ -33,6 +33,22 @@ from src.task_endpoint import resolve_task_endpoint
 from src.upload_limits import read_upload_limited, MEMORY_IMPORT_MAX_BYTES
 
 logger = logging.getLogger(__name__)
+
+
+def _load_for_update(memory_manager) -> List[Dict[str, Any]]:
+    """Load the whole store for a read-modify-write cycle.
+
+    A transient read failure must not look like an empty store: the caller
+    would append to ``[]`` and save that back, atomically destroying every
+    existing memory (issue #5673). Surface it as a 503 and change nothing.
+    """
+    try:
+        return memory_manager.load_all_for_update()
+    except MemoryStoreUnreadable as e:
+        logger.error("Refusing to rewrite the memory store: %s", e)
+        raise HTTPException(
+            503, "Memory store is temporarily unreadable — no changes were made."
+        )
 
 
 def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionManager, memory_vector=None):
@@ -95,10 +111,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 text=form.get("text"),
                 category=form.get("category", "fact"),
                 source=form.get("source", "user"),
-                session_id=form.get("session_id"),
-                expires_at=form.get("expires_at"),
-                active_from=form.get("active_from"),
-                crew_member_id=form.get("crew_member_id")
+                session_id=form.get("session_id")
             )
 
         user = _owner(request)
@@ -119,27 +132,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         new_entry = memory_manager.add_entry(text, memory_data.source, memory_data.category, owner=user)
         if memory_data.session_id:
             new_entry["session_id"] = memory_data.session_id
-
-        # ── Phase 2: temporal fields + persona namespace tagging (Req 2.x, 5.x) ──
-        expires_at = getattr(memory_data, "expires_at", None)
-        active_from = getattr(memory_data, "active_from", None)
-        crew_member_id = getattr(memory_data, "crew_member_id", None)
-        if expires_at or active_from or crew_member_id:
-            try:
-                from services.memory.temporal import TemporalMemoryStore
-                from services.memory.namespace import NamespaceResolver
-            except ImportError:
-                raise HTTPException(501, "Phase 2 memory services not available")
-            try:
-                if expires_at or active_from:
-                    TemporalMemoryStore(memory_manager, memory_vector).validate_temporal_fields(expires_at, active_from)
-                    new_entry = TemporalMemoryStore(memory_manager, memory_vector).set_temporal(new_entry, expires_at, active_from)
-            except ValueError as e:
-                raise HTTPException(422, str(e))
-            if crew_member_id:
-                new_entry = NamespaceResolver(memory_manager).write_entry(new_entry, crew_member_id)
-
-        all_mem = memory_manager.load_all()
+        all_mem = _load_for_update(memory_manager)
         all_mem.append(new_entry)
         memory_manager.save(all_mem)
         # Sync vector index
@@ -268,6 +261,8 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             sess.endpoint_url, sess.model, sess.headers, owner=_owner(request)
         )
 
+        from src.utility_effort import effort_for_call
+
         try:
             suggestion_text = await llm_call_async(
                 t_url,
@@ -276,6 +271,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 temperature=0.2,
                 max_tokens=500,
                 headers=t_headers,
+                reasoning_effort=effort_for_call(t_url, t_model, _owner(request), sess),
             )
             try:
                 suggestions = json.loads(suggestion_text)
@@ -356,6 +352,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         endpoint_url = None
         model = None
         headers = {}
+        sess = None
 
         user = _owner(request)
 
@@ -460,6 +457,8 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             "Return ONLY valid JSON, no markdown fences."
         )
 
+        from src.utility_effort import effort_for_call
+
         try:
             raw = await llm_call_async(
                 endpoint_url,
@@ -471,6 +470,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 temperature=0.2,
                 max_tokens=2000,
                 headers=headers,
+                reasoning_effort=effort_for_call(endpoint_url, model, user, sess),
             )
 
             # Parse JSON
@@ -510,7 +510,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     def pin_memory(request: Request, memory_id: str, pinned: bool = Form(True)):
         """Pin or unpin a memory. Pinned memories are always included in context."""
         user = _owner(request)
-        all_mem = memory_manager.load_all()
+        all_mem = _load_for_update(memory_manager)
         for i, memory in enumerate(all_mem):
             if memory["id"] == memory_id:
                 _verify_memory_owner(memory, user)
@@ -518,61 +518,6 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 memory_manager.save(all_mem)
                 return {"ok": True, "pinned": pinned}
         raise HTTPException(404, f"Memory item {memory_id} not found")
-
-    # ── Phase 2: Temporal time-range retrieval (Req 2.5, 2.6) ────────────────
-    # Must be registered BEFORE the /{memory_id} wildcard below. Otherwise the
-    # wildcard matches the literal id "time-range" first and this route 404s
-    # with "Memory not found".
-
-    @router.get("/time-range")
-    def memory_time_range(
-        request: Request,
-        from_dt: Optional[str] = None,
-        to_dt: Optional[str] = None,
-        include_archived: bool = False,
-    ):
-        """Return memory entries whose timestamp falls in [from_dt, to_dt]."""
-        try:
-            from services.memory.temporal import TemporalMemoryStore
-        except ImportError:
-            raise HTTPException(status_code=501, detail="Temporal memory not available")
-        user = get_current_user(request)
-        if not user:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        all_entries = memory_manager.load(user) if hasattr(memory_manager, "load") else []
-        t_store = TemporalMemoryStore(memory_manager, memory_vector)
-        results = t_store.time_range_query(
-            all_entries, from_dt=from_dt, to_dt=to_dt, include_archived=include_archived
-        )
-        return {"entries": results, "count": len(results)}
-
-    # ── Phase 2: Promote memory to global namespace (Req 5.4–5.6) ────────────
-    # Same ordering rule as /time-range: there is no POST wildcard today, but
-    # the non-wildcard routes stay together ahead of the wildcard block.
-
-    from pydantic import BaseModel
-
-    class PromoteRequest(BaseModel):
-        entry_id: str
-
-    @router.post("/promote")
-    def promote_memory(request: Request, body: PromoteRequest):
-        """Move a memory entry from persona namespace to global."""
-        try:
-            from services.memory.namespace import NamespaceResolver
-        except ImportError:
-            raise HTTPException(status_code=501, detail="Namespace resolver not available")
-        user = get_current_user(request)
-        if not user:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        ns_resolver = NamespaceResolver(memory_manager)
-        try:
-            entry = ns_resolver.promote_to_global(body.entry_id, user)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Memory entry not found")
-        except ValueError:
-            raise HTTPException(status_code=409, detail="Entry is already in global namespace")
-        return {"ok": True, "entry": entry}
 
     # Wildcard routes MUST come last — otherwise they swallow /import, /search, etc.
     @router.get("/{memory_id}")
@@ -587,11 +532,10 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         raise HTTPException(404, "Memory not found")
 
     @router.put("/{memory_id}")
-    def update_memory(request: Request, memory_id: str, text: str = Form(...), category: str = Form(None),
-                      expires_at: str = Form(None), active_from: str = Form(None)):
+    def update_memory(request: Request, memory_id: str, text: str = Form(...), category: str = Form(None)):
         """Update an existing memory item with new text and optional category."""
         user = _owner(request)
-        all_mem = memory_manager.load_all()
+        all_mem = _load_for_update(memory_manager)
         for i, memory in enumerate(all_mem):
             if memory["id"] == memory_id:
                 _verify_memory_owner(memory, user)
@@ -599,18 +543,6 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 if category:
                     all_mem[i]["category"] = category
                 all_mem[i]["timestamp"] = int(time.time())
-
-                # Phase 2: optional temporal field update (Req 2.x)
-                if expires_at or active_from:
-                    try:
-                        from services.memory.temporal import TemporalMemoryStore
-                    except ImportError:
-                        raise HTTPException(501, "Temporal memory not available")
-                    try:
-                        TemporalMemoryStore(memory_manager, memory_vector).validate_temporal_fields(expires_at, active_from)
-                        all_mem[i] = TemporalMemoryStore(memory_manager, memory_vector).set_temporal(all_mem[i], expires_at, active_from)
-                    except ValueError as e:
-                        raise HTTPException(422, str(e))
 
                 memory_manager.save(all_mem)
                 # Sync vector index (remove old, add updated)
@@ -625,7 +557,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     def delete_memory(request: Request, memory_id: str):
         """Delete a memory item by its ID."""
         user = _owner(request)
-        all_mem = memory_manager.load_all()
+        all_mem = _load_for_update(memory_manager)
 
         # Find and verify ownership before deleting
         target = next((m for m in all_mem if m["id"] == memory_id), None)

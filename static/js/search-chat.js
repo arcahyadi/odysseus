@@ -1,6 +1,6 @@
 // Search Chat Module — Ctrl+K command palette for searching conversations
 
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 
 let API_BASE = '';
@@ -10,9 +10,37 @@ let results = [];
 
 function el(id) { return document.getElementById(id); }
 
+function hideMobileSidebarForSearch() {
+  if (window.innerWidth >= 768) return;
+  const sidebar = el('sidebar');
+  const rail = el('icon-rail');
+  const backdrop = el('sidebar-backdrop');
+  let changed = false;
+  if (sidebar && !sidebar.classList.contains('hidden')) {
+    sidebar.classList.add('hidden');
+    changed = true;
+  }
+  if (rail && rail.classList.contains('mobile-mini')) {
+    rail.classList.remove('mobile-mini');
+    rail.style.cssText = '';
+    changed = true;
+  }
+  if (backdrop) backdrop.classList.remove('visible');
+  if (changed && typeof window.syncRailSide === 'function') {
+    try { window.syncRailSide(); } catch (_) {}
+  }
+}
+
 export function openSearch() {
+  hideMobileSidebarForSearch();
   const overlay = el('search-overlay');
   if (!overlay) return;
+  // Freeze the opening offset before focus summons the mobile keyboard.
+  // A live `vh` value shrinks during the keyboard animation and visibly
+  // pulls the search popup upward even though it is already unobscured.
+  const openingHeight = window.innerHeight || document.documentElement.clientHeight;
+  const openingTop = Math.max(56, Math.min(140, Math.round(openingHeight * 0.15)));
+  overlay.style.setProperty('--search-overlay-top', `${openingTop}px`);
   overlay.classList.remove('hidden');
   const input = el('search-input');
   if (input) {

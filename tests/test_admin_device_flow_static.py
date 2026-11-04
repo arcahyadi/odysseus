@@ -28,6 +28,24 @@ def test_provider_selection_is_inert_and_add_button_starts_device_flow():
     assert "_startProviderDeviceAuth(deviceAuthProvider" in add_block
 
 
+def test_google_add_omits_auto_refresh_mode_for_backend_manual_default():
+    refresh_helper = _between(
+        _ADMIN,
+        "function _modelRefreshModeForApiEndpoint",
+        "function _normalizeBaseUrl",
+    )
+    add_block = _between(
+        _ADMIN,
+        "el('adm-epAddBtn').addEventListener('click'",
+        "async function _startProviderDeviceAuth",
+    )
+
+    assert "generativelanguage.googleapis.com" in refresh_helper
+    assert "return '';" in refresh_helper
+    assert "_modelRefreshModeForApiEndpoint(url, endpointKind)" in add_block
+    assert "if (refreshMode) fd.append('model_refresh_mode', refreshMode)" in add_block
+
+
 def test_device_auth_selection_disables_and_dims_api_test_button():
     form_block = _between(_ADMIN, "function _setApiFormForProvider()", "function _renderPickerMenu()")
 
@@ -40,14 +58,21 @@ def test_device_auth_selection_disables_and_dims_api_test_button():
 
 
 def test_device_auth_keeps_manual_auth_button_without_auto_opening_tab():
+    # The waiting panel (code + manual Authorize link) is shared between the
+    # Add Models flow and per-account ChatGPT Reconnect.
+    panel_block = _between(_ADMIN, "function _renderDeviceAuthWaitPanel", "// ── ChatGPT Subscription per-account usage")
     auth_block = _between(_ADMIN, "async function _startProviderDeviceAuth", "// Local \"Add\" button")
+    reconnect_block = _between(_ADMIN, "async function _reconnectChatgptAccount", "function initEndpointForm()")
 
-    assert "Authorize with OpenAI" in auth_block
-    assert "Authorize on GitHub" in auth_block
-    assert "adm-copilot-panel" in auth_block
-    assert "adm-device-auth-copy" in auth_block
+    assert "Authorize with OpenAI" in panel_block
+    assert "Authorize on GitHub" in panel_block
+    assert "adm-copilot-panel" in panel_block
+    assert "adm-device-auth-copy" in panel_block
+    assert "_renderDeviceAuthWaitPanel(status, providerKey, start, authUrl)" in auth_block
     assert "openWindow: () => {}" in auth_block
     assert "A new tab opened" not in auth_block
+    assert "openWindow: () => {}" in reconnect_block
+    assert "_renderDeviceAuthWaitPanel(status, 'chatgpt-subscription', start, authUrl)" in reconnect_block
 
 
 def test_loud_oauth_copy_and_removed_button_hooks_do_not_return():
