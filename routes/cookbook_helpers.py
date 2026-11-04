@@ -1422,6 +1422,50 @@ def _ssh_ps(host, script_path, port=None):
 WIN_SESSION_DIR = "$env:TEMP\\\\odysseus-sessions"
 
 
+def _diagnose_download_output(text: str) -> dict | None:
+    """Turn common failed model downloads into actionable UI feedback."""
+    if not text:
+        return None
+    tail = text[-6000:]
+    cases = (
+        (
+            r"No space left on device|\[Errno 28\]|disk full",
+            "The model download ran out of space.",
+            [{"label": "Choose a disk with more free space in settings", "op": "settings"}],
+        ),
+        (
+            r"403 Forbidden|access to model .*restricted|gated repo|GatedRepoError",
+            "This model repository is gated or access was denied.",
+            [
+                {"label": "Accept the model license on Hugging Face", "op": "manual"},
+                {"label": "Set an HF token with access to the model", "op": "settings"},
+            ],
+        ),
+        (
+            r"Entry not found|does not appear to have a file named|404.*\.gguf",
+            "The requested model file or quant doesn't exist in this repository.",
+            [{"label": "Check the file name and quantization tag", "op": "manual"}],
+        ),
+        (
+            r"ConnectionResetError|ConnectionError|connection reset by peer|hf_transfer.*error|timed out",
+            "The download hit a network or hf_transfer error.",
+            [
+                {"label": "Retry the download", "op": "retry"},
+                {"label": "Disable hf_transfer and retry", "op": "settings"},
+            ],
+        ),
+    )
+    for pattern, message, suggestions in cases:
+        if re.search(pattern, tail, flags=re.IGNORECASE):
+            return {"message": message, "suggestions": suggestions}
+    if "Traceback (most recent call last)" in tail:
+        return {
+            "message": "The download failed with a Python traceback.",
+            "suggestions": [{"label": "Inspect the output and retry", "op": "manual"}],
+        }
+    return None
+
+
 def _diagnose_serve_output(text: str) -> dict | None:
     """Server-side mirror of the Cookbook UI's common serve diagnoses.
 
