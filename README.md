@@ -111,6 +111,55 @@ Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled
 
 Deployment details are in the [setup guide](website/setup.md#security-notes).
 
+## How it works
+
+### Deployment and data flow
+
+```mermaid
+flowchart LR
+    Browser["Browser UI"] -->|HTTP| App["Odysseus / FastAPI"]
+    App -->|sessions and settings| Database["SQLite app.db"]
+    App -->|document and memory vectors| Chroma["ChromaDB"]
+    App -->|web search| Search["SearXNG"]
+    App -->|notifications| Notify["ntfy"]
+    App -->|inference| Models["Local or remote model endpoints"]
+```
+
+The browser talks to the FastAPI app, which serves the UI and API. The default Compose setup keeps app data in SQLite and uses separate services for vector search, web search, and notifications. Connections to those services and model endpoints are used when the corresponding feature is configured or invoked.
+
+### Chat and agent request
+
+```mermaid
+sequenceDiagram
+    participant User as Browser
+    participant API as Chat API
+    participant Agent as Agent runtime
+    participant Model as Model endpoint
+    participant Tool as Local or MCP tool
+    User->>API: Send message
+    API->>Agent: Load context and start turn
+    Agent->>Model: Send prompt and available tools
+    Model-->>Agent: Stream text or request a tool
+    opt Tool requested
+        Agent->>Agent: Check privileges and approval policy
+        opt Approval required
+            Agent-->>API: Approval request
+            API-->>User: Show approval prompt
+            User->>API: Approve or deny
+            API->>Agent: Resume with decision
+        end
+        opt Tool allowed
+            Agent->>Tool: Run tool
+            Tool-->>Agent: Return result
+            Agent->>Model: Continue with tool result
+        end
+    end
+    Agent-->>API: Response
+    API-->>User: Stream response
+```
+
+A chat turn loads the selected conversation context and calls its configured model. If the model requests a tool, Odysseus checks the user's permissions and may ask for approval before running it. The response streams back to the browser; conversation messages are persisted for later sessions.
+
 ## License
 
 AGPL-3.0-or-later -- see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
