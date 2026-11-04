@@ -7,7 +7,7 @@
  * The force-layout viz from agent-graph.js is the richer precedent; this
  * view favours zero-dependency rendering with clear labels.
  */
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 
 const GRAPH_API = '/api/memory/graph/export';
 

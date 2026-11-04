@@ -10,7 +10,6 @@ import httpx
 from core.database import SessionLocal
 from src.endpoint_resolver import normalize_base, build_headers, build_chat_url
 from routes.session_routes import _reject_raw_endpoint_url_for_non_admin
-from src.auth_helpers import effective_user
 from routes.compare_routes import _owned_endpoint_by_id, _owned_endpoint_by_url
 
 logger = logging.getLogger(__name__)
@@ -47,7 +46,9 @@ class MultiModelExecutor:
         model_ids: List[str],
         endpoint_urls: Optional[List[str]],
         headers: Dict[str, str],
-        config: Dict[str, Any]
+        config: Dict[str, Any],
+        owner: str,
+        endpoint_ids: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Execute prompt across all models concurrently.
@@ -64,10 +65,16 @@ class MultiModelExecutor:
         endpoints_resolved = []
         db = SessionLocal()
         try:
-            user = effective_user(headers.get('Authorization', ''))
+            user = owner
 
             for i, model_id in enumerate(model_ids):
-                if endpoint_urls and i < len(endpoint_urls):
+                if endpoint_ids and endpoint_ids[i]:
+                    ep = _owned_endpoint_by_id(db, endpoint_ids[i], user)
+                    if ep is None:
+                        raise ValueError("Model endpoint not found")
+                    session_endpoint_url = build_chat_url(normalize_base(ep.base_url))
+                    api_key = ep.api_key
+                elif endpoint_urls and i < len(endpoint_urls):
                     endpoint_url = endpoint_urls[i]
                     # Validate raw URL for non-admins
                     ep = _owned_endpoint_by_url(db, normalize_base(endpoint_url), user)
@@ -114,17 +121,16 @@ class MultiModelExecutor:
                 )
 
         # Run all executions concurrently
-        tasks = [
-            execute_with_semaphore(i, data)
-            for i, data in enumerate(endpoints_resolved)
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [execute_with_semaphore(i, data) if data.get('endpoint_url') else None
+                 for i, data in enumerate(endpoints_resolved)]
+        executed = await asyncio.gather(*(task for task in tasks if task is not None), return_exceptions=True)
+        executed_iter = iter(executed)
 
         # Build final result dict
         final_results = {}
         for i, data in enumerate(endpoints_resolved):
             model_id = data['model_id']
-            result = results[i]
+            result = next(executed_iter) if tasks[i] is not None else data
 
             if isinstance(result, Exception):
                 final_results[model_id] = {
@@ -133,7 +139,7 @@ class MultiModelExecutor:
                     'error': {'code': 'EXECUTION_ERROR', 'message': str(result)}
                 }
             else:
-                final_results[model_id] = result
+                final_results[model_id] = {**result, 'endpoint_url': data.get('endpoint_url', '')}
 
         return final_results
 
@@ -160,7 +166,7 @@ class MultiModelExecutor:
                 }
 
                 response = await client.post(
-                    f"{endpoint_url}/chat/completions",
+                    endpoint_url,
                     json=payload
                 )
                 response.raise_for_status()
@@ -192,7 +198,7 @@ class MultiModelExecutor:
                     'error': None
                 }
 
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, httpx.TimeoutException):
             return {
                 'success': False,
                 'messages': [],

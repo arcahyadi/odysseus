@@ -6,7 +6,7 @@
  * briefing (narrative + calendar/email/todos data when present) and the
  * recent digest history, with on-demand regeneration.
  */
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 
 const API_BASE = '/api/digest';
 

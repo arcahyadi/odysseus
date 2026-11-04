@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v1137-pr40-editor-precache';
+const CACHE_NAME = 'odysseus-v1138-public-integration-mm';
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -62,6 +62,7 @@ const PRECACHE = [
   '/static/css/documents-gallery-editor.css?v=20261021confirmalign1',
   '/static/css/email-calendar-notes-tasks.css?v=20261021confirmalign1',
   '/static/css/cookbook-research-memory-settings.css?v=20261021confirmalign1',
+  '/static/css/local-extensions.css?v=20261103integration1',
   '/static/app.js?v=20261021confirmalign1',
   '/static/js/storage.js',
   '/static/js/appConfig.js',
@@ -93,6 +94,12 @@ const PRECACHE = [
   '/static/js/cookbook.js',
   '/static/js/search-chat.js',
   '/static/js/compare/index.js?v=20260909mobilepaneaddscroll1',
+  '/static/js/multiModel/index.js',
+  '/static/js/multiModel/launcher.js',
+  '/static/js/multiModel/api.js',
+  '/static/js/multiModel/view.js',
+  '/static/js/multiModel/renderer.js',
+  '/static/js/multiModel/scrollSync.js',
   '/static/js/compare/vote.js?v=20260828resendcaldrag1',
   '/static/js/colorPicker.js?v=20260910eyedropper1',
   '/static/js/panels.js?v=20260909movepicklayer1',

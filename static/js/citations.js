@@ -8,7 +8,7 @@
  * the answer, both for persisted history (chatRenderer restore path) and for
  * live SSE bubbles (chat.js finish path).
  */
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 
 /**
  * Build the HTML string for a collapsible citations box. Items carry a

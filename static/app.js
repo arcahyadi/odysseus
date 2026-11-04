@@ -61,6 +61,7 @@ import { getSettings } from './js/appConfig.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260910sidebarbounce1';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
 import * as multiModelModule from './js/multiModel/index.js';
+import multiModelLauncher from './js/multiModel/launcher.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -69,6 +70,7 @@ window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
 window.multiModelModule = multiModelModule;
+window.multiModelLauncher = multiModelLauncher;
 
 function _isMobileChatInput() {
   return window.innerWidth <= 768;
@@ -180,6 +182,7 @@ function initRailHoverLabels() {
     'rail-documents': 'Docs',
     'rail-calendar': 'Calendar',
     'rail-compare': 'Compare',
+    'rail-multi-model': 'Multi-model',
     'rail-cookbook': 'Cookbook',
     'rail-research': 'Research',
     'rail-email': 'Email',
@@ -312,6 +315,7 @@ function initRailHoverLabels() {
     'rail-documents': 'Docs',
     'rail-calendar': 'Calendar',
     'rail-compare': 'Compare',
+    'rail-multi-model': 'Multi-model',
     'rail-cookbook': 'Cookbook',
     'rail-research': 'Research',
     'rail-email': 'Email',
@@ -1151,10 +1155,17 @@ function initializeEventListeners() {
     return false;
   }
 
+  function _closeMultiModelIfActive() {
+    if (!multiModelLauncher.isActive()) return false;
+    multiModelLauncher.close();
+    return true;
+  }
+
   // ── Tools section click handlers ──
   const toolCompareBtn = el('tool-compare-btn');
   if (toolCompareBtn) {
     toolCompareBtn.addEventListener('click', () => {
+      if (_closeMultiModelIfActive()) return;
       if (compareModule) {
         if (compareModule.isActive()) {
           // Already active — toggle off
@@ -1169,6 +1180,19 @@ function initializeEventListeners() {
         _startFreshChat();
         compareModule.toggleMode();
       }
+    });
+  }
+
+  const toolMultiModelBtn = el('tool-multi-model-btn');
+  if (toolMultiModelBtn) {
+    toolMultiModelBtn.addEventListener('click', () => {
+      if (multiModelLauncher.isActive()) {
+        multiModelLauncher.close();
+        return;
+      }
+      if (_closeCompareIfActive()) return;
+      _startFreshChat();
+      multiModelLauncher.open();
     });
   }
 
@@ -3976,6 +4000,7 @@ function startOdysseusApp() {
   const _railToolMap = {
     'rail-calendar':  'tool-calendar-btn',
     'rail-compare':   'tool-compare-btn',
+    'rail-multi-model': 'tool-multi-model-btn',
     'rail-cookbook':   'tool-cookbook-btn',
     'rail-research':  'tool-research-btn',
     'rail-gallery':   'tool-gallery-btn',

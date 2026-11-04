@@ -3,7 +3,7 @@
  * pause, cancel. Embeds the phase-1 PlanTracker progress widget.
  * Requirements: 5.x UI (doc-to-action host)
  */
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 import { PlanTracker } from './plan-tracker.js';
 import { openDocStepBuilder } from './docStepBuilder.js';
 

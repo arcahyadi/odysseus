@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from core.database import SessionLocal, MultiModelThread, MultiModelMessage, utcnow_naive
 from core.session_manager import SessionManager
-from src.auth_helpers import effective_user, get_current_user
+from src.auth_helpers import effective_user
 from routes.session_routes import _reject_raw_endpoint_url_for_non_admin, _verify_session_owner
 from src.endpoint_resolver import normalize_base, build_headers, build_chat_url
 from core.multi_model_manager import MultiModelThreadManager
@@ -83,6 +83,7 @@ def setup_multi_model_routes(session_manager: SessionManager):
         prompt: str = Form(...),
         model_ids: str = Form(...),  # JSON list
         endpoint_urls: str = Form(None),  # JSON list, optional
+        endpoint_ids: str = Form(None),
         session_id: str = Form(None),
         use_web: str = Form("false"),
         use_research: str = Form("false"),
@@ -108,6 +109,10 @@ def setup_multi_model_routes(session_manager: SessionManager):
             model_ids_list = json.loads(model_ids)
             if not isinstance(model_ids_list, list) or len(model_ids_list) < 2:
                 raise HTTPException(400, "model_ids must be a JSON array with at least 2 models")
+            if not all(isinstance(mid, str) and mid.strip() for mid in model_ids_list):
+                raise HTTPException(400, "model_ids must contain nonempty strings")
+            if len(set(model_ids_list)) != len(model_ids_list):
+                raise HTTPException(400, "model_ids must be unique")
         except json.JSONDecodeError:
             raise HTTPException(400, "model_ids must be a valid JSON array")
 
@@ -116,25 +121,25 @@ def setup_multi_model_routes(session_manager: SessionManager):
         if endpoint_urls:
             try:
                 endpoint_urls_list = json.loads(endpoint_urls)
-                if len(endpoint_urls_list) != len(model_ids_list):
+                if not isinstance(endpoint_urls_list, list) or len(endpoint_urls_list) != len(model_ids_list):
                     raise HTTPException(400, "endpoint_urls must match model_ids count")
             except json.JSONDecodeError:
                 raise HTTPException(400, "endpoint_urls must be a valid JSON array")
 
+        endpoint_ids_list = None
+        if endpoint_ids:
+            try:
+                endpoint_ids_list = json.loads(endpoint_ids)
+                if not isinstance(endpoint_ids_list, list) or len(endpoint_ids_list) != len(model_ids_list):
+                    raise HTTPException(400, "endpoint_ids must match model_ids count")
+                if not all(isinstance(eid, str) and eid.strip() for eid in endpoint_ids_list):
+                    raise HTTPException(400, "endpoint_ids must contain nonempty strings")
+            except json.JSONDecodeError:
+                raise HTTPException(400, "endpoint_ids must be a valid JSON array")
+
         # Validate session_id if provided
         if session_id:
             _verify_session_owner(request, session_id)
-
-        # Create thread
-        try:
-            thread = thread_manager.create_thread(
-                owner=user,
-                model_ids=model_ids_list,
-                endpoint_urls=endpoint_urls_list,
-                session_id=session_id
-            )
-        except ValueError as e:
-            raise HTTPException(400, str(e))
 
         # Build config with timeout
         config = {
@@ -149,12 +154,28 @@ def setup_multi_model_routes(session_manager: SessionManager):
                 prompt=prompt,
                 model_ids=model_ids_list,
                 endpoint_urls=endpoint_urls_list,
-                headers={'Authorization': f"Bearer {get_current_user(request) or ''}"},
-                config=config
+                headers={},
+                config=config,
+                owner=user,
+                endpoint_ids=endpoint_ids_list,
             )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Multi-model execution failed: {e}")
             raise HTTPException(500, f"Execution failed: {str(e)}")
+
+        try:
+            thread = thread_manager.create_thread(
+                owner=user,
+                model_ids=model_ids_list,
+                endpoint_urls=endpoint_urls_list,
+                session_id=session_id
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
         # Determine status based on results
         all_success = all(r['success'] for r in results.values())

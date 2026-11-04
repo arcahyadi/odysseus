@@ -7,6 +7,9 @@
 import { createMultiModelThread, getMultiModelThread, listMultiModelThreads, deleteMultiModelThread } from './api.js';
 import { createScrollSyncManager } from './scrollSync.js';
 import { renderMultiModelContainer, updatePaneStatus, addMessageToPane, renderFailedModel, syncPanesToMessageIndex } from './renderer.js';
+import uiModule from '../ui.js?v=20260916largetoolscroll1';
+
+const escapeHtml = uiModule.esc;
 
 /**
  * Multi-model thread view controller.
@@ -26,7 +29,7 @@ class MultiModelView {
    * @param {string} threadId - The thread ID to load
    * @returns {Promise<void>}
    */
-  async loadThread(threadId) {
+  async loadThread(threadId, opts = {}) {
     try {
       this.activeThread = await getMultiModelThread(threadId);
       this.modelIds = this.activeThread.model_ids;
@@ -56,7 +59,7 @@ class MultiModelView {
       this._setupTabSwitching(container);
 
       // Add close button functionality
-      this._setupCloseButton(container, threadId);
+      this._setupCloseButton(container, opts.onClose);
 
       this.isInitialized = true;
     } catch (error) {
@@ -69,13 +72,17 @@ class MultiModelView {
    * Create a new multi-model thread.
    * @param {string[]} modelIds - List of model IDs to execute
    * @param {string} prompt - User prompt
+   * @param {string[]} [endpointUrls] - Parallel endpoint URLs (required when the
+   *   same model id is served by more than one endpoint)
    * @returns {Promise<{threadId: string, status: string}>}
    */
-  async createThread(modelIds, prompt) {
+  async createThread(modelIds, prompt, endpointUrls, endpointIds) {
     try {
       const result = await createMultiModelThread({
         modelIds,
         prompt,
+        endpointUrls,
+        endpointIds,
       });
       return result;
     } catch (error) {
@@ -162,22 +169,17 @@ class MultiModelView {
   /**
    * Setup close button functionality.
    * @param {HTMLElement} container - Main container
-   * @param {string} threadId - Thread ID
+   * @param {Function} [onClose] - Called instead of reloading the shell
    */
-  _setupCloseButton(container, threadId) {
+  _setupCloseButton(container, onClose) {
     const closeBtn = container.querySelector('.multi-model-close-btn');
-    if (closeBtn) {
-      closeBtn.addEventListener('click', async () => {
-        try {
-          await this.deleteThread(threadId);
-          // Navigate back to session list
-          window.location.href = '/sessions';
-        } catch (error) {
-          console.error('Failed to delete thread:', error);
-          alert('Failed to close thread: ' + error.message);
-        }
-      });
-    }
+    if (!closeBtn) return;
+    closeBtn.addEventListener('click', () => {
+      // Closing is non-destructive: the thread stays in history. Return to the
+      // caller's view, or fall back to reloading the app shell.
+      if (typeof onClose === 'function') onClose();
+      else window.location.href = window.location.pathname;
+    });
   }
 
   /**
