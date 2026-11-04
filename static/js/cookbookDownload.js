@@ -4,7 +4,7 @@
 // panel rendering, command building
 // ============================================
 
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis.js';
 
 // Shared state/functions injected by init()
@@ -15,6 +15,7 @@ let _getPlatform;
 let _serverByVal;
 let _isWindows;
 let _buildEnvPrefix;
+let _psQuote;
 let _buildServeCmd;
 let _detectBackend;
 let _detectToolParser;
@@ -31,6 +32,13 @@ let _saveTasks;
 
 // Storage keys
 const SERVE_STATE_KEY = 'cookbook-serve-state';
+const _downloadStartsInFlight = new Set();
+
+function _fetchDownloadControlWithTimeout(input, init = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
 
 // ── Panel field helpers ──
 
@@ -278,7 +286,7 @@ export function _wirePanelEvents(panel, model, backend) {
       const outputText = panel.querySelector('.cookbook-output-pre')?.textContent || '';
       const tmuxMatch = outputText.match(/Started tmux session: (cookbook-[a-f0-9]+)/);
       if (tmuxMatch) {
-        fetch('/api/shell/exec', {
+        _fetchDownloadControlWithTimeout('/api/shell/exec', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
@@ -484,8 +492,12 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
   // they disagree on the active host. The servers LIST is consistent, so we look
   // up the matching server to get its env / path / platform / port.
   let host;
+  let selectedServer = null;
+  let selectedServerKey = '';
   if (hostOverride !== undefined) {
     host = hostOverride || '';
+    selectedServer = host ? (_serverByVal?.(host) || (_envState.servers || []).find(s => s.host === host) || null) : null;
+    selectedServerKey = selectedServer ? (typeof window.cookbookModule?._serverKey === 'function' ? window.cookbookModule._serverKey(selectedServer) : '') : '';
   } else {
     // No explicit host passed: resolve from the visible server dropdown rather
     // than _envState.remoteHost (unreliable — multiple state copies disagree).
@@ -496,15 +508,21 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
     const _dsrv = (_ssv && _ssv !== 'local') ? (_serverByVal?.(_ssv) || _envState.servers[parseInt(_ssv)]) : null;
     if (_dsrv) {
       host = _dsrv.host;
+      selectedServer = _dsrv;
+      selectedServerKey = _ssv || '';
     } else if (ssEl && ssEl.value === 'local') {
       host = '';
     } else {
       host = _envState.remoteHost || '';
+      selectedServer = host ? ((_envState.servers || []).find(s => s.host === host) || _serverByVal?.(host) || null) : null;
     }
   }
-  const srv = _serverByVal?.(_envState.remoteServerKey || host) || {};
-  const env = host ? (srv.env || 'none') : (_envState.env || 'none');
+  const srv = selectedServer || _serverByVal?.(host) || {};
+  let env = host ? (srv.env || 'none') : (_envState.env || 'none');
   const envPath = host ? (srv.envPath || '') : (_envState.envPath || '');
+  if ((!env || env === 'none') && envPath) {
+    env = /(?:^|\/)(?:\.?venv|env)(?:\/|$)|\/bin\/activate$/i.test(envPath) ? 'venv' : env;
+  }
   const platform = host ? (srv.platform || '') : (_envState.platform || '');
   const isWin = host ? (platform === 'windows') : _isWindows();
 
@@ -515,14 +533,20 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
   // resumes cached partials more reliably.
   if ((model.required_gb || 0) >= 10 || backend === 'llamacpp') payload.disable_hf_transfer = true;
   if (_envState.hfToken) payload.hf_token = _envState.hfToken;
-  if (host) { payload.remote_host = host; const _sp = _getPort(host); if (_sp) payload.ssh_port = _sp; }
+  if (host) {
+    payload.remote_host = host;
+    if (selectedServerKey && selectedServerKey !== 'local') payload.remote_server_key = selectedServerKey;
+    if (srv.name) payload.remote_server_name = srv.name;
+    const _sp = srv.port || _getPort(host);
+    if (_sp) payload.ssh_port = _sp;
+  }
   if (platform) payload.platform = platform;
   // If this server has a directory flagged as the download target, send it so
   // the backend downloads into <dir>/<model> instead of the default HF cache.
   if (srv.downloadDir) payload.local_dir = srv.downloadDir;
   if (isWin) {
     if (env === 'venv' && envPath) {
-      payload.env_prefix = '& ' + (envPath.endsWith('\\Scripts\\Activate.ps1') ? envPath : envPath + '\\Scripts\\Activate.ps1');
+      payload.env_prefix = '& ' + _psQuote(envPath.endsWith('\\Scripts\\Activate.ps1') ? envPath : envPath + '\\Scripts\\Activate.ps1');
     } else if (env === 'conda' && envPath) {
       payload.env_prefix = 'conda activate ' + envPath;
     }
@@ -562,12 +586,13 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
   if (zombieCandidate) {
     try {
       const _zh = zombieCandidate.remoteHost || '';
-      const _zPort = (_serverByVal?.(_envState.remoteServerKey || _zh)
+      const _zPort = (_serverByVal?.(zombieCandidate.remoteServerKey || zombieCandidate.payload?.remote_server_key || _zh)
         || (_envState.servers || []).find(s => s.host === _zh) || {}).port;
       const _sshPf = _zh ? `ssh ${_zPort && _zPort !== '22' ? `-p ${_zPort} ` : ''}${_zh} '` : '';
       const _sshSf = _zh ? `'` : '';
-      const _probeCmd = `${_sshPf}tmux has-session -t ${zombieCandidate.sessionId} 2>/dev/null${_sshSf}`;
-      const _r = await fetch('/api/shell/exec', {
+      const _probePrefix = _zh ? 'PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ' : '';
+      const _probeCmd = `${_sshPf}${_probePrefix}tmux has-session -t ${zombieCandidate.sessionId} 2>/dev/null${_sshSf}`;
+      const _r = await _fetchDownloadControlWithTimeout('/api/shell/exec', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: _probeCmd, timeout: 5 }),
@@ -593,15 +618,24 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
   if (activeOnHost) {
     const queueId = `queue-${Date.now().toString(36)}`;
     const allTasks = _loadTasks();
-    allTasks.push({ id: queueId, sessionId: queueId, name: taskName, type: 'download', status: 'queued', output: '', ts: Date.now(), payload, remoteHost: host });
+    allTasks.push({ id: queueId, sessionId: queueId, name: taskName, type: 'download', status: 'queued', output: '', ts: Date.now(), payload, remoteHost: host, remoteServerKey: payload.remote_server_key || '', remoteServerName: payload.remote_server_name || '', sshPort: payload.ssh_port || '', platform: payload.platform || '' });
     _saveTasks(allTasks);
     _renderRunningTab();
     uiModule.showToast(`Queued ${shortName} — waiting for current download`);
     return;
   }
 
+  // The task list is persisted only after the POST returns. Guard the gap so
+  // rapid clicks (or two touch events) cannot start duplicate downloads before
+  // either request has registered its task.
+  const startKey = `${targetHost}\n${payload.repo_id}`;
+  if (_downloadStartsInFlight.has(startKey)) {
+    uiModule.showToast(`${shortName} download is already starting`);
+    return;
+  }
+  _downloadStartsInFlight.add(startKey);
   try {
-    const res = await fetch('/api/model/download', {
+    const res = await _fetchDownloadControlWithTimeout('/api/model/download', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -622,6 +656,8 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
     uiModule.showToast(`Downloading ${taskName}...`);
   } catch (e) {
     uiModule.showToast('Download failed: ' + e.message, 9000);
+  } finally {
+    _downloadStartsInFlight.delete(startKey);
   }
 }
 
@@ -635,6 +671,7 @@ export function initDownload(shared) {
   _serverByVal = shared._serverByVal;
   _isWindows = shared._isWindows;
   _buildEnvPrefix = shared._buildEnvPrefix;
+  _psQuote = shared._psQuote;
   _buildServeCmd = shared._buildServeCmd;
   _detectBackend = shared._detectBackend;
   _detectToolParser = shared._detectToolParser;

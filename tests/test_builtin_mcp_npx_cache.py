@@ -36,6 +36,66 @@ def test_npx_package_from_args_prefers_package_after_y_flag(monkeypatch):
     ) == "@playwright/mcp@latest"
 
 
+def test_browser_mcp_cache_requirement_is_opt_in(monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE", raising=False)
+    builtin_mcp = _load_builtin_mcp(monkeypatch)
+
+    assert builtin_mcp.BROWSER_MCP_REQUIRE_CACHE is False
+
+
+def test_browser_mcp_cache_requirement_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE", "1")
+    builtin_mcp = _load_builtin_mcp(monkeypatch)
+
+    assert builtin_mcp.BROWSER_MCP_REQUIRE_CACHE is True
+
+
+def test_browser_mcp_args_use_configured_browser_executable(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+    builtin_mcp = _load_builtin_mcp(monkeypatch)
+
+    args = builtin_mcp._browser_mcp_args(["-y", "@playwright/mcp@latest", "--headless"])
+
+    assert "--executable-path" in args
+    assert "/usr/bin/chromium" in args
+    assert "--isolated" in args
+    assert "--no-sandbox" in args
+
+
+def test_browser_mcp_args_can_use_persistent_profile_when_requested(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+    monkeypatch.setenv("ODYSSEUS_BROWSER_ISOLATED", "0")
+    builtin_mcp = _load_builtin_mcp(monkeypatch)
+
+    args = builtin_mcp._browser_mcp_args(["-y", "@playwright/mcp@latest", "--headless"])
+
+    assert "--executable-path" in args
+    assert "--isolated" not in args
+
+
+def test_browser_mcp_args_respect_explicit_user_data_dir(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+    builtin_mcp = _load_builtin_mcp(monkeypatch)
+
+    args = builtin_mcp._browser_mcp_args([
+        "-y", "@playwright/mcp@latest", "--headless", "--user-data-dir", "/tmp/profile",
+    ])
+
+    assert "--user-data-dir" in args
+    assert "--isolated" not in args
+
+
+def test_browser_mcp_args_can_keep_sandbox(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+    monkeypatch.setenv("ODYSSEUS_BROWSER_NO_SANDBOX", "0")
+    builtin_mcp = _load_builtin_mcp(monkeypatch)
+
+    args = builtin_mcp._browser_mcp_args(["-y", "@playwright/mcp@latest", "--headless"])
+
+    assert "--executable-path" in args
+    assert "--no-sandbox" not in args
+
+
 def test_npx_cache_check_detects_scoped_package_in_npx_cache(monkeypatch, tmp_path):
     builtin_mcp = _load_builtin_mcp(monkeypatch)
     package_json = (

@@ -8,6 +8,7 @@ calling do_manage_calendar with an rrule stores a single event carrying that RRU
 import json
 import sys
 import uuid
+from datetime import datetime
 
 import pytest
 
@@ -17,7 +18,7 @@ from tests.helpers.sqlite_db import make_temp_sqlite
 clear_fake_database_modules()
 
 import core.database as cdb
-from core.database import CalendarEvent
+from core.database import CalendarCal, CalendarEvent, Note
 
 _TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
 
@@ -60,6 +61,84 @@ async def test_create_event_with_rrule_persists_recurrence():
         db.close()
 
 
+def test_event_dict_exposes_note_backed_calendar_reminder():
+    from routes.calendar_routes import _event_to_dict
+
+    owner = "tester-" + uuid.uuid4().hex[:6]
+    db = _TS()
+    try:
+        cal = CalendarCal(id="cal-" + uuid.uuid4().hex[:6], owner=owner, name="Personal")
+        ev = CalendarEvent(
+            uid="event-" + uuid.uuid4().hex[:6],
+            calendar_id=cal.id,
+            summary="Take out trash",
+            dtstart=datetime(2026, 8, 31, 8, 0),
+            dtend=datetime(2026, 8, 31, 8, 30),
+            all_day=False,
+        )
+        note = Note(
+            id="note-" + uuid.uuid4().hex[:6],
+            owner=owner,
+            title="Calendar reminder: Take out trash",
+            items=json.dumps([{"text": "Take out trash — Mon Aug 31 08:00", "done": False}]),
+            note_type="todo",
+            label="calendar",
+            due_date="2026-08-31T07:45:00Z",
+            source="calendar",
+            archived=False,
+        )
+        db.add_all([cal, ev, note])
+        db.commit()
+
+        out = _event_to_dict(ev, db=db, owner=owner)
+
+        assert out["has_reminder"] is True
+        assert out["reminder_note_id"] == note.id
+        assert out["reminder_due_date"] == "2026-08-31T07:45:00Z"
+        assert out["reminder_minutes"] == 15
+    finally:
+        db.close()
+
+
+def test_delete_calendar_reminders_removes_duplicate_legacy_rows():
+    from routes.calendar_routes import _delete_calendar_reminders_for_event
+
+    owner = "tester-" + uuid.uuid4().hex[:6]
+    db = _TS()
+    try:
+        cal = CalendarCal(id="cal-" + uuid.uuid4().hex[:6], owner=owner, name="Personal")
+        ev = CalendarEvent(
+            uid="event-" + uuid.uuid4().hex[:6],
+            calendar_id=cal.id,
+            summary="Pickup",
+            dtstart=datetime(2026, 8, 31, 8, 0),
+            dtend=datetime(2026, 8, 31, 8, 30),
+            all_day=False,
+        )
+        db.add(cal)
+        db.add(ev)
+        for title in ("Reminder: Pickup", "Calendar reminder: Pickup"):
+            db.add(Note(
+                id="note-" + uuid.uuid4().hex[:6],
+                owner=owner,
+                title=title,
+                items=json.dumps([{"text": "Pickup", "done": False}]),
+                note_type="todo",
+                label="calendar",
+                due_date="2026-08-31T07:45:00Z",
+                source="calendar",
+                archived=False,
+            ))
+        db.commit()
+
+        assert _delete_calendar_reminders_for_event(db, owner, ev) == 2
+        db.commit()
+        remaining = db.query(Note).filter(Note.owner == owner, Note.source == "calendar").all()
+        assert remaining == []
+    finally:
+        db.close()
+
+
 async def test_create_event_without_rrule_is_single():
     from src.tool_implementations import do_manage_calendar
 
@@ -76,3 +155,84 @@ async def test_create_event_without_rrule_is_single():
         assert ev is not None and (ev.rrule or "") == ""
     finally:
         db.close()
+
+
+async def test_update_event_can_clear_rrule():
+    from src.tool_implementations import do_manage_calendar
+
+    owner = "tester-" + uuid.uuid4().hex[:6]
+    created = await do_manage_calendar(json.dumps({
+        "action": "create_event",
+        "summary": "Repeating standup",
+        "dtstart": "2026-07-01T14:00:00Z",
+        "rrule": "FREQ=WEEKLY;BYDAY=WE",
+    }), owner=owner)
+    assert created.get("exit_code", 0) == 0, created
+
+    updated = await do_manage_calendar(json.dumps({
+        "action": "update_event",
+        "uid": created["uid"],
+        "rrule": "",
+    }), owner=owner)
+    assert updated.get("exit_code", 0) == 0, updated
+
+    db = _TS()
+    try:
+        ev = db.query(CalendarEvent).filter(CalendarEvent.uid == created["uid"]).first()
+        assert ev is not None
+        assert (ev.rrule or "") == ""
+    finally:
+        db.close()
+
+
+async def test_update_event_can_clear_rrule_with_repeat_none_alias():
+    from src.tool_implementations import do_manage_calendar
+
+    owner = "tester-" + uuid.uuid4().hex[:6]
+    created = await do_manage_calendar(json.dumps({
+        "action": "create_event",
+        "summary": "Repeating review",
+        "dtstart": "2026-07-01T15:00:00Z",
+        "rrule": "FREQ=WEEKLY;BYDAY=WE",
+    }), owner=owner)
+    assert created.get("exit_code", 0) == 0, created
+
+    updated = await do_manage_calendar(json.dumps({
+        "action": "update_event",
+        "uid": created["uid"],
+        "repeat": "none",
+    }), owner=owner)
+    assert updated.get("exit_code", 0) == 0, updated
+
+    db = _TS()
+    try:
+        ev = db.query(CalendarEvent).filter(CalendarEvent.uid == created["uid"]).first()
+        assert ev is not None
+        assert (ev.rrule or "") == ""
+    finally:
+        db.close()
+
+
+async def test_list_events_exposes_rrule_for_repeating_events():
+    from src.tool_implementations import do_manage_calendar
+
+    owner = "tester-" + uuid.uuid4().hex[:6]
+    rrule = "FREQ=WEEKLY;BYDAY=WE"
+    created = await do_manage_calendar(json.dumps({
+        "action": "create_event",
+        "summary": "Weekly sync",
+        "dtstart": "2026-07-01T14:00:00Z",
+        "rrule": rrule,
+    }), owner=owner)
+    assert created.get("exit_code", 0) == 0, created
+
+    listed = await do_manage_calendar(json.dumps({
+        "action": "list_events",
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-07-02T00:00:00Z",
+    }), owner=owner)
+    assert listed.get("exit_code", 0) == 0, listed
+    matches = [ev for ev in listed["events"] if ev["uid"] == created["uid"]]
+    assert matches
+    assert matches[0]["rrule"] == rrule
+    assert f"repeats({rrule})" in listed["response"]

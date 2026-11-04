@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Expo / Metro
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Logs
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# Native build output (if you ever run prebuild / eas build)
+android/
+ios/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Local env overrides
+.env
+.env.*.local

@@ -8,7 +8,7 @@
 // Mobile is excluded — tours position halos by rect math that doesn't fit
 // the bottom-sheet layout cleanly.
 
-import { handleSlashCommand } from './slashCommands.js';
+import { handleSlashCommand } from './slashCommands.js?v=20260921chatgptusage1';
 
 // Modal id → slash command to fire (without the leading "/"). Add to this
 // map when a new feature picks up a `tour-*` command.
@@ -20,6 +20,8 @@ const TOUR_FOR_MODAL = {
   'theme-modal':            'tour-theme',
   'settings-modal':         'tour-settings',
   'gallery-modal':          'tour-gallery',
+  'memory-modal':           'tour-brain',
+  'notes-pane':             'tour-notes',
 };
 
 const SEEN_KEY = (tour) => `odysseus-tour-autoplay-seen-${tour}`;

@@ -107,11 +107,13 @@ async def test_scheduled_task_honors_global_disabled_tools(monkeypatch):
             return {"web_fetch"}
 
     monkeypatch.setattr("src.tool_index.get_tool_index", lambda: _FakeIndex())
+    monkeypatch.setattr("src.endpoint_resolver.resolve_owner_registered_endpoint", lambda *a, **k: object())
 
     captured = {}
 
     async def _capture(endpoint_url, model, task, session_id, *,
-                       system_prompt=None, disabled_tools=None, relevant_tools=None):
+                       system_prompt=None, disabled_tools=None, relevant_tools=None,
+                       datetime_context_msg=None):
         captured["disabled_tools"] = disabled_tools
         captured["relevant_tools"] = relevant_tools
         return "done"

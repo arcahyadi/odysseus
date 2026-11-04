@@ -24,12 +24,68 @@ itself wasn't confident about.
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
+from contextvars import ContextVar
+from copy import deepcopy
+from functools import wraps
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+_TAKEOVER: ContextVar[dict | None] = ContextVar('teacher_takeover_request', default=None)
+
+
+def request_teacher_takeover(**parameters):
+    """Record a finished student's handoff; execution waits for its gate to close."""
+    from src.agent_runtime.journal import current_journal
+    request = _TAKEOVER.get()
+    if request is not None:
+        journal = current_journal()
+        request.update(parameters, parent_run_id=journal.run_id if journal is not None else None)
+
+
+def with_teacher_takeover(func):
+    """Orchestrate gated invocations and own the single outer stream terminator."""
+    @wraps(func)
+    async def wrapped(*args, **kwargs):
+        request = {}
+        token = _TAKEOVER.set(request)
+        done = False
+        failed = False
+        try:
+            async with aclosing(func(*args, **kwargs)) as stream:
+                async for chunk in stream:
+                    if chunk.strip() == 'data: [DONE]':
+                        done = True
+                        continue
+                    failed |= chunk.startswith('event: error')
+                    yield chunk
+            # The parent generator and gate have both unwound. Child control
+            # events now belong only to the child, never to the parent gate.
+            if request and not failed:
+                try:
+                    async with aclosing(run_teacher_inline(**request)) as stream:
+                        async for chunk in stream:
+                            if chunk.strip() == 'data: [DONE]':
+                                continue
+                            failed |= chunk.startswith('event: error')
+                            yield chunk
+                except Exception as exc:
+                    logger.warning('teacher escalation hook failed: %s', exc, exc_info=True)
+                    if not failed:
+                        import json
+                        yield 'data: ' + json.dumps({'type': 'escalation_failed', 'reason': str(exc),
+                                                    'teacher': True}) + '\n\n'
+            if done and not failed:
+                yield 'data: [DONE]\n\n'
+        finally:
+            _TAKEOVER.reset(token)
+
+    return wrapped
 
 
 # Hosts considered SOTA / paid APIs — if the student's endpoint URL
@@ -233,9 +289,10 @@ async def _call_teacher(teacher_model_spec: str, prompt: str,
                         owner: Optional[str] = None) -> Optional[str]:
     """Call the configured teacher endpoint with the escalation prompt."""
     from src.llm_core import llm_call_async
-    from src.ai_interaction import _resolve_model, _TEACHER_SYSTEM_PROMPT
+    from src.ai_interaction import _resolve_model
+    from src.agent_tools.model_interaction_tools import _TEACHER_SYSTEM_PROMPT
     try:
-        url, model, headers = _resolve_model(teacher_model_spec, owner=owner)
+        url, model, headers = await asyncio.to_thread(_resolve_model, teacher_model_spec, owner=owner)
     except Exception as e:
         logger.warning(f"teacher endpoint not resolvable ({teacher_model_spec!r}): {e}")
         return None
@@ -366,6 +423,71 @@ def _format_trace(tool_results: List[Dict[str, Any]], agent_reply: str) -> str:
     return f"<<<UNTRUSTED_TRACE>>>\n{trace}\n<<<END_UNTRUSTED_TRACE>>>"
 
 
+_EVALUATE_TURN_LLM_PROMPT = """\
+You are an independent auditor evaluating a student AI agent's turn.
+Given the original request, the trace of tool calls and results, and the agent's final reply, determine whether the agent failed, gave up because it lacks the tools/capability/information, or encountered an error.
+
+Respond with exactly one of these two words:
+- "failure" if the agent failed, gave up, encountered an error, or asked the user for clarification/missing tools.
+- "ok" if the agent successfully completed the task or is making correct progress.
+
+ORIGINAL USER REQUEST:
+{user_request}
+
+AGENT TRACE:
+{trace}
+
+AGENT REPLY:
+{agent_reply}
+
+EVALUATION:"""
+
+
+async def evaluate_turn_llm(
+    user_request: str,
+    tool_results: List[Dict[str, Any]],
+    agent_reply: str,
+    student_endpoint_url: str,
+    owner: Optional[str] = None,
+) -> Tuple[str, Optional[str]]:
+    """Use a fast LLM (resolved via utility endpoint) to evaluate a turn."""
+    from src.endpoint_resolver import resolve_endpoint
+    from src.llm_core import llm_call_async
+
+    # Resolve utility model (falls back to default model, then student_endpoint_url)
+    url, model, headers = resolve_endpoint(
+        "utility",
+        fallback_url=student_endpoint_url,
+        owner=owner
+    )
+    if not url or not model:
+        return ("ok", None)
+
+    trace_str = _format_trace(tool_results, agent_reply)
+    prompt = _EVALUATE_TURN_LLM_PROMPT.format(
+        user_request=user_request or "(no user request)",
+        trace=trace_str,
+        agent_reply=agent_reply or "(no agent reply)",
+    )
+
+    try:
+        response = await llm_call_async(
+            url, model,
+            [{"role": "user", "content": prompt}],
+            headers=headers,
+            timeout=20,
+        )
+        if response:
+            cleaned_response = response.strip().strip("'\"").lower()
+            if cleaned_response == "failure":
+                return ("failure", f"LLM evaluation flagged failure: {response.strip()}")
+    except Exception as e:
+        logger.warning(f"Tier 2 LLM self-eval failed: {e}")
+
+    return ("ok", None)
+
+
+
 async def escalate_and_learn(
     user_request: str,
     tool_results: List[Dict[str, Any]],
@@ -373,56 +495,11 @@ async def escalate_and_learn(
     failure_reason: str,
     owner: Optional[str] = None,
 ) -> Optional[str]:
-    """Call the teacher, evaluate ITS attempt, save a skill on success.
-
-    Returns the saved skill name (or None if the teacher couldn't
-    write one). Logs but doesn't raise — escalation is best-effort.
-    """
-    from src.settings import get_setting
-    teacher_spec = (get_setting("teacher_model", "") or "").strip()
-    if not teacher_spec:
-        return None
-
-    prompt = _TEACHER_ESCALATION_PROMPT.format(
-        user_request=user_request or "(no user request captured)",
-        failure_reason=failure_reason or "(failure reason not captured)",
-        untrusted_trace_guard=_UNTRUSTED_TRACE_GUARD,
-        trace=_format_trace(tool_results, agent_reply),
+    """Retire legacy background learning when no approval UI is available."""
+    logger.info(
+        "background teacher learning skipped: generated skills require an "
+        "interactive exact approval"
     )
-    response = await _call_teacher(teacher_spec, prompt, owner=owner)
-    if not response:
-        return None
-
-    skill = _extract_skill_json(response)
-    if not skill:
-        # Teacher chose not to write a skill — see prompt contract.
-        logger.info("teacher declined to write a skill for this failure")
-        return None
-
-    # Same regex eval applied to the teacher's response — if the
-    # teacher itself sounded uncertain ("I don't have a tool"), drop
-    # the skill rather than persist a sketchy one.
-    status, reason = evaluate_turn_regex([], response)
-    if status == "failure":
-        logger.info(f"teacher response failed eval, skipping skill save: {reason}")
-        return None
-
-    # Tag the skill with the escalation source for auditability.
-    skill.setdefault("source", "teacher-escalation")
-    skill.setdefault("teacher_model", teacher_spec)
-    # Force action=add regardless of what the teacher wrote.
-    skill["action"] = "add"
-
-    import json
-    from src.tool_implementations import do_manage_skills
-    try:
-        result = await do_manage_skills(json.dumps(skill), owner=owner)
-        if isinstance(result, dict) and not result.get("error"):
-            logger.info(f"teacher wrote skill: {skill.get('name')}")
-            return skill.get("name")
-        logger.warning(f"skill save failed: {result}")
-    except Exception as e:
-        logger.warning(f"skill save raised: {e}")
     return None
 
 
@@ -459,13 +536,32 @@ def maybe_escalate(
 
     # Gate 3: regex eval — only escalate on detected failure.
     status, reason = evaluate_turn_regex(tool_results, agent_reply)
-    if status != "failure":
+    if status == "failure":
+        # Fire async — don't block the user's chat.
+        return asyncio.create_task(
+            escalate_and_learn(user_request, tool_results, agent_reply, reason or "", owner),
+            name="teacher_escalation",
+        )
+
+    # Gate 4: Tier 2 LLM self-evaluation requires teacher_tier2_enabled
+    if not get_setting("teacher_tier2_enabled", False):
         return None
 
-    # Fire async — don't block the user's chat.
+    # Tier 2: LLM self-evaluation background task
+    async def evaluate_and_maybe_escalate():
+        llm_status, llm_reason = await evaluate_turn_llm(
+            user_request=user_request,
+            tool_results=tool_results,
+            agent_reply=agent_reply,
+            student_endpoint_url=student_endpoint_url,
+            owner=owner,
+        )
+        if llm_status == "failure":
+            await escalate_and_learn(user_request, tool_results, agent_reply, llm_reason or "", owner)
+
     return asyncio.create_task(
-        escalate_and_learn(user_request, tool_results, agent_reply, reason or "", owner),
-        name="teacher_escalation",
+        evaluate_and_maybe_escalate(),
+        name="teacher_escalation_tier2",
     )
 
 
@@ -478,6 +574,19 @@ async def run_teacher_inline(
     student_tool_events: List[Dict[str, Any]],
     student_reply: str,
     owner: Optional[str] = None,
+    session_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    disabled_tools: Optional[set[str]] = None,
+    tool_policy: Any = None,
+    active_document: Any = None,
+    active_email: Optional[Dict[str, str]] = None,
+    turn_contract=None,
+    parent_run_id: Optional[str] = None,
+    external_untrusted_context_seen: bool = False,
+    client_runtime_context: Optional[Dict[str, Any]] = None,
+    plan_mode: bool = False,
+    request_authority=None,
+    delegated_credential: bool = False,
 ):
     """Async generator. Yields SSE event strings.
 
@@ -501,10 +610,6 @@ async def run_teacher_inline(
     except Exception:
         return
 
-    status, reason = evaluate_turn_regex(student_tool_events, student_reply)
-    if status != "failure":
-        return
-
     # Extract original user request — last user-role message
     user_request = ""
     for m in reversed(student_messages):
@@ -521,10 +626,25 @@ async def run_teacher_inline(
             )
         break
 
+    status, reason = evaluate_turn_regex(student_tool_events, student_reply)
+    if status != "failure":
+        # Tier 2: LLM self-evaluation check requires teacher_tier2_enabled
+        if not get_setting("teacher_tier2_enabled", False):
+            return
+        status, reason = await evaluate_turn_llm(
+            user_request=user_request,
+            tool_results=student_tool_events,
+            agent_reply=student_reply,
+            student_endpoint_url=student_endpoint_url,
+            owner=owner,
+        )
+        if status != "failure":
+            return
+
     # Resolve teacher endpoint
     try:
         from src.ai_interaction import _resolve_model
-        teacher_url, teacher_model, teacher_headers = _resolve_model(teacher_spec, owner=owner)
+        teacher_url, teacher_model, teacher_headers = await asyncio.to_thread(_resolve_model, teacher_spec, owner=owner)
     except Exception as e:
         logger.warning(f"teacher endpoint not resolvable ({teacher_spec!r}): {e}")
         yield (
@@ -549,7 +669,7 @@ async def run_teacher_inline(
     # user/assistant/tool history so the teacher sees what the student
     # tried. The appended note leads with the user request text so RAG
     # tool selection picks the right tools for the teacher's turn.
-    history = [m for m in student_messages if m.get("role") != "system"]
+    history = deepcopy([m for m in student_messages if m.get("role") != "system"])
     note_content = (
         f"{user_request or '(no user request captured)'}\n\n"
         "[teacher-takeover] The previous attempt by the student model "
@@ -565,41 +685,77 @@ async def run_teacher_inline(
     from src.agent_loop import stream_agent_loop
     captured_tool_events: List[Dict[str, Any]] = []
     captured_text_parts: List[str] = []
+    captured_metrics: Dict[str, Any] = {}
+    captured_decision: Dict[str, Any] = {}
 
-    async for evt_str in stream_agent_loop(
+    async with aclosing(stream_agent_loop(
         endpoint_url=teacher_url,
         model=teacher_model,
         messages=teacher_messages,
         headers=teacher_headers,
         owner=owner,
+        session_id=session_id,
+        workspace=workspace,
+        disabled_tools=set(disabled_tools) if disabled_tools is not None else None,
+        tool_policy=tool_policy,
+        active_document=active_document,
+        active_email=active_email,
+        turn_contract=turn_contract,
+        _parent_run_id=parent_run_id,
+        request_authority=request_authority,
+        external_untrusted_context_seen=external_untrusted_context_seen,
+        client_runtime_context=deepcopy(client_runtime_context),
+        plan_mode=plan_mode,
+        delegated_credential=delegated_credential,
         _is_teacher_run=True,
-    ):
-        # Swallow teacher's own [DONE] — outer loop emits the real one
-        if "[DONE]" in evt_str:
-            continue
-        if evt_str.startswith("data: "):
-            try:
-                payload = json.loads(evt_str[6:].strip())
-            except Exception:
+    )) as stream:
+        async for evt_str in stream:
+            # Swallow teacher's own [DONE] — outer loop emits the real one
+            if evt_str.strip() == 'data: [DONE]':
+                continue
+            if evt_str.startswith('event: error'):
                 yield evt_str
-                continue
-            if isinstance(payload, dict):
-                payload["teacher"] = True
-                typ = payload.get("type")
-                if typ == "tool_output":
-                    captured_tool_events.append({
-                        "tool": payload.get("tool"),
-                        "command": payload.get("command"),
-                        "output": payload.get("output"),
-                        "exit_code": payload.get("exit_code"),
-                    })
-                if "delta" in payload and isinstance(payload["delta"], str):
-                    if payload.get("thinking"):
-                        continue
-                    captured_text_parts.append(payload["delta"])
-                yield 'data: ' + json.dumps(payload) + '\n\n'
-                continue
-        yield evt_str
+                return
+            if evt_str.startswith("data: "):
+                try:
+                    payload = json.loads(evt_str[6:].strip())
+                except Exception:
+                    yield evt_str
+                    continue
+                if isinstance(payload, dict):
+                    payload["teacher"] = True
+                    typ = payload.get("type")
+                    if typ == 'completion_decision' and isinstance(payload.get('data'), dict):
+                        captured_decision = payload['data']
+                    if typ == "metrics" and isinstance(payload.get("data"), dict):
+                        # The outer chat route persists only the last metrics
+                        # payload. Keep a copy so any approval produced after the
+                        # recursive teacher run's metrics remains reloadable.
+                        captured_metrics = dict(payload["data"])
+                    if typ == "tool_output":
+                        captured_tool_event = {
+                            "tool": payload.get("tool"),
+                            "command": payload.get("command"),
+                            "output": payload.get("output"),
+                            "exit_code": payload.get("exit_code"),
+                        }
+                        if isinstance(payload.get("ask_user"), dict):
+                            captured_tool_event["ask_user"] = payload["ask_user"]
+                        captured_tool_events.append(captured_tool_event)
+                    if "delta" in payload and isinstance(payload["delta"], str):
+                        if payload.get("thinking"):
+                            continue
+                        captured_text_parts.append(payload["delta"])
+                    yield 'data: ' + json.dumps(payload) + '\n\n'
+                    continue
+            yield evt_str
+
+    # A takeover that paused for a question or exact action has not completed
+    # yet. Its server-owned approval card is already in the live/persisted tool
+    # events; do not evaluate the partial trace or distill it into a skill.
+    if (any(event.get("ask_user") for event in captured_tool_events)
+            or (captured_decision and not captured_decision.get('can_complete', False))):
+        return
 
     teacher_text = "".join(captured_text_parts).strip()
     t_status, t_reason = evaluate_turn_regex(captured_tool_events, teacher_text)
@@ -644,31 +800,85 @@ async def run_teacher_inline(
     skill.setdefault("source", "teacher-escalation")
     skill.setdefault("teacher_model", teacher_spec)
 
-    import json as _json
-    from src.tool_implementations import do_manage_skills
-    try:
-        result = await do_manage_skills(_json.dumps(skill), owner=owner)
-        if isinstance(result, dict) and not result.get("error"):
-            logger.info(f"teacher succeeded; saved skill: {skill.get('name')}")
-            yield (
-                'data: ' + json.dumps({
-                    "type": "skill_saved",
-                    "name": skill.get("name"),
-                    "category": skill.get("category", "general"),
-                }) + '\n\n'
-            )
-        else:
-            yield (
-                'data: ' + json.dumps({
-                    "type": "skill_save_failed",
-                    "reason": str(result),
-                }) + '\n\n'
-            )
-    except Exception as e:
-        logger.warning(f"skill save raised: {e}")
+    if not session_id:
         yield (
             'data: ' + json.dumps({
                 "type": "skill_save_failed",
-                "reason": str(e),
+                "reason": (
+                    "Teacher-generated skills require an interactive exact "
+                    "approval before they can be saved."
+                ),
             }) + '\n\n'
         )
+        return
+
+    import uuid as _uuid
+    from src.tool_approvals import tool_approval_store
+    from src.tool_capabilities import capabilities_for_action
+
+    skill_content = json.dumps(skill, ensure_ascii=False)
+    pending = tool_approval_store.create(
+        owner=owner,
+        session_id=session_id,
+        origin_run_id=f"teacher-skill-{_uuid.uuid4().hex}",
+        tool_name="manage_skills",
+        content=skill_content,
+        workspace=workspace,
+        external_untrusted_context_seen=True,
+        capabilities=capabilities_for_action("manage_skills", skill_content),
+        request_authority=request_authority,
+    )
+    approval = pending.public_payload(
+        reason=(
+            "The teacher generated this reusable skill. Review and approve "
+            "the complete skill definition before it is saved."
+        ),
+    )
+    persisted_metrics = dict(captured_metrics)
+    persisted_tool_events = list(persisted_metrics.get("tool_events") or [])
+    persisted_round_texts = list(persisted_metrics.get("round_texts") or [])
+    prior_rounds = [
+        event.get("round")
+        for event in persisted_tool_events
+        if isinstance(event, dict) and isinstance(event.get("round"), int)
+    ]
+    approval_round = max([len(persisted_round_texts), *prior_rounds, 0]) + 1
+    approval_tool_event = {
+        "round": approval_round,
+        "model": teacher_model,
+        "tool": "manage_skills",
+        "command": str(skill.get("name") or "teacher-generated skill"),
+        "output": "Waiting for an exact user approval.",
+        "exit_code": None,
+        "ask_user": approval,
+    }
+    persisted_tool_events.append(approval_tool_event)
+    persisted_metrics["tool_events"] = persisted_tool_events
+    persisted_metrics.setdefault("model", teacher_model)
+    yield (
+        "data: "
+        + json.dumps({"delta": "Review the teacher-generated skill before saving it."})
+        + "\n\n"
+    )
+    yield (
+        "data: "
+        + json.dumps({
+            "type": "tool_output",
+            **approval_tool_event,
+            "teacher": True,
+        })
+        + "\n\n"
+    )
+    yield (
+        "data: "
+        + json.dumps({"type": "ask_user", "data": approval, "teacher": True})
+        + "\n\n"
+    )
+    # This must be the final metrics event: chat_routes saves only last_metrics
+    # when the outer stream reaches [DONE]. Without it, the live approval card
+    # disappears after a reload even though the server grant remains pending.
+    yield (
+        "data: "
+        + json.dumps({"type": "metrics", "data": persisted_metrics, "teacher": True})
+        + "\n\n"
+    )

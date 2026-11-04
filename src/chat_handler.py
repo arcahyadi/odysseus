@@ -29,6 +29,34 @@ from src.youtube_handler import (
 logger = logging.getLogger(__name__)
 
 
+def _sync_upload_vision_to_gallery(file_info: Dict[str, Any], owner: Optional[str], text: str) -> None:
+    file_hash = (file_info or {}).get("hash")
+    if not file_hash or not text:
+        return
+    try:
+        from core.database import GalleryImage, SessionLocal
+        db = SessionLocal()
+        try:
+            q = db.query(GalleryImage).filter(
+                GalleryImage.file_hash == file_hash,
+                GalleryImage.is_active == True,  # noqa: E712
+            )
+            if owner:
+                q = q.filter(GalleryImage.owner == owner)
+            img = q.first()
+            if not img:
+                return
+            img.caption = text.strip()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to sync upload vision text to gallery: %s", e)
+
+
 class ChatHandler:
     """Handles chat operations for both streaming and non-streaming endpoints."""
 
@@ -53,7 +81,7 @@ class ChatHandler:
     # ------------------------------------------------------------------
 
     def validate_and_extract_preset(self, preset_id: Optional[str]) -> tuple:
-        """Returns (temperature, max_tokens, preset_system_prompt, character_name)."""
+        """Returns (temperature, max_tokens, preset_system_prompt, character_name, persona_memory, persona_memory_schema)."""
         if preset_id and preset_id not in self.preset_manager.presets:
             raise HTTPException(400, f"Invalid preset_id: {preset_id}")
 
@@ -61,15 +89,20 @@ class ChatHandler:
         max_tokens = DEFAULT_MAX_TOKENS
         preset_system_prompt = None
         character_name = ""
+        persona_memory = ""
+        persona_memory_schema = "general"
 
         if preset_id and preset_id in self.preset_manager.presets:
             preset = self.preset_manager.presets[preset_id]
             if preset.get("enabled") is False:
                 logger.info(f"Preset {preset_id} is disabled, using defaults")
-                return temperature, max_tokens, preset_system_prompt, character_name
+                return temperature, max_tokens, preset_system_prompt, character_name, persona_memory, persona_memory_schema
             if preset.get("system_prompt"):
                 preset_system_prompt = preset["system_prompt"]
             character_name = preset.get("character_name", "")
+            persona_memory = preset.get("persona_memory", "") or ""
+            _schema = preset.get("persona_memory_schema", "general")
+            persona_memory_schema = _schema if _schema in {"general", "health"} else "general"
             if character_name:
                 name_line = f"Your name is {character_name}."
                 if preset_system_prompt:
@@ -82,7 +115,7 @@ class ChatHandler:
                 max_tokens = preset["max_tokens"]
 
         logger.info(f"Preset {preset_id}: temp={temperature}, max_tokens={max_tokens}")
-        return temperature, max_tokens, preset_system_prompt, character_name
+        return temperature, max_tokens, preset_system_prompt, character_name, persona_memory, persona_memory_schema
 
     def enhance_message_if_needed(self, message: str) -> str:
         """CoT enhancement disabled — modern models reason natively."""
@@ -163,6 +196,8 @@ class ChatHandler:
                         "name": fi.get("name") or fi.get("original_name") or fi["id"],
                         "mime": fi.get("mime", ""),
                         "size": fi.get("size", 0),
+                        "checksum_sha256": fi.get("checksum_sha256") or fi.get("hash"),
+                        "created_at": fi.get("created_at") or fi.get("uploaded_at"),
                         "width": fi.get("width"),
                         "height": fi.get("height"),
                     })
@@ -176,10 +211,15 @@ class ChatHandler:
             from src.settings import get_setting
             vision_enabled = get_setting("vision_enabled", True)
             if vision_enabled:
+                from src.owner_identity import auth_disabled
+                sess_owner = getattr(sess, "owner", None)
+                if not sess_owner and not auth_disabled():
+                    sess_owner = ""
                 main_is_vision = await asyncio.to_thread(
                     model_supports_vision,
                     sess.model or "",
                     getattr(sess, "endpoint_url", "") or "",
+                    sess_owner,
                 )
 
         if effective_att_ids and vision_enabled:
@@ -207,6 +247,7 @@ class ChatHandler:
                                     _vtext = _vf.read().strip()
                                 if _vtext:
                                     enhanced_message += f"\n[User-corrected caption / OCR for this image — treat as authoritative]:\n{_vtext}"
+                                    _sync_upload_vision_to_gallery(file_info, owner, _vtext)
                                     _m = meta_by_id.get(att_id)
                                     if _m is not None:
                                         _m["vision"] = _vtext
@@ -226,6 +267,7 @@ class ChatHandler:
                                     cached_desc = _vf.read().strip()
                                 if cached_desc and not cached_desc.startswith("["):
                                     vl_desc = cached_desc
+                                    _sync_upload_vision_to_gallery(file_info, owner, vl_desc)
                             except Exception:
                                 vl_desc = None
                         if not vl_desc:
@@ -237,9 +279,16 @@ class ChatHandler:
                                     os.makedirs(os.path.join(UPLOAD_DIR, ".vision"), exist_ok=True)
                                     with open(_vcache, "w", encoding="utf-8") as _vf:
                                         _vf.write(vl_desc)
+                                    _sync_upload_vision_to_gallery(file_info, owner, vl_desc)
                                 except Exception:
                                     pass
-                        enhanced_message = f"{enhanced_message}\n\n[Image: {file_info['name']}]\n{vl_desc}"
+                        enhanced_message = f"{enhanced_message}\n\n[Image: {file_info['name']}]\n"
+                        if vl_desc:
+                            # A separate vision call wrote this, but the chat model sees
+                            # one message and answers the prose as if the user wrote it
+                            # (#5573). Label it below the marker line — the client strips
+                            # the block by matching `[Image: <name>]\n`.
+                            enhanced_message += f"[Image description — context only, not part of the user's message]:\n{vl_desc}"
                         # Surface the description to the client live so it renders as a
                         # collapsible "image description" on the user bubble (not just
                         # after a refresh that re-parses the stored message).

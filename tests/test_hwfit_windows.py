@@ -6,8 +6,14 @@ FP8 safetensors repos — must be filtered out on Windows so the Cookbook does
 not recommend models the user cannot actually serve.
 """
 
+import pytest
+
 from services.hwfit.fit import rank_models
 from services.hwfit.models import get_models
+from tests.hwfit_publication_fixtures import publication_catalog  # noqa: F401
+
+# Rank authored inputs rather than publication catalog snapshots.
+pytestmark = pytest.mark.usefixtures("publication_catalog")
 
 
 def _windows_system(ram_gb=32.0, vram_gb=16.0):
@@ -49,7 +55,7 @@ def test_only_gguf_models_recommended_on_windows():
 
 def test_safetensors_models_still_recommended_on_cuda():
     """Regression guard: the GGUF-only rule must not leak onto CUDA."""
-    names = {r["name"] for r in rank_models(_cuda_system(), limit=900)}
+    names = {r["name"] for r in rank_models(_cuda_system(), search="microsoft/Phi-mini-MoE-instruct", limit=10)}
     assert "microsoft/Phi-mini-MoE-instruct" in names
 
 
@@ -63,7 +69,7 @@ def test_awq_model_hidden_on_windows():
 def test_awq_model_visible_on_cuda():
     """The same AWQ model should still be visible on CUDA where vLLM can
     serve it."""
-    names = {r["name"] for r in rank_models(_cuda_system(), limit=900)}
+    names = {r["name"] for r in rank_models(_cuda_system(), search="Qwen/Qwen2.5-3B-Instruct-AWQ", limit=10)}
     assert "Qwen/Qwen2.5-3B-Instruct-AWQ" in names
 
 
@@ -72,3 +78,50 @@ def test_gguf_alternate_still_recommended_on_windows():
     still appear on Windows even though the AWQ variant is hidden."""
     names = {r["name"] for r in rank_models(_windows_system(), limit=900)}
     assert "Qwen/Qwen2.5-3B-Instruct" in names
+
+
+def test_remote_windows_probe_uses_encoded_command(monkeypatch):
+    """Remote Windows hwfit must not use nested -Command quoting over SSH."""
+    from services.hwfit import hardware
+
+    calls = []
+    monkeypatch.setattr(hardware, "_remote_host", "user@winpc")
+    monkeypatch.setattr(hardware, "_remote_port", None)
+
+    def fake_run(cmd):
+        calls.append(cmd)
+        if isinstance(cmd, str) and "EncodedCommand" in cmd:
+            return (
+                '{"ram_gb":64,"avail_gb":32,"cpu_name":"Test CPU",'
+                '"cpu_cores":8,"arch":64}'
+            )
+        return None
+
+    monkeypatch.setattr(hardware, "_run", fake_run)
+    result = hardware._detect_windows()
+    assert result is not None
+    assert result["total_ram_gb"] == 64
+    assert len(calls) == 1
+    assert "EncodedCommand" in calls[0]
+    assert '-Command "' not in calls[0]
+
+
+def test_probe_remote_platform_detects_windows(monkeypatch):
+    from services.hwfit import hardware
+
+    monkeypatch.setattr(hardware, "_run", lambda cmd: "Windows_NT\n")
+    assert hardware._probe_remote_platform() == "windows"
+
+
+def test_probe_remote_platform_detects_darwin(monkeypatch):
+    from services.hwfit import hardware
+
+    def fake_run(cmd):
+        if cmd == "echo %OS%":
+            return "%OS%"
+        if cmd == ["uname", "-s"]:
+            return "Darwin"
+        raise AssertionError(f"unexpected probe cmd: {cmd!r}")
+
+    monkeypatch.setattr(hardware, "_run", fake_run)
+    assert hardware._probe_remote_platform() == "linux"

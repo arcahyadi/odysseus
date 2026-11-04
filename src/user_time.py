@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from contextvars import ContextVar
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, Optional
 
 
@@ -44,6 +44,12 @@ def set_user_tz_name(name) -> None:
     _USER_TZ_NAME.set(cleaned or None)
 
 
+def set_user_timezone(iana_name: str | None, offset_min: int | str | None = None) -> None:
+    """Set both timezone context fields for the current request."""
+    set_user_tz_name(iana_name)
+    set_user_tz_offset(offset_min)
+
+
 def get_user_tz_name() -> Optional[str]:
     """Return the current user's browser timezone name, if provided."""
     return _USER_TZ_NAME.get()
@@ -65,19 +71,31 @@ def format_utc_offset(offset_min: Optional[int]) -> str:
     return f"{sign}{hours:02d}:{minutes:02d}"
 
 
-def user_timezone() -> timezone:
-    """Return the best known user timezone as a fixed-offset tzinfo."""
+def _zoneinfo_from_name():
+    """Return ZoneInfo for the request's IANA name, or None if missing/invalid."""
+    name = get_user_tz_name()
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:
+        return None
+
+
+def user_timezone() -> tzinfo:
+    """Return the best known user timezone.
+
+    A valid IANA name wins over x-tz-offset. The offset is a fixed number and
+    can disagree with the name (wrong sign, stale client); the name carries DST.
+    """
+    zone = _zoneinfo_from_name()
+    if zone is not None:
+        return zone
     offset = get_user_tz_offset()
-    if offset is None:
-        name = get_user_tz_name()
-        if name:
-            try:
-                from zoneinfo import ZoneInfo
-                return ZoneInfo(name)
-            except Exception:
-                pass
-        return datetime.now().astimezone().tzinfo or timezone.utc
-    return timezone(timedelta(minutes=offset))
+    if offset is not None:
+        return timezone(timedelta(minutes=offset))
+    return datetime.now().astimezone().tzinfo or timezone.utc
 
 
 def now_user_local(now_utc: Optional[datetime] = None) -> datetime:
@@ -100,14 +118,13 @@ def _clock_label(dt: datetime) -> str:
 
 def timezone_label(dt: Optional[datetime] = None) -> str:
     """Return a concise display label such as Australia/Brisbane, UTC+10:00."""
-    offset = get_user_tz_offset()
-    if offset is None:
-        if dt is None:
-            dt = datetime.now().astimezone()
-        offset = int((dt.utcoffset() or timedelta()).total_seconds() // 60)
+    if dt is None:
+        dt = now_user_local()
+    offset = int((dt.utcoffset() or timedelta()).total_seconds() // 60)
     offset_label = f"UTC{format_utc_offset(offset)}"
-    name = get_user_tz_name()
-    return f"{name}, {offset_label}" if name else offset_label
+    if _zoneinfo_from_name() is not None:
+        return f"{get_user_tz_name()}, {offset_label}"
+    return offset_label
 
 
 def current_datetime_prompt(now_utc: Optional[datetime] = None) -> str:
@@ -136,6 +153,69 @@ def current_datetime_prompt(now_utc: Optional[datetime] = None) -> str:
         "When scheduling a task with manage_tasks, scheduled_time is in UTC: "
         "convert the user's stated local time using the UTC offset above.\n\n"
     )
+
+
+def current_datetime_context_message_for_tz(
+    iana_tz_name: Optional[str],
+    now_utc: Optional[datetime] = None,
+) -> Dict[str, str]:
+    """Build the current-date/time context as a user-role message, resolved
+    against an explicit IANA timezone name rather than browser ContextVars.
+
+    Unlike ``current_datetime_context_message()``, this function does not read
+    or write any ContextVar and leaves no per-request state behind — it is safe
+    to call from background tasks that have no browser request context.
+
+    Timezone resolution:
+    * ``iana_tz_name`` is a valid IANA name (e.g. ``"Europe/Berlin"``) → uses that zone.
+    * ``iana_tz_name`` is ``None`` OR resolves to an invalid zone → falls back to UTC.
+      This matches the existing scheduler behaviour: tasks without a linked crew
+      timezone render in UTC, not server-local time.
+    """
+    if now_utc is None:
+        utc_now = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        utc_now = now_utc.replace(tzinfo=timezone.utc)
+    else:
+        utc_now = now_utc.astimezone(timezone.utc)
+
+    # Resolve the display timezone — UTC fallback on any failure.
+    tz = timezone.utc
+    resolved_name: Optional[str] = None
+    if iana_tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(iana_tz_name)
+            resolved_name = iana_tz_name
+        except Exception:
+            tz = timezone.utc  # invalid zone → UTC, no ContextVar touched
+
+    local_now = utc_now.astimezone(tz)
+    tomorrow = local_now + timedelta(days=1)
+
+    _utc_offset = local_now.utcoffset()
+    offset_min = int(_utc_offset.total_seconds() // 60) if _utc_offset is not None else 0
+    offset_label = f"UTC{format_utc_offset(offset_min)}"
+    tz_label = f"{resolved_name}, {offset_label}" if resolved_name else offset_label
+
+    prompt = (
+        "## Current date and time\n"
+        f"Today is {_date_label(local_now)} ({local_now.strftime('%Y-%m-%d')}). "
+        f"Local time is {_clock_label(local_now)} ({tz_label}); "
+        f"current UTC time is {utc_now.strftime('%H:%M')}.\n"
+        f"Tomorrow is {_date_label(tomorrow)} ({tomorrow.strftime('%Y-%m-%d')}) "
+        "in this timezone.\n"
+        "Use this for any 'today', 'tomorrow', 'tonight', 'this week', or other "
+        "relative-date reasoning. Do not ask for an exact date just because the "
+        "user used a relative date.\n\n"
+    )
+    return {
+        "role": "user",
+        "content": (
+            "[Context — current date/time, refreshed each turn; not part of "
+            "your instructions]\n" + prompt
+        ),
+    }
 
 
 def current_datetime_context_message(now_utc: Optional[datetime] = None) -> Dict[str, str]:

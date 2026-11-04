@@ -3,13 +3,16 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
-from sqlalchemy.engine import Engine
+from typing import Optional
+from urllib.parse import unquote, urlparse
+from sqlalchemy import DDL, event, create_engine, Column, String, Text, Boolean, DateTime, Integer, Float, ForeignKey, JSON, Index, UniqueConstraint, func, inspect, text
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
 from sqlalchemy.orm import relationship, sessionmaker, backref
 
 from src.runtime_paths import get_app_root
+from core.platform_compat import safe_chmod, IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,60 @@ class TimestampMixin:
     def updated_at(cls):
         return Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
 
+class MultiModelThread(TimestampMixin, Base):
+    """Tracks multi-model conversation thread metadata."""
+    __tablename__ = "multi_model_threads"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)  # username; null = legacy/shared
+    model_ids = Column(JSON, nullable=False)  # List of model IDs
+    endpoint_urls = Column(JSON, nullable=False)  # List of endpoint URLs
+    session_id = Column(String, nullable=True)  # Optional parent session ID for UI linking
+    prompt = Column(Text, nullable=False)  # The original user prompt
+    status = Column(String, nullable=False, default="pending")  # pending/running/completed/failed/partial
+    message_count = Column(Integer, nullable=False, default=0)  # Messages per model
+    has_errors = Column(Boolean, nullable=False, default=False)  # Any model failed?
+    completed_at = Column(DateTime, nullable=True)  # When thread completed
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
+
+    # Relationship to messages
+    messages = relationship("MultiModelMessage", back_populates="thread", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index('ix_mm_threads_owner', 'owner'),
+        Index('ix_mm_threads_session', 'session_id'),
+        Index('ix_mm_threads_owner_status', 'owner', 'status'),
+        Index('ix_mm_threads_owner_created', 'owner', 'created_at', 'status'),
+    )
+
+
+class MultiModelMessage(Base):
+    """Stores individual messages per model in a multi-model thread."""
+    __tablename__ = "multi_model_messages"
+
+    id = Column(String, primary_key=True, index=True)
+    thread_id = Column(String, ForeignKey("multi_model_threads.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=True, index=True)  # For explicit ownership checks
+    model_id = Column(String, nullable=False)
+    endpoint_url = Column(String, nullable=False)
+    role = Column(String, nullable=False)  # "user" or "assistant"
+    content = Column(Text, nullable=False)
+    meta_data = Column("metadata", Text, nullable=True)  # JSON string for metrics: {"token_count": {"input": int, "output": int}, "latency_ms": int, "provider": string, "model_id": string}
+    timestamp = Column(DateTime, default=utcnow_naive)  # timestamps are naive UTC for consistency with existing Session and ChatMessage tables
+    message_index = Column(Integer, nullable=False)  # Position in thread (0-based, aligned across models)
+
+    # Relationship to thread
+    thread = relationship("MultiModelThread", back_populates="messages")
+
+    __table_args__ = (
+        Index('ix_mm_thread_index', 'thread_id', 'message_index'),
+        Index('ix_mm_thread_role', 'thread_id', 'role'),
+        Index('ix_mm_messages_owner', 'owner'),
+        Index('ix_mm_messages_model', 'model_id'),
+        UniqueConstraint('thread_id', 'message_index', 'model_id', name='uq_mm_thread_model_index'),
+    )
+
+
 # Ensure the writable data directory exists before SQLite connects.
 from src.constants import DATA_DIR, AUTH_FILE, MEMORY_FILE, USER_PREFS_FILE, SETTINGS_FILE
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -42,12 +99,28 @@ def _default_database_url() -> str:
 
 
 def _normalize_sqlite_url(url: str) -> str:
-    if not url.startswith("sqlite:///"):
+    """Resolve relative ordinary SQLite paths without rewriting URI filenames."""
+    try:
+        parsed = make_url(url)
+    except Exception:
         return url
-    db_path = url.replace("sqlite:///", "", 1)
-    if db_path == ":memory:" or os.path.isabs(db_path):
+
+    if parsed.get_backend_name() != "sqlite":
         return url
-    return f"sqlite:///{(Path(get_app_root()) / db_path).resolve().as_posix()}"
+
+    db_path = parsed.database
+    if (
+        not db_path
+        or db_path == ":memory:"
+        or str(db_path).lower().startswith("file:")
+        or os.path.isabs(str(db_path))
+    ):
+        return url
+
+    absolute_path = (Path(get_app_root()) / str(db_path)).resolve().as_posix()
+    return parsed.set(database=absolute_path).render_as_string(
+        hide_password=False
+    )
 
 
 # Get database URL from environment, default to SQLite in DATA_DIR
@@ -56,8 +129,61 @@ DATABASE_URL = _normalize_sqlite_url(os.getenv("DATABASE_URL", _default_database
 # Create engine
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+    connect_args={"check_same_thread": False, "timeout": 30} if "sqlite" in DATABASE_URL else {}
 )
+
+
+# Sidecar files SQLite can create next to the main DB. -journal is the default
+# rollback journal; -wal/-shm appear once WAL is enabled. Each can hold copies of
+# secret-bearing pages, so they get the same 0o600 lockdown as the DB itself.
+_SQLITE_SIDECARS = ("-journal", "-wal", "-shm")
+
+
+def _sqlite_db_path(url) -> Optional[str]:
+    """Return the filesystem path for a file-backed SQLite URL.
+
+    SQLite query parameters such as ``mode=memory`` only affect filename
+    semantics when SQLAlchemy enables URI handling with ``uri=true``. Ordinary
+    file URLs must therefore remain file-backed even when they contain a query
+    parameter named ``mode``.
+
+    For SQLite ``file:`` URIs, an empty authority or ``localhost`` identifies a
+    local path. Other authorities are retained as UNC-style paths.
+    """
+    if url.get_backend_name() != "sqlite":
+        return None
+
+    db_path = url.database
+    if not db_path or db_path == ":memory:":
+        return None
+
+    db_path = str(db_path)
+    query = {
+        str(key).lower(): str(value).strip().lower()
+        for key, value in dict(getattr(url, "query", {}) or {}).items()
+    }
+    uri_enabled = query.get("uri") in {"1", "true", "yes", "on"}
+    is_file_uri = db_path.lower().startswith("file:")
+
+    if not uri_enabled or not is_file_uri:
+        return db_path
+
+    if (
+        db_path.lower().startswith("file::memory:")
+        or query.get("mode") == "memory"
+    ):
+        return None
+
+    parsed = urlparse(db_path)
+    fs_path = parsed.path or ""
+    if not fs_path or fs_path == ":memory:":
+        return None
+
+    authority = parsed.netloc
+    if authority and authority.lower() != "localhost":
+        fs_path = f"//{authority}{fs_path}"
+
+    return unquote(fs_path)
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -72,6 +198,8 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     if isinstance(dbapi_connection, sqlite3.Connection):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 
 
@@ -119,9 +247,22 @@ class Session(TimestampMixin, Base):
     # Configuration flags
     rag = Column(Boolean, default=False)
     archived = Column(Boolean, default=False)
+    memory_extraction_enabled = Column(Boolean, default=True)
+    memory_injection_enabled = Column(Boolean, default=True)
+    skill_injection_enabled = Column(Boolean, default=True)
+    thinking_mode = Column(String, nullable=True, default="off")
+    temperature_override = Column(Float, nullable=True, default=None)
+    max_tokens_override = Column(Integer, nullable=True, default=None)
 
     # Organization
     folder = Column(String, nullable=True, default=None)
+    cwd = Column(String, nullable=True, default=None)
+    # Registered ModelEndpoint this session is bound to. endpoint_url alone
+    # cannot distinguish two endpoints that share a provider URL but use
+    # different credentials (e.g. two ChatGPT Subscription accounts), so the
+    # exact endpoint id is remembered here. NULL = legacy session; the first
+    # deterministic, owner-scoped resolution persists a binding.
+    endpoint_id = Column(String, nullable=True, index=True)
     
     # Headers stored as JSON
     headers = Column(JSON, default=dict)
@@ -147,8 +288,14 @@ class Session(TimestampMixin, Base):
     message_count = Column(Integer, default=0)
     total_input_tokens = Column(Integer, default=0)
     total_output_tokens = Column(Integer, default=0)
+    total_cost_usd = Column(Float, default=0.0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
+
+    # Phase 1: session forking + persona binding
+    forked_from_session_id = Column(String, nullable=True)
+    forked_from_message_id = Column(String, nullable=True)
+    active_persona_id      = Column(String, nullable=True)
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -167,6 +314,12 @@ class Session(TimestampMixin, Base):
             'endpoint_url': self.endpoint_url,
             'rag': self.rag,
             'archived': self.archived,
+            'memory_extraction_enabled': self.memory_extraction_enabled is not False,
+            'memory_injection_enabled': self.memory_injection_enabled is not False,
+            'skill_injection_enabled': self.skill_injection_enabled is not False,
+            'thinking_mode': self.thinking_mode or '',
+            'temperature_override': self.temperature_override,
+            'max_tokens_override': self.max_tokens_override,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'last_accessed': self.last_accessed.isoformat() if self.last_accessed else None,
@@ -176,6 +329,7 @@ class Session(TimestampMixin, Base):
             'folder': self.folder,
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
+            'total_cost_usd': self.total_cost_usd or 0.0,
             'crew_member_id': self.crew_member_id,
         }
 
@@ -207,6 +361,22 @@ class ChatMessage(Base):
     __table_args__ = (
         Index('ix_messages_session_time', 'session_id', 'timestamp'),  # Composite for efficient message retrieval
     )
+
+class BackgroundToolJob(Base):
+    """Durable origin and once-only chat delivery for background tool work."""
+    __tablename__ = "background_tool_jobs"
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    tool = Column(String, nullable=False)
+    query = Column(Text, nullable=False)
+    rounds = Column(Integer, nullable=True)
+    status = Column(String, nullable=False, default="running", index=True)
+    payload = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    message_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utcnow_naive)
+
 
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
@@ -276,6 +446,7 @@ class GalleryImage(TimestampMixin, Base):
     id         = Column(String, primary_key=True, index=True)
     filename   = Column(String, nullable=False, unique=True)
     prompt     = Column(Text, nullable=False, default="")
+    caption    = Column(Text, nullable=True, default="")
     model      = Column(String, nullable=True)
     size       = Column(String, nullable=True)
     quality    = Column(String, nullable=True)
@@ -357,6 +528,93 @@ class EmailAccount(TimestampMixin, Base):
     )
 
 
+class EmailAccountOwnerLock(Base):
+    """Durable per-owner mutex for email-account default mutations.
+
+    Row-locking databases serialize mutations by locking this row before they
+    inspect or stage EmailAccount changes.  SQLite uses ``BEGIN IMMEDIATE``
+    instead, because it ignores ``SELECT ... FOR UPDATE``; keeping the table in
+    the shared metadata still makes the non-SQLite path available without a
+    separate migration.  The empty key represents the normalized legacy /
+    unconfigured scope shared by ``owner IS NULL`` and ``owner = ''`` rows.
+    """
+    __tablename__ = "email_account_owner_locks"
+
+    owner_key = Column(String, primary_key=True)
+
+
+_EMAIL_ACCOUNT_DEFAULT_INDEX = "ux_email_accounts_one_default_per_owner"
+_EMAIL_ACCOUNT_DEFAULT_INDEX_DDL = {
+    "sqlite": (
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {_EMAIL_ACCOUNT_DEFAULT_INDEX} "
+        "ON email_accounts (COALESCE(owner, '')) WHERE is_default = 1"
+    ),
+    "postgresql": (
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {_EMAIL_ACCOUNT_DEFAULT_INDEX} "
+        "ON email_accounts ((COALESCE(owner, ''))) WHERE is_default IS TRUE"
+    ),
+}
+
+
+# SQLAlchemy cannot express one portable partial, functional index across the
+# two supported database families.  Register dialect-specific DDL so fresh
+# databases get the invariant as part of create_all(); the startup migration
+# below installs the same index on existing databases after normalizing legacy
+# duplicate rows.
+for _dialect_name, _index_ddl in _EMAIL_ACCOUNT_DEFAULT_INDEX_DDL.items():
+    event.listen(
+        EmailAccount.__table__,
+        "after_create",
+        DDL(_index_ddl).execute_if(dialect=_dialect_name),
+    )
+
+
+def lock_email_account_owner_mutations(db, *owners: str) -> None:
+    """Lock normalized email-account owner scopes in canonical order.
+
+    ``NULL`` and the empty string are one legacy/single-user owner partition,
+    matching the unique default-account index.  SQLite has only a database
+    writer reservation, while row-locking databases use durable mutex rows.
+    Sorting all requested owner keys keeps multi-owner operations such as user
+    rename from deadlocking with another mutation that requests the same keys
+    in the opposite order.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    owner_keys = sorted({owner or "" for owner in owners} or {""})
+    if db.get_bind().dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+        return
+
+    for owner_key in owner_keys:
+        lock_row = db.get(
+            EmailAccountOwnerLock,
+            owner_key,
+            with_for_update=True,
+        )
+        if lock_row is not None:
+            continue
+
+        inserted = False
+        try:
+            with db.begin_nested():
+                db.add(EmailAccountOwnerLock(owner_key=owner_key))
+                db.flush()
+                inserted = True
+        except IntegrityError:
+            # A competing transaction created the mutex row first.  Once its
+            # insert commits, lock that durable row before touching accounts.
+            pass
+
+        if not inserted:
+            (
+                db.query(EmailAccountOwnerLock)
+                .filter(EmailAccountOwnerLock.owner_key == owner_key)
+                .with_for_update()
+                .one()
+            )
+
+
 class ModelEndpoint(TimestampMixin, Base):
     """Admin-configured model endpoints. Models are auto-discovered via /v1/models."""
     __tablename__ = "model_endpoints"
@@ -369,6 +627,7 @@ class ModelEndpoint(TimestampMixin, Base):
     hidden_models = Column(Text, nullable=True)    # JSON list of model IDs that failed probing
     cached_models = Column(Text, nullable=True)    # JSON list of last-known model IDs (avoids probe on list)
     pinned_models = Column(Text, nullable=True)    # JSON list of admin-pinned model IDs (manual, may not appear in /v1/models)
+    cookbook_serve_session_id = Column(String, nullable=True)  # Current Cookbook serve identity
     model_type = Column(String, nullable=True, default="llm")  # "llm" or "image"
     # auto = classify by URL; local = self-hosted server; api/proxy = external
     # OpenAI-compatible API even when reachable through a private/tailnet IP.
@@ -384,6 +643,9 @@ class ModelEndpoint(TimestampMixin, Base):
     # can be toggled per-endpoint in the UI. NULL = unknown, falls
     # back to the model-name keyword heuristic in agent_loop.py.
     supports_tools = Column(Boolean, nullable=True, default=None)
+    # JSON object: model id -> native tool schema surface preference.
+    # Values: none, compact, full. Missing key = legacy automatic behavior.
+    model_tool_modes = Column(Text, nullable=True)
     # Per-user ownership. NULL = legacy/shared (visible to every user) — this
     # is the historical default. When non-null, the model picker only shows
     # the endpoint to that user (admins always see everything).
@@ -575,6 +837,7 @@ class ScheduledTask(TimestampMixin, Base):
     owner          = Column(String, nullable=True, index=True)
     name           = Column(String, nullable=False, default="Untitled Task")
     prompt         = Column(Text, nullable=True)              # LLM prompt (for task_type="llm")
+    request_authority_json = Column(Text, nullable=True)       # server-only admitted request snapshot
     task_type      = Column(String, default="llm")            # "llm" | "action"
     action         = Column(String, nullable=True)            # builtin action name (for task_type="action")
     schedule       = Column(String, nullable=True)            # "once", "daily", "weekly", "monthly"
@@ -670,6 +933,23 @@ class TaskRun(Base):
     )
 
 
+class NotificationLog(Base):
+    """Persisted task notifications, including completion and error text."""
+    __tablename__ = "notification_logs"
+
+    id         = Column(String, primary_key=True, index=True)
+    owner      = Column(String, nullable=True, index=True)
+    task_name  = Column(String, nullable=False)
+    task_id    = Column(String, nullable=True, index=True)
+    status     = Column(String, nullable=False, default="success")
+    body       = Column(Text, nullable=True)
+    timestamp  = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
+
+    __table_args__ = (
+        Index('ix_notification_logs_owner_time', 'owner', 'timestamp'),
+    )
+
+
 class Memory(Base):
     """
     SQLAlchemy model for Memory table.
@@ -704,6 +984,312 @@ class Memory(Base):
         Index('ix_memories_lookup', 'category', 'timestamp'),  # Composite for category-based queries
         Index('ix_memories_session', 'session_id', 'timestamp'),  # Composite for session-based queries
     )
+
+class AgentRun(TimestampMixin, Base):
+    """Multi-agent orchestration run record."""
+    __tablename__ = "agent_runs"
+
+    id               = Column(String, primary_key=True, index=True)
+    owner            = Column(String, nullable=True, index=True)
+    parent_run_id    = Column(String, ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=True, index=True)
+    persona_id       = Column(String, ForeignKey("personas.id", ondelete="SET NULL"), nullable=True)
+    session_id       = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    root_run_id      = Column(String, nullable=True, index=True)     # denormalised for fast subtree queries
+    depth            = Column(Integer, default=0, nullable=False)    # 0 = root orchestrator
+    task_description = Column(Text, nullable=False)
+    status           = Column(String, default="pending", nullable=False, index=True)
+    # status values: pending | running | completed | failed | paused | cancelled
+    result           = Column(Text, nullable=True)                   # JSON final output
+    error_detail     = Column(Text, nullable=True)
+    tool_calls_log   = Column(Text, nullable=True)                   # JSON array of tool call records
+    input_tokens     = Column(Integer, default=0)
+    output_tokens    = Column(Integer, default=0)
+    started_at       = Column(DateTime, nullable=True)
+    ended_at         = Column(DateTime, nullable=True)
+    checkpoint       = Column(Text, nullable=True)                   # JSON last message list for pause/resume
+
+    parent  = relationship("AgentRun", remote_side=[id], backref="children")
+    persona = relationship("Persona", foreign_keys=[persona_id])
+    session = relationship("Session", backref=backref("agent_runs", cascade="save-update, merge"))
+
+    __table_args__ = (
+        Index("ix_agent_runs_owner_status", "owner", "status"),
+        Index("ix_agent_runs_root", "root_run_id", "depth"),
+        Index("ix_agent_runs_retention", "owner", "created_at"),
+    )
+
+
+class Persona(TimestampMixin, Base):
+    """Agent persona / role definition."""
+    __tablename__ = "personas"
+
+    id            = Column(String, primary_key=True, index=True)
+    owner         = Column(String, nullable=True, index=True)        # NULL = built-in / global
+    name          = Column(String, nullable=False)                   # 1–64 chars, unique per owner
+    system_prompt = Column(Text, nullable=False)
+    allowed_tools = Column(Text, nullable=True)                      # JSON list of tool names; NULL = all
+    memory_scope  = Column(String, nullable=True)                    # e.g. "global", "persona:<id>", "session"
+    model_ref     = Column(String, nullable=True)                    # model name override
+    endpoint_url  = Column(String, nullable=True)                    # endpoint override
+    is_builtin    = Column(Boolean, default=False)
+    is_active     = Column(Boolean, default=True)                    # soft-delete
+    sort_order    = Column(Integer, default=0)
+
+    __table_args__ = (
+        Index("ix_personas_owner_name", "owner", "name", unique=True),
+        Index("ix_personas_active", "owner", "is_active"),
+    )
+
+
+class Plan(TimestampMixin, Base):
+    """Long-horizon plan created from a user goal."""
+    __tablename__ = "plans"
+
+    id                 = Column(String, primary_key=True, index=True)
+    owner              = Column(String, nullable=True, index=True)
+    title              = Column(String, nullable=False)
+    goal               = Column(Text, nullable=False)                # original user goal text
+    status             = Column(String, default="pending", nullable=False, index=True)
+    # status: pending | running | paused_on_failure | completed | cancelled
+    current_step_index = Column(Integer, default=0)
+    model              = Column(String, nullable=True)
+    endpoint_url       = Column(String, nullable=True)
+
+    steps = relationship("PlanStep", back_populates="plan",
+                         cascade="all, delete-orphan",
+                         order_by="PlanStep.order_index")
+
+    __table_args__ = (
+        Index("ix_plans_owner_status", "owner", "status"),
+    )
+
+
+class PlanStep(TimestampMixin, Base):
+    """A single ordered step within a Plan."""
+    __tablename__ = "plan_steps"
+
+    id           = Column(String, primary_key=True, index=True)
+    plan_id      = Column(String, ForeignKey("plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    order_index  = Column(Integer, nullable=False)
+    title        = Column(String(120), nullable=False)
+    description  = Column(Text, nullable=True)
+    status       = Column(String, default="pending", nullable=False)
+    # status: pending | running | done | failed | skipped
+    session_id   = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True)
+    output       = Column(Text, nullable=True)                       # result of step execution
+    error_detail = Column(Text, nullable=True)
+    retry_count  = Column(Integer, default=0)
+    started_at   = Column(DateTime, nullable=True)
+    ended_at     = Column(DateTime, nullable=True)
+    # Document-aware execution (both null for ordinary text steps)
+    doc_id       = Column(String, nullable=True)
+    doc_action   = Column(String, nullable=True)   # create | update | edit | suggest | read
+
+    plan    = relationship("Plan", back_populates="steps")
+    session = relationship("Session", backref=backref("plan_steps"))
+
+    __table_args__ = (
+        Index("ix_plan_steps_plan_order", "plan_id", "order_index"),
+        Index("ix_plan_steps_status", "plan_id", "status"),
+    )
+
+
+class CritiquePassRecord(TimestampMixin, Base):
+    """Record of a self-critique evaluation pass on an LLM response."""
+    __tablename__ = "critique_pass_records"
+
+    id               = Column(String, primary_key=True, index=True)
+    session_id       = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    message_id       = Column(String, nullable=True)                 # DB id of the assistant message
+    owner            = Column(String, nullable=True, index=True)
+    primary_model    = Column(String, nullable=False)
+    critique_model   = Column(String, nullable=False)
+    was_revised      = Column(Boolean, default=False)
+    original_draft   = Column(Text, nullable=False)
+    revised_response = Column(Text, nullable=True)
+    original_tokens  = Column(Integer, default=0)
+    revised_tokens   = Column(Integer, default=0)
+    error_detail     = Column(Text, nullable=True)                   # set on fallback
+
+    __table_args__ = (
+        Index("ix_critique_session_msg", "session_id", "message_id"),
+    )
+
+
+class ReasoningTrace(TimestampMixin, Base):
+    """Full reasoning trace extracted from <think> blocks in an LLM response."""
+    __tablename__ = "reasoning_traces"
+
+    id         = Column(String, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    message_id = Column(String, nullable=False, index=True)          # DB id of the parent assistant message
+    owner      = Column(String, nullable=True, index=True)
+    model      = Column(String, nullable=True)
+    full_text  = Column(Text, nullable=False)                        # raw concatenated think content
+
+    nodes = relationship("ReasoningNode", back_populates="trace",
+                         cascade="all, delete-orphan",
+                         order_by="ReasoningNode.index")
+
+    __table_args__ = (
+        Index("ix_reasoning_session_msg", "session_id", "message_id"),
+    )
+
+
+class ReasoningNode(Base):
+    """An individual <think> segment within a ReasoningTrace."""
+    __tablename__ = "reasoning_nodes"
+
+    id       = Column(String, primary_key=True, index=True)
+    trace_id = Column(String, ForeignKey("reasoning_traces.id", ondelete="CASCADE"), nullable=False, index=True)
+    index    = Column(Integer, nullable=False)
+    content  = Column(Text, nullable=False)
+
+    trace = relationship("ReasoningTrace", back_populates="nodes")
+
+    __table_args__ = (
+        Index("ix_reasoning_nodes_trace_idx", "trace_id", "index"),
+    )
+
+
+# ── Phase 2: Knowledge & Memory models ───────────────────────────────────────
+
+class GraphEntity(Base):
+    """An entity (person, project, concept, tool, organisation) extracted from chat."""
+    __tablename__ = "graph_entities"
+
+    id            = Column(String, primary_key=True, index=True)
+    # NOTE: no index=True on owner — the explicit Index("ix_graph_entities_owner")
+    # below would collide with the auto-generated ix_graph_entities_owner on a
+    # fresh create_all (duplicate DDL name), breaking new-DB startup.
+    owner         = Column(String, nullable=False)
+    name          = Column(String, nullable=False)
+    name_norm     = Column(String, nullable=False)   # lower().strip() for dedup
+    type          = Column(String, nullable=False)   # person|project|concept|tool|organisation
+    mention_count = Column(Integer, nullable=False, default=1)
+    first_seen_at = Column(DateTime, nullable=False)
+    last_seen_at  = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("owner", "name_norm", "type"),
+        Index("ix_graph_entities_owner", "owner"),
+        Index("ix_graph_entities_search", "owner", "name_norm"),
+    )
+
+
+class GraphRelationship(Base):
+    """A directed relationship between two GraphEntity nodes."""
+    __tablename__ = "graph_relationships"
+
+    id         = Column(String, primary_key=True, index=True)
+    # NOTE: no index=True on these columns — explicit Index rows below would
+    # collide with the auto-generated ix_graph_rel_* names on fresh create_all.
+    owner      = Column(String, nullable=False)
+    source_id  = Column(String, ForeignKey("graph_entities.id", ondelete="CASCADE"), nullable=False)
+    target_id  = Column(String, ForeignKey("graph_entities.id", ondelete="CASCADE"), nullable=False)
+    type       = Column(String, nullable=False)   # works-on|related-to|mentioned-with|…
+    strength   = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("owner", "source_id", "target_id", "type"),
+        Index("ix_graph_rel_owner", "owner"),
+        Index("ix_graph_rel_source", "source_id"),
+        Index("ix_graph_rel_target", "target_id"),
+    )
+
+
+class Digest(Base):
+    """Auto-generated daily activity digest."""
+    __tablename__ = "digests"
+
+    id         = Column(String, primary_key=True, index=True)
+    owner      = Column(String, nullable=False, index=True)
+    date       = Column(String, nullable=False)          # "YYYY-MM-DD"
+    status     = Column(String, nullable=False, default="pending")  # pending|complete|failed
+    content    = Column(Text, nullable=True)             # structured JSON blob
+    summary    = Column(Text, nullable=True)             # tone_summary plain text
+    error      = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("owner", "date"),
+        Index("ix_digests_owner_date", "owner", "date"),
+    )
+
+
+class EmailRule(Base):
+    """Trigger-based email automation rule (match → actions)."""
+
+    __tablename__ = "email_rules"
+
+    id          = Column(String, primary_key=True, index=True)
+    owner       = Column(String, nullable=False, index=True)
+    name        = Column(String, nullable=False, default="")
+    # Matchers stored as JSON: {"sender_contains": str, "subject_contains": str,
+    #                           "body_contains": str, "folder": str}
+    matchers    = Column(Text, nullable=False, default="{}")
+    # Actions stored as JSON array of strings from:
+    # summarize | create_task | draft_reply | add_event
+    actions     = Column(Text, nullable=False, default="[]")
+    enabled     = Column(Boolean, nullable=False, default=True)
+    created_at  = Column(DateTime, nullable=False)
+    updated_at  = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_email_rules_owner_enabled", "owner", "enabled"),
+    )
+
+
+def _migrate_add_plan_step_doc_columns():
+    """Add doc_id / doc_action to plan_steps (document-aware steps). Guarded + idempotent."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(plan_steps)")
+        columns = [row[1] for row in cursor.fetchall()]
+        for col_name in ("doc_id", "doc_action"):
+            if col_name not in columns:
+                conn.execute(f"ALTER TABLE plan_steps ADD COLUMN {col_name} TEXT")
+                conn.commit()
+                logging.getLogger(__name__).info(f"Migrated: added '{col_name}' to plan_steps")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"plan_steps doc-columns migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _migrate_add_phase1_session_columns():
+    """Add Phase 1 session fork + persona columns to sessions if missing.
+
+    Idempotent: each ADD COLUMN is skipped when the column already exists.
+    """
+    new_cols = {
+        "forked_from_session_id": "TEXT",
+        "forked_from_message_id": "TEXT",
+        "active_persona_id":      "TEXT",
+    }
+    try:
+        with engine.connect() as conn:
+            existing = {r[1] for r in conn.execute(text("PRAGMA table_info(sessions)"))}
+            for col_name, col_type in new_cols.items():
+                if col_name not in existing:
+                    conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}"))
+                    logging.getLogger(__name__).info(
+                        f"Phase 1 migration: added '{col_name}' column to sessions"
+                    )
+            conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Phase 1 session columns migration failed: {e}")
+
 
 def _migrate_add_last_message_at_column():
     """Add last_message_at to sessions + backfill from the latest message
@@ -749,6 +1335,96 @@ def _migrate_add_last_message_at_column():
             conn.close()
         except Exception:
             pass
+
+def _migrate_add_memory_extraction_enabled_column():
+    """Add per-session auto memory extraction toggle."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "memory_extraction_enabled" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN memory_extraction_enabled BOOLEAN DEFAULT 1")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added memory_extraction_enabled to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"memory_extraction_enabled migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _migrate_add_skill_injection_enabled_column():
+    """Add per-session skill injection toggle."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "skill_injection_enabled" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN skill_injection_enabled BOOLEAN DEFAULT 1")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added skill_injection_enabled to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"skill_injection_enabled migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _migrate_add_memory_injection_enabled_column():
+    """Add per-session memory context injection toggle."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "memory_injection_enabled" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN memory_injection_enabled BOOLEAN DEFAULT 1")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added memory_injection_enabled to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"memory_injection_enabled migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _migrate_add_session_generation_settings_columns():
+    """Add per-chat model generation controls."""
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        additions = {
+            "thinking_mode": "VARCHAR DEFAULT 'off'",
+            "temperature_override": "FLOAT",
+            "max_tokens_override": "INTEGER",
+        }
+        for name, sql_type in additions.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {sql_type}")
+        conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"session generation settings migration failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
 
 def _migrate_add_document_archived_column():
     """Add `archived` to documents (soft-archive flag). Guarded + idempotent."""
@@ -999,6 +1675,30 @@ def _migrate_add_supports_tools_column():
             pass
 
 
+def _migrate_add_model_tool_modes_column():
+    """Add per-model tool-surface preferences to model_endpoints if missing."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if columns and "model_tool_modes" not in columns:
+            conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_tool_modes TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'model_tool_modes' column to model_endpoints")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"model_tool_modes migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _migrate_add_cached_models_column():
     """Add cached_models column to model_endpoints if it doesn't exist."""
     import sqlite3
@@ -1043,6 +1743,26 @@ def _migrate_add_pinned_models_column():
             conn.close()
         except Exception:
             pass
+
+
+def _migrate_add_cookbook_serve_session_id_column():
+    """Bind Cookbook cleanup to the serve session that owns the endpoint."""
+    from sqlalchemy import inspect
+
+    with engine.begin() as conn:
+        columns = {
+            column["name"]
+            for column in inspect(conn).get_columns("model_endpoints")
+        }
+
+        if "cookbook_serve_session_id" not in columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE model_endpoints "
+                    "ADD COLUMN cookbook_serve_session_id VARCHAR"
+                )
+            )
+
 
 def _migrate_add_notes_sort_order():
     """Add sort_order, image_url, repeat columns to notes if they don't exist."""
@@ -1122,6 +1842,42 @@ def _migrate_add_folder_column():
         except Exception:
             pass
 
+def _migrate_add_session_cwd_column():
+    """Add cwd column to sessions table if it doesn't exist."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "cwd" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'cwd' column to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Migration check for cwd failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _migrate_add_session_endpoint_id_column():
+    """Add the nullable binding and index without rewriting existing sessions."""
+    with engine.begin() as connection:
+        schema = inspect(connection)
+        if not schema.has_table("sessions"):
+            return
+        columns = {column["name"] for column in schema.get_columns("sessions")}
+        if "endpoint_id" not in columns:
+            connection.execute(text("ALTER TABLE sessions ADD COLUMN endpoint_id VARCHAR"))
+        index = next(index for index in Session.__table__.indexes if index.name == "ix_sessions_endpoint_id")
+        index.create(bind=connection, checkfirst=True)
+
+
 def _migrate_add_token_columns():
     """Add cumulative token tracking columns to sessions table."""
     import sqlite3
@@ -1140,6 +1896,29 @@ def _migrate_add_token_columns():
             logging.getLogger(__name__).info("Migrated: added token tracking columns to sessions")
     except Exception as e:
         logging.getLogger(__name__).warning(f"Migration check for token columns failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _migrate_add_total_cost_usd():
+    """Add cumulative USD cost column to sessions table."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "total_cost_usd" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN total_cost_usd REAL DEFAULT 0.0")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added total_cost_usd column to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Migration check for total_cost_usd failed: {e}")
     finally:
         try:
             conn.close()
@@ -1180,6 +1959,29 @@ def _migrate_add_multiuser_owner_columns():
     # documents derived ownership from their session join until this column
     # existed; the legacy-owner sweep (below) backfills it on the next boot.
     _migrate_add_owner_to_table("documents", "ix_documents_owner")
+
+
+def _migrate_add_gallery_caption_column():
+    """Add OCR/vision caption storage for gallery images."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(gallery_images)").fetchall()]
+        if columns and "caption" not in columns:
+            conn.execute("ALTER TABLE gallery_images ADD COLUMN caption TEXT DEFAULT ''")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added caption column to gallery_images")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Migration gallery caption column failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _migrate_add_api_token_scopes_column():
@@ -1308,8 +2110,25 @@ def _migrate_assign_legacy_owner():
             with open(prefs_path, "r", encoding="utf-8") as f:
                 prefs = _json.load(f)
             if "_users" not in prefs and prefs:
-                # Flat format → nest under admin user
-                new_prefs = {"_users": {admin_user: prefs}}
+                # Flat format → nest ordinary preferences under the admin
+                # user. Foreground fallback is an explicit per-owner opt-in,
+                # so auth-disabled consent must remain inert at the flat root
+                # rather than becoming consent for the first named owner.
+                foreground_keys = {
+                    "foreground_fallback_enabled",
+                    "foreground_model_fallbacks",
+                }
+                named_prefs = {
+                    key: value
+                    for key, value in prefs.items()
+                    if key not in foreground_keys
+                }
+                new_prefs = {
+                    key: prefs[key]
+                    for key in foreground_keys
+                    if key in prefs
+                }
+                new_prefs["_users"] = {admin_user: named_prefs}
                 with open(prefs_path, "w", encoding="utf-8") as f:
                     _json.dump(new_prefs, f, indent=2)
                 logger.info(f"Migrated user_prefs.json to per-user format under '{admin_user}'")
@@ -1380,6 +2199,29 @@ def _migrate_add_doc_source_email_cols():
             conn.commit()
     except Exception as e:
         logging.getLogger(__name__).warning(f"doc source-email migration: {e}")
+
+
+def _migrate_add_calendar_source_email_cols():
+    """Add provenance fields so email-created events can link back to the email."""
+    cols_to_add = {
+        "source_email_uid": "VARCHAR",
+        "source_email_folder": "VARCHAR",
+        "source_email_account_id": "VARCHAR",
+        "source_email_message_id": "VARCHAR",
+    }
+    try:
+        with engine.connect() as conn:
+            existing = {r[1] for r in conn.execute(text("PRAGMA table_info(calendar_events)"))}
+            for col, spec in cols_to_add.items():
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE calendar_events ADD COLUMN {col} {spec}"))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_calendar_events_source_email_message_id "
+                "ON calendar_events (source_email_message_id)"
+            ))
+            conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"calendar source-email migration: {e}")
 
 def _migrate_add_task_automation_columns():
     """Add automation columns to scheduled_tasks table if missing."""
@@ -1624,6 +2466,7 @@ class Note(TimestampMixin, Base):
     session_id = Column(String, nullable=True)
     sort_order = Column(Integer, default=0)
     image_url  = Column(String, nullable=True)      # uploaded image URL (relative path)
+    gallery_id = Column(String, nullable=True, index=True)  # stable Gallery image for drawings
     repeat     = Column(String, default="none")     # none, daily, weekly, monthly, yearly
     # Auto-AI fields — populated by /api/notes/{id}/classify. The classification
     # JSON shape is { kind, solvable, confidence, task_prompt, tools, items?: [...] }.
@@ -1670,6 +2513,7 @@ class CalendarEvent(TimestampMixin, Base):
     # `Z`-suffix on serialization so the frontend interprets correctly.
     is_utc      = Column(Boolean, default=False, nullable=False)
     rrule       = Column(String, default="")
+    recurrence_exdates = Column(Text, default="")  # JSON list of skipped occurrence starts
     color       = Column(String, nullable=True)  # per-event color override
     status      = Column(String, default="confirmed")  # confirmed, cancelled
     importance  = Column(String, default="normal")    # low | normal | high | critical
@@ -1682,8 +2526,29 @@ class CalendarEvent(TimestampMixin, Base):
     remote_href = Column(String, nullable=True)        # CalDAV object URL for updates/deletes
     remote_etag = Column(String, nullable=True)        # Last seen CalDAV ETag, when available
     caldav_sync_pending = Column(String, nullable=True) # create | update | delete retry marker
+    # Provenance for events extracted from email. UID/folder form the frontend
+    # deep link: #email=<folder>:<imap uid>.
+    source_email_uid = Column(String, nullable=True, index=True)
+    source_email_folder = Column(String, nullable=True)
+    source_email_account_id = Column(String, nullable=True, index=True)
+    source_email_message_id = Column(String, nullable=True, index=True)
 
     calendar = relationship("CalendarCal", back_populates="events")
+
+
+class EmailCalendarInvitation(TimestampMixin, Base):
+    """Revision/tombstone state for one owner's email invitation source."""
+    __tablename__ = "email_calendar_invitations"
+
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    sender = Column(String, nullable=False)
+    source_uid = Column(String, nullable=False)
+    recurrence_id = Column(String, nullable=False, default="")
+    event_uid = Column(String, nullable=True)
+    sequence = Column(Integer, nullable=False, default=0)
+    stamp = Column(String, nullable=False, default="")
+    cancelled = Column(Boolean, nullable=False, default=False)
 
 
 class CalendarDeletedEvent(TimestampMixin, Base):
@@ -1715,72 +2580,155 @@ class Integration(TimestampMixin, Base):
 
 
 
-def _migrate_seed_email_account():
-    """If email_accounts is empty and settings.json has legacy flat imap_host/smtp_host
-    keys, create a single default account from them so nothing breaks for users who
-    upgraded. Safe to run repeatedly — it short-circuits once any row exists."""
+def _migrate_email_account_default_invariant():
+    """Normalize legacy duplicates and install durable at-most-one enforcement.
+
+    Older databases only had a non-unique ``(owner, is_default)`` lookup index.
+    Keep the oldest default deterministically in each normalized owner scope,
+    then add the same partial functional unique index used for fresh schemas.
+    """
+    dialect_name = engine.dialect.name
+    index_ddl = _EMAIL_ACCOUNT_DEFAULT_INDEX_DDL.get(dialect_name)
+    if index_ddl is None:
+        logger.warning(
+            "Email-account default uniqueness is not available for database "
+            "dialect %s; mutations remain serialized but are not protected by "
+            "a database constraint",
+            dialect_name,
+        )
+        return
+
     try:
-        with engine.connect() as conn:
-            tables = [r[0] for r in conn.execute(text(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='email_accounts'"
-            ))]
-            if "email_accounts" not in tables:
+        with engine.begin() as conn:
+            if not inspect(conn).has_table(EmailAccount.__tablename__):
                 return
-            existing = conn.execute(text("SELECT COUNT(*) FROM email_accounts")).scalar() or 0
-            if existing > 0:
-                return
+            default_rows = conn.execute(text("""
+                SELECT id, owner
+                FROM email_accounts
+                WHERE is_default IS TRUE
+                ORDER BY
+                    COALESCE(owner, ''),
+                    CASE WHEN created_at IS NULL THEN 1 ELSE 0 END,
+                    created_at,
+                    id
+            """)).mappings()
+            seen_owner_keys = set()
+            duplicate_ids = []
+            for row in default_rows:
+                owner_key = row["owner"] or ""
+                if owner_key in seen_owner_keys:
+                    duplicate_ids.append(row["id"])
+                else:
+                    seen_owner_keys.add(owner_key)
 
-        import json as _json
-        import uuid as _uuid
-        from pathlib import Path
-        settings_file = Path(SETTINGS_FILE)
-        if not settings_file.exists():
-            return
-        try:
-            s = _json.loads(settings_file.read_text(encoding="utf-8"))
-        except Exception:
-            return
+            for account_id in duplicate_ids:
+                conn.execute(
+                    text("UPDATE email_accounts SET is_default = :value WHERE id = :id"),
+                    {"value": False, "id": account_id},
+                )
+            conn.execute(text(index_ddl))
 
-        imap_host = (s.get("imap_host") or "").strip()
-        smtp_host = (s.get("smtp_host") or "").strip()
-        if not imap_host and not smtp_host:
-            return  # nothing to migrate
+        if duplicate_ids:
+            logger.warning(
+                "Normalized %d duplicate default email account(s) before "
+                "installing %s",
+                len(duplicate_ids),
+                _EMAIL_ACCOUNT_DEFAULT_INDEX,
+            )
+    except Exception:
+        # Starting without the constraint would silently retain the race this
+        # migration is intended to close.  Fail startup so an operator sees and
+        # can repair an incompatible schema instead of accepting unsafe writes.
+        logger.exception("Failed to enforce the email-account default invariant")
+        raise
+
+
+def _migrate_seed_email_account():
+    """Atomically seed one legacy default account when no account exists.
+
+    Reading settings is intentionally done before taking the owner mutex.  The
+    decisive emptiness check and insert share one locked transaction, so two
+    application workers starting together cannot both seed a default row.
+    """
+    import json as _json
+    import uuid as _uuid
+
+    settings_file = Path(SETTINGS_FILE)
+    if not settings_file.exists():
+        return
+    try:
+        s = _json.loads(settings_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    imap_host = (s.get("imap_host") or "").strip()
+    smtp_host = (s.get("smtp_host") or "").strip()
+    if not imap_host and not smtp_host:
+        return
+
+    db = None
+    try:
+        if not inspect(engine).has_table(EmailAccount.__tablename__):
+            return
+        db = SessionLocal()
+        lock_email_account_owner_mutations(db, "")
+        existing = db.execute(text("SELECT COUNT(*) FROM email_accounts")).scalar() or 0
+        if existing > 0:
+            return
 
         now = utcnow_naive()
-        with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO email_accounts
-                  (id, owner, name, is_default, enabled,
-                   imap_host, imap_port, imap_user, imap_password, imap_starttls,
-                   smtp_host, smtp_port, smtp_user, smtp_password,
-                   from_address, created_at, updated_at)
-                VALUES
-                  (:id, :owner, :name, :is_default, :enabled,
-                   :imap_host, :imap_port, :imap_user, :imap_password, :imap_starttls,
-                   :smtp_host, :smtp_port, :smtp_user, :smtp_password,
-                   :from_address, :created_at, :updated_at)
-            """), {
-                "id": _uuid.uuid4().hex,
-                "owner": None,
-                "name": "Default",
-                "is_default": True,
-                "enabled": True,
-                "imap_host": imap_host,
-                "imap_port": int(s.get("imap_port") or 993),
-                "imap_user": s.get("imap_user") or "",
-                "imap_password": s.get("imap_password") or "",
-                "imap_starttls": bool(s.get("imap_starttls", True)),
-                "smtp_host": smtp_host,
-                "smtp_port": int(s.get("smtp_port") or 465),
-                "smtp_user": s.get("smtp_user") or "",
-                "smtp_password": s.get("smtp_password") or "",
-                "from_address": s.get("email_from") or "",
-                "created_at": now,
-                "updated_at": now,
-            })
-            logging.getLogger(__name__).info("Seeded email_accounts 'Default' from settings.json")
+        db.execute(text("""
+            INSERT INTO email_accounts
+              (id, owner, name, is_default, enabled,
+               imap_host, imap_port, imap_user, imap_password, imap_starttls,
+               smtp_host, smtp_port, smtp_user, smtp_password,
+               from_address, created_at, updated_at)
+            VALUES
+              (:id, :owner, :name, :is_default, :enabled,
+               :imap_host, :imap_port, :imap_user, :imap_password, :imap_starttls,
+               :smtp_host, :smtp_port, :smtp_user, :smtp_password,
+               :from_address, :created_at, :updated_at)
+        """), {
+            "id": _uuid.uuid4().hex,
+            "owner": None,
+            "name": "Default",
+            "is_default": True,
+            "enabled": True,
+            "imap_host": imap_host,
+            "imap_port": int(s.get("imap_port") or 993),
+            "imap_user": s.get("imap_user") or "",
+            "imap_password": s.get("imap_password") or "",
+            "imap_starttls": bool(s.get("imap_starttls", True)),
+            "smtp_host": smtp_host,
+            "smtp_port": int(s.get("smtp_port") or 465),
+            "smtp_user": s.get("smtp_user") or "",
+            "smtp_password": s.get("smtp_password") or "",
+            "from_address": s.get("email_from") or "",
+            "created_at": now,
+            "updated_at": now,
+        })
+        db.commit()
+        logger.info("Seeded email_accounts 'Default' from settings.json")
     except Exception as e:
-        logging.getLogger(__name__).warning(f"seed email account migration: {e}")
+        if db is not None:
+            db.rollback()
+        logger.warning("seed email account migration: %s", e)
+    finally:
+        if db is not None:
+            db.close()
+
+
+# WARNING: Foreign-key enforcement is enabled globally for all SQLite connections.
+# Any future migrations or schema changes that temporarily violate foreign-key
+# constraints will fail. To perform such operations, foreign_keys must be
+# temporarily disabled around the migration workflow.
+def _migrate_add_task_authority_column():
+    """Retain snapshots after legacy task-table rebuilds; support all DBs."""
+    from sqlalchemy import inspect
+    with engine.begin() as conn:
+        columns = {column["name"] for column in inspect(conn).get_columns("scheduled_tasks")}
+        if "request_authority_json" not in columns:
+            conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN request_authority_json TEXT"))
 
 
 # WARNING: Foreign-key enforcement is enabled globally for all SQLite connections.
@@ -1794,31 +2742,79 @@ def init_db():
     """
     _migrate_model_endpoints()
     Base.metadata.create_all(bind=engine)
+    # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
+    # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
+    # on Windows (ACL-restricted profile dir) and the path helper returns None for
+    # Postgres / in-memory. Must stay AFTER create_all: the file is born here at
+    # the umask default, and nothing below resets the mode. The path comes from
+    # engine.url (SQLAlchemy's parsed URL), so a driver-qualified or query-tagged
+    # DATABASE_URL still resolves to the real file instead of slipping through.
+    db_path = _sqlite_db_path(engine.url)
+    if db_path is not None:
+        # Fail closed-loud on the main file: this is the only access control on
+        # it, so if the chmod genuinely fails (read-only FS, foreign owner) an
+        # operator should hear about it. safe_chmod also returns False as a
+        # Windows no-op, so guard on IS_WINDOWS to avoid a spurious warning there.
+        if not safe_chmod(db_path, 0o600) and not IS_WINDOWS:
+            logger.warning(
+                "Could not restrict %s to 0o600; it holds secrets and may be "
+                "world-readable. Check filesystem permissions and ownership.",
+                db_path,
+            )
+        # Re-lock any sidecars present at startup. New ones inherit the main
+        # file's mode (now 0o600, since we set it first), and they're usually
+        # absent here, but a stale -wal/-shm/-journal left by an older 0o644
+        # install could still expose secret pages. Absent sidecars are the
+        # normal case, not an error — only a failed chmod warrants a warning.
+        for suffix in _SQLITE_SIDECARS:
+            sidecar = db_path + suffix
+            if (
+                os.path.exists(sidecar)
+                and not safe_chmod(sidecar, 0o600)
+                and not IS_WINDOWS
+            ):
+                logger.warning(
+                    "Could not restrict %s to 0o600; it may expose DB pages.",
+                    sidecar,
+                )
     _migrate_add_hidden_models_column()
     _migrate_add_cached_models_column()
     _migrate_add_pinned_models_column()
+    _migrate_add_cookbook_serve_session_id_column()
     _migrate_add_notes_sort_order()
     _migrate_add_model_type_column()
     _migrate_add_model_endpoint_refresh_columns()
     _migrate_add_model_endpoint_owner_column()
     _migrate_add_provider_auth_id_column()
     _migrate_add_supports_tools_column()
+    _migrate_add_model_tool_modes_column()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
+    _migrate_add_plan_step_doc_columns()
     _migrate_add_last_message_at_column()
+    _migrate_add_memory_extraction_enabled_column()
+    _migrate_add_memory_injection_enabled_column()
+    _migrate_add_skill_injection_enabled_column()
+    _migrate_add_session_generation_settings_columns()
     _migrate_add_folder_column()
+    _migrate_add_session_cwd_column()
+    _migrate_add_session_endpoint_id_column()
     _migrate_add_token_columns()
+    _migrate_add_total_cost_usd()
     _migrate_add_mode_column()
     _migrate_add_multiuser_owner_columns()
+    _migrate_add_gallery_caption_column()
     _migrate_add_api_token_scopes_column()
     _migrate_backfill_document_owner_from_session()
     _migrate_assign_legacy_owner()
     _migrate_add_tidy_verdict()
     _migrate_add_doc_source_email_cols()
+    _migrate_add_calendar_source_email_cols()
     _migrate_add_oauth_config()
     _migrate_add_email_oauth_columns()
     _migrate_add_task_automation_columns()
+    _migrate_add_task_authority_column()
     _migrate_add_disabled_tools()
     _migrate_add_mcp_oauth_tokens_column()
     _migrate_add_task_v2_columns()
@@ -1827,12 +2823,15 @@ def init_db():
     _migrate_add_crew_member_id()
     _migrate_add_assistant_columns()
     _migrate_add_email_smtp_security()
+    _migrate_email_account_default_invariant()
     _migrate_seed_email_account()
     _migrate_add_calendar_metadata()
     _migrate_add_calendar_is_utc()
     _migrate_add_calendar_origin()
     _migrate_add_calendar_account_id()
     _migrate_add_caldav_sync_columns()
+    _migrate_add_calendar_recurrence_exdates()
+    _migrate_add_note_gallery_id()
     _migrate_chat_messages_fts()
     _migrate_encrypt_email_passwords()
     _migrate_encrypt_signatures()
@@ -1877,6 +2876,20 @@ def _migrate_chat_messages_fts():
     conn = None
     try:
         conn = sqlite3.connect(db_path)
+        fts_content_expr_new = (
+            "CASE WHEN instr(COALESCE(new.content, ''), ';base64,') > 0 "
+            "OR instr(COALESCE(new.content, ''), 'data:image/') > 0 "
+            "OR instr(COALESCE(new.content, ''), 'data:audio/') > 0 "
+            "THEN '[inline media omitted from search index]' "
+            "ELSE COALESCE(new.content, '') END"
+        )
+        fts_content_expr_cm = (
+            "CASE WHEN instr(COALESCE(cm.content, ''), ';base64,') > 0 "
+            "OR instr(COALESCE(cm.content, ''), 'data:image/') > 0 "
+            "OR instr(COALESCE(cm.content, ''), 'data:audio/') > 0 "
+            "THEN '[inline media omitted from search index]' "
+            "ELSE COALESCE(cm.content, '') END"
+        )
         try:
             conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp._odysseus_fts5_probe USING fts5(content)")
             conn.execute("DROP TABLE IF EXISTS temp._odysseus_fts5_probe")
@@ -1885,7 +2898,7 @@ def _migrate_chat_messages_fts():
             return
 
         conn.executescript(
-            """
+            f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
                 content,
                 message_id UNINDEXED,
@@ -1893,10 +2906,14 @@ def _migrate_chat_messages_fts():
                 role UNINDEXED
             );
 
+            DROP TRIGGER IF EXISTS chat_messages_fts_ai;
+            DROP TRIGGER IF EXISTS chat_messages_fts_ad;
+            DROP TRIGGER IF EXISTS chat_messages_fts_au;
+
             CREATE TRIGGER IF NOT EXISTS chat_messages_fts_ai
             AFTER INSERT ON chat_messages BEGIN
                 INSERT INTO chat_messages_fts(content, message_id, session_id, role)
-                VALUES (COALESCE(new.content, ''), new.id, new.session_id, new.role);
+                VALUES ({fts_content_expr_new}, new.id, new.session_id, new.role);
             END;
 
             CREATE TRIGGER IF NOT EXISTS chat_messages_fts_ad
@@ -1908,21 +2925,38 @@ def _migrate_chat_messages_fts():
             AFTER UPDATE ON chat_messages BEGIN
                 DELETE FROM chat_messages_fts WHERE message_id = old.id;
                 INSERT INTO chat_messages_fts(content, message_id, session_id, role)
-                VALUES (COALESCE(new.content, ''), new.id, new.session_id, new.role);
+                VALUES ({fts_content_expr_new}, new.id, new.session_id, new.role);
             END;
             """
         )
-        conn.execute(
-            """
-            INSERT INTO chat_messages_fts(content, message_id, session_id, role)
-            SELECT COALESCE(cm.content, ''), cm.id, cm.session_id, cm.role
-            FROM chat_messages cm
-            WHERE NOT EXISTS (
-                SELECT 1 FROM chat_messages_fts fts
-                WHERE fts.message_id = cm.id
+        # message_id is deliberately UNINDEXED in the FTS table.  A correlated
+        # NOT EXISTS against it therefore becomes quadratic once the transcript
+        # grows large, even when there is nothing left to backfill.  Build a
+        # temporary indexed set only when the row counts show that reconciliation
+        # is needed.  Normal inserts/updates/deletes stay synchronized by the
+        # triggers above.
+        chat_count = conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0]
+        fts_count = conn.execute("SELECT COUNT(*) FROM chat_messages_fts").fetchone()[0]
+        if chat_count != fts_count:
+            conn.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS _odysseus_fts_message_ids "
+                "(message_id TEXT PRIMARY KEY) WITHOUT ROWID"
             )
-            """
-        )
+            conn.execute("DELETE FROM temp._odysseus_fts_message_ids")
+            conn.execute(
+                "INSERT OR IGNORE INTO temp._odysseus_fts_message_ids(message_id) "
+                "SELECT message_id FROM chat_messages_fts"
+            )
+            conn.execute(
+                f"""
+                INSERT INTO chat_messages_fts(content, message_id, session_id, role)
+                SELECT {fts_content_expr_cm}, cm.id, cm.session_id, cm.role
+                FROM chat_messages cm
+                LEFT JOIN temp._odysseus_fts_message_ids known ON known.message_id = cm.id
+                WHERE known.message_id IS NULL
+                """
+            )
+        _scrub_legacy_chat_message_fts_media(conn)
         conn.commit()
     except Exception as e:
         logging.getLogger(__name__).warning(f"chat_messages FTS migration failed: {e}")
@@ -1931,6 +2965,37 @@ def _migrate_chat_messages_fts():
             conn.close()
         except Exception:
             pass
+
+
+def _scrub_legacy_chat_message_fts_media(conn) -> None:
+    """Replace already-indexed inline media rows with searchable text only."""
+    try:
+        from src.attachment_refs import search_index_text
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"chat_messages FTS media scrub skipped: {e}")
+        return
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, session_id, role, content
+            FROM chat_messages
+            WHERE instr(COALESCE(content, ''), ';base64,') > 0
+               OR instr(COALESCE(content, ''), 'data:image/') > 0
+               OR instr(COALESCE(content, ''), 'data:audio/') > 0
+            """
+        ).fetchall()
+        for message_id, session_id, role, content in rows:
+            conn.execute("DELETE FROM chat_messages_fts WHERE message_id = ?", (message_id,))
+            conn.execute(
+                """
+                INSERT INTO chat_messages_fts(content, message_id, session_id, role)
+                VALUES (?, ?, ?, ?)
+                """,
+                (search_index_text(content), message_id, session_id, role),
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"chat_messages FTS media scrub failed: {e}")
 
 
 def _migrate_add_email_smtp_security():
@@ -2184,6 +3249,49 @@ def _migrate_add_calendar_metadata():
         except Exception:
             pass
 
+
+def _migrate_add_calendar_recurrence_exdates():
+    """Add skipped recurrence occurrences for deleting one instance of a series."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(calendar_events)").fetchall()]
+        if columns and "recurrence_exdates" not in columns:
+            conn.execute("ALTER TABLE calendar_events ADD COLUMN recurrence_exdates TEXT DEFAULT ''")
+        conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"calendar_events recurrence_exdates migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _migrate_add_note_gallery_id():
+    """Keep a drawn note linked to one Gallery image across edits."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()]
+        if columns and "gallery_id" not in columns:
+            conn.execute("ALTER TABLE notes ADD COLUMN gallery_id VARCHAR")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_notes_gallery_id ON notes(gallery_id)")
+            conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"notes gallery_id migration failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def get_db():
     """
     Dependency to get a database session.
@@ -2354,3 +3462,42 @@ def archive_session(session_id: str):
 
 
 init_db()
+
+
+# ── Feature #8: Shared real-time workspaces ──────────────────────────────────
+
+
+class SharedSession(Base):
+    """A share link granting read-only (viewer) access to one chat session.
+
+    The `token` is the bearer credential used by the public read endpoints
+    (/api/s/{token} and /api/s/{token}/stream). It is generated server-side
+    (secrets.token_urlsafe in services/session_share) and is meant to be
+    revealed only to people the owner wants to share with. Rows cascade away
+    automatically when the underlying chat `Session` row is deleted.
+    """
+
+    __tablename__ = "shared_sessions"
+
+    id = Column(String, primary_key=True, index=True)
+    # NOTE: no index=True on owner/session_id — the explicit Index entries
+    # below would collide with the auto-generated ix_shared_sessions_* names
+    # on a fresh create_all (duplicate DDL name), breaking new-DB startup.
+    owner      = Column(String, nullable=False)  # username; "" in single-user mode
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    token      = Column(String, nullable=False)  # url-safe bearer token
+    role       = Column(String, nullable=False, default="viewer")  # viewer for now; roles reserved for later
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_shared_sessions_token"),
+        Index("ix_shared_sessions_owner", "owner"),
+        Index("ix_shared_sessions_session_id", "session_id"),
+    )
+
+
+# init_db() ran just above — before SharedSession was defined — so on existing
+# installs the new table would not be created at startup. create_all is
+# idempotent (it only creates tables that are missing), so re-run it here to
+# auto-create shared_sessions without a migration file.
+Base.metadata.create_all(bind=engine)

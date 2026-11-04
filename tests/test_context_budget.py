@@ -5,7 +5,34 @@ Pins the pure budget computation and the explicit-override detection.
 
 import json
 
-from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX
+from src.context_budget import (
+    DEFAULT_HARD_MAX,
+    bound_trim_reserve,
+    compute_input_token_budget,
+    compute_trim_context_window,
+)
+
+
+def test_trim_reserve_cannot_consume_small_effective_budget():
+    assert bound_trim_reserve(1638, 2048) == 819
+    assert bound_trim_reserve(100, 2048) == 50
+    assert bound_trim_reserve(4096, 512) == 512
+
+
+def test_trim_window_adds_response_reserve_to_input_budget_once():
+    trim_window, reserve = compute_trim_context_window(1638, 4096, 1024)
+
+    assert trim_window == 2662
+    assert reserve == 1024
+    assert trim_window - reserve == 1638
+
+
+def test_trim_window_keeps_half_of_tiny_context_for_input():
+    trim_window, reserve = compute_trim_context_window(435, 512, 1024)
+
+    assert trim_window == 512
+    assert reserve == 256
+    assert trim_window - reserve == 256
 
 
 def test_default_scales_to_context_window():
@@ -31,6 +58,11 @@ def test_explicit_budget_clamped_to_window():
 def test_unknown_window_falls_back_to_configured():
     assert compute_input_token_budget(6000, 0, explicit=False) == 6000
     assert compute_input_token_budget(0, 0, explicit=False) == 6000  # default
+
+
+def test_invalid_numeric_inputs_fall_back_cleanly():
+    assert compute_input_token_budget("bad", "also bad", explicit=False) == 6000
+    assert compute_input_token_budget("bad", 128000, explicit=True) == int(128000 * 0.85)
 
 
 def test_is_setting_overridden_reads_raw_saved_file(tmp_path, monkeypatch):
@@ -86,7 +118,8 @@ def test_default_settings_registers_hard_max_key():
 def test_alias_map_registers_friendly_names():
     """`manage_settings` should accept 'hard max' and friends."""
     from pathlib import Path
-    src = Path("src/tool_implementations.py").read_text()
+    # manage_settings (and its alias map) moved to agent_tools/admin_tools.py in #3629.
+    src = Path("src/agent_tools/admin_tools.py").read_text()
     assert '"hard max": "agent_input_token_hard_max"' in src
     assert '"token budget cap": "agent_input_token_hard_max"' in src
     assert '"input budget cap": "agent_input_token_hard_max"' in src

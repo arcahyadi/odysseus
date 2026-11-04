@@ -78,3 +78,61 @@ async def test_list_events_honors_range_aliases(start_key, end_key):
     summaries = [event["summary"] for event in res["events"]]
     assert summaries == ["Late June planning"]
     assert "between 2126-06-01 and 2126-07-01" in res["response"]
+
+
+async def test_list_events_query_filters_when_explicit_range_is_present():
+    from src.tool_implementations import do_manage_calendar
+
+    owner = "calendar-query-" + uuid.uuid4().hex[:8]
+    marker = "ODY-EVAL-CALENDAR-" + uuid.uuid4().hex[:8]
+
+    matching = await do_manage_calendar(json.dumps({
+        "action": "create_event",
+        "summary": marker,
+        "dtstart": "2126-06-25T10:00:00Z",
+        "description": "temporary fixture",
+    }), owner=owner)
+    assert matching.get("exit_code", 0) == 0, matching
+
+    nonmatching = await do_manage_calendar(json.dumps({
+        "action": "create_event",
+        "summary": "Different fixture",
+        "dtstart": "2126-06-25T12:00:00Z",
+    }), owner=owner)
+    assert nonmatching.get("exit_code", 0) == 0, nonmatching
+
+    listed = await do_manage_calendar(json.dumps({
+        "action": "list_events",
+        "start": "2126-06-01",
+        "end": "2126-07-01",
+        "query": marker,
+    }), owner=owner)
+
+    assert listed.get("exit_code", 0) == 0, listed
+    assert [event["summary"] for event in listed["events"]] == [marker]
+
+
+async def test_list_events_rejects_partial_loose_range():
+    from src.tool_implementations import do_manage_calendar
+
+    owner = "calendar-partial-" + uuid.uuid4().hex[:8]
+
+    # Partial: has query and start, but no end
+    res = await do_manage_calendar(json.dumps({
+        "action": "list_events",
+        "query": "July",
+        "start_time": "2126-07-01T00:00:00Z",
+    }), owner=owner)
+
+    assert res.get("exit_code", 1) == 1, res
+    assert "list_events needs explicit start/end" in res.get("error", "")
+
+    # Partial: has query and end, but no start
+    res2 = await do_manage_calendar(json.dumps({
+        "action": "list_events",
+        "query": "July",
+        "end_time": "2126-07-31T23:59:59Z",
+    }), owner=owner)
+
+    assert res2.get("exit_code", 1) == 1, res2
+    assert "list_events needs explicit start/end" in res2.get("error", "")

@@ -10,7 +10,7 @@ Security fixes are handled on the default branch until formal releases are cut.
 
 - Keep `AUTH_ENABLED=true` for any network-accessible deployment.
 - Keep `LOCALHOST_BYPASS=false` outside local development.
-- Set `SECURE_COOKIES=true` when Odysseus is served through HTTPS by a trusted reverse proxy or private access gateway.
+- Leave `SECURE_COOKIES` unset unless you need to override it: session cookies are marked `Secure` whenever the request arrives over HTTPS. Set `SECURE_COOKIES=true` to force it on (for a proxy Odysseus cannot see the scheme of), or `SECURE_COOKIES=false` to force it off while you still serve plain HTTP alongside HTTPS.
 - Use HTTPS when exposing the app beyond localhost.
 - Put the authenticated Odysseus web/API entrypoint behind a trusted reverse proxy or private access layer such as Cloudflare Access, Tailscale, or a VPN.
 - Keep ChromaDB, SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model/provider APIs internal-only.
@@ -20,6 +20,13 @@ Security fixes are handled on the default branch until formal releases are cut.
 - Give admin accounts strong passwords and enable 2FA where possible.
 - Leave high-risk agent tools restricted to admins: shell, Python, file read/write, email send/read, MCP, app API, task/skill/memory management, settings, tokens, and model serving.
 - Rotate API keys, webhook secrets, and Odysseus API tokens if they appear in logs, screenshots, demos, or shared chats.
+- **`ODYSSEUS_INTERNAL_TOKEN` is an admin-bypass header key.** Leave it unset
+  unless an external tool genuinely needs to hit admin-gated routes via
+  `X-Odysseus-Internal-Token` (the in-process agent loopback works without
+  it). If you do set one it must be at least 32 chars with at least 4
+  distinct characters — shorter or degenerate values are rejected at
+  import and a random token is used instead. Treat any accepted value like
+  a password: rotate if it appears in a log, chat, or screenshot.
 - Treat shell, model-serving, MCP, email, calendar, and vault features as privileged admin functionality.
 - Common internal-only ports are Odysseus `7000`, SearXNG `8080`, ntfy `8091`, ChromaDB `8100`, Ollama `11434`, and local model/provider APIs such as `8000-8020`.
 

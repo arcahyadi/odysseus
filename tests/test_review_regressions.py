@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import os
 import sys
 import types
 from types import SimpleNamespace
@@ -10,6 +11,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.preset_manager import PresetManager
+
+
+async def _execute_without_run_context(execute_tool_block, *args, **kwargs):
+    from src.tool_execution import NO_TOOL_SECURITY_CONTEXT
+    from tests.runtime_evidence_helpers import server_authorized_executor
+
+    kwargs.setdefault("security_context", NO_TOOL_SECURITY_CONTEXT)
+    return await server_authorized_executor(execute_tool_block)(*args, **kwargs)
 
 
 class _FakeColumn:
@@ -278,7 +287,7 @@ def test_preset_manager_default_custom_preset_starts_disabled(tmp_path):
     assert custom["enabled"] is False
     assert custom["system_prompt"] == ""
     assert custom["temperature"] == 1.0
-    assert custom["max_tokens"] == 0
+    assert custom["max_tokens"] == 32768
 
 
 def test_preset_manager_migrates_legacy_default_custom_preset_disabled(tmp_path):
@@ -301,7 +310,7 @@ def test_preset_manager_migrates_legacy_default_custom_preset_disabled(tmp_path)
     assert custom["enabled"] is False
     assert custom["system_prompt"] == ""
     assert custom["temperature"] == 1.0
-    assert custom["max_tokens"] == 0
+    assert custom["max_tokens"] == 32768
 
 
 def test_normalize_thinking_handles_lowercase_thinking_process(monkeypatch):
@@ -337,7 +346,7 @@ def test_normalize_thinking_handles_lowercase_thinking_process(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_chat_context_incognito_does_not_duplicate_current_user_message(monkeypatch):
+async def test_build_chat_context_incognito_disables_skills_and_does_not_duplicate_user_message(monkeypatch):
     for mod_name in [
         "starlette.middleware",
         "starlette.middleware.base",
@@ -354,6 +363,7 @@ async def test_build_chat_context_incognito_does_not_duplicate_current_user_mess
             monkeypatch.setitem(sys.modules, mod_name, MagicMock())
 
     chat_helpers = importlib.import_module("routes.chat_helpers")
+    chat_helpers._INCOGNITO_CONTEXTS.clear()
 
     async def fake_preprocess(chat_handler, message, att_ids, sess, **kwargs):
         # **kwargs absorbs auto_opened_docs (added when PDF imports auto-create
@@ -399,9 +409,13 @@ async def test_build_chat_context_incognito_does_not_duplicate_current_user_mess
     )
     request = SimpleNamespace()
     chat_handler = SimpleNamespace()
-    chat_processor = SimpleNamespace(
-        build_context_preface=lambda **kwargs: ([], [], []),
-    )
+    preface_options = {}
+
+    def fake_build_context_preface(**kwargs):
+        preface_options.update(kwargs)
+        return [], [], []
+
+    chat_processor = SimpleNamespace(build_context_preface=fake_build_context_preface)
 
     ctx = await chat_helpers.build_chat_context(
         sess=sess,
@@ -415,6 +429,69 @@ async def test_build_chat_context_incognito_does_not_duplicate_current_user_mess
 
     user_messages = [m for m in ctx.messages if m.get("role") == "user" and m.get("content") == "hello"]
     assert len(user_messages) == 1
+    assert preface_options["use_skills"] is False
+
+
+@pytest.mark.asyncio
+async def test_build_chat_context_incognito_ignores_saved_session_history(monkeypatch):
+    for mod_name in [
+        "starlette.middleware",
+        "starlette.middleware.base",
+        "core.models",
+        "core.database",
+        "routes.prefs_routes",
+        "routes.research_routes",
+        "src.llm_core",
+        "src.context_compactor",
+        "src.model_context",
+        "src.auth_helpers",
+    ]:
+        if mod_name not in sys.modules:
+            monkeypatch.setitem(sys.modules, mod_name, MagicMock())
+
+    chat_helpers = importlib.import_module("routes.chat_helpers")
+    chat_helpers._INCOGNITO_CONTEXTS.clear()
+
+    async def fake_preprocess(chat_handler, message, att_ids, sess, **kwargs):
+        return chat_helpers.PreprocessedMessage(
+            enhanced_message=message,
+            user_content=message,
+            text_for_context=message,
+            youtube_transcripts=[],
+            attachment_meta=[],
+        )
+
+    async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None):
+        return messages, 123, False
+
+    monkeypatch.setattr(chat_helpers, "preprocess", fake_preprocess)
+    monkeypatch.setattr(chat_helpers, "extract_preset", lambda *_args, **_kwargs: chat_helpers.PresetInfo(0.7, 1024, None, None))
+    monkeypatch.setattr(chat_helpers, "load_prefs_for_user", lambda user: {})
+    monkeypatch.setattr(chat_helpers, "effective_user", lambda request: "tester")
+    monkeypatch.setattr(chat_helpers, "normalize_model_id", lambda endpoint_url, model, **kwargs: None)
+    monkeypatch.setattr(chat_helpers, "maybe_compact", fake_maybe_compact)
+    monkeypatch.setattr(chat_helpers, "trim_for_context", lambda messages, context_length: messages)
+
+    sess = SimpleNamespace(
+        endpoint_url="http://localhost:8000/v1",
+        model="test-model",
+        headers={},
+        get_context_messages=lambda: [{"role": "user", "content": "older non-incognito secret"}],
+    )
+    chat_processor = SimpleNamespace(build_context_preface=lambda **kwargs: ([], [], []))
+
+    ctx = await chat_helpers.build_chat_context(
+        sess=sess,
+        request=SimpleNamespace(),
+        chat_handler=SimpleNamespace(),
+        chat_processor=chat_processor,
+        message="fresh incognito turn",
+        session_id="s-incog",
+        incognito=True,
+    )
+
+    assert {"role": "user", "content": "fresh incognito turn"} in ctx.messages
+    assert all(m.get("content") != "older non-incognito secret" for m in ctx.messages)
 
 
 @pytest.mark.asyncio
@@ -431,7 +508,8 @@ async def test_admin_agent_tools_require_admin(monkeypatch):
     monkeypatch.setattr(auth_mod, "AuthManager", lambda: FakeAuth())
 
     for tool_name in ("manage_tokens", "app_api", "serve_preset"):
-        desc, result = await execute_tool_block(
+        desc, result = await _execute_without_run_context(
+            execute_tool_block,
             SimpleNamespace(tool_type=tool_name, content='{"action":"create","name":"bad"}'),
             owner="regular-user",
         )
@@ -439,6 +517,193 @@ async def test_admin_agent_tools_require_admin(monkeypatch):
         assert desc == f"{tool_name}: BLOCKED"
         assert result["exit_code"] == 1
         assert "requires an admin" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_host_shell_uses_tui_bridge_context(monkeypatch):
+    auth_mod = _install_core_auth_stub(monkeypatch)
+    from src.tool_execution import execute_tool_block
+    import src.agent_tools.subprocess_tools as subprocess_tools
+
+    class FakeAuth:
+        is_configured = True
+
+        def is_admin(self, username):
+            return True
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"stdout": "ajax 192.168.1.42", "stderr": "", "exit_code": 0}
+
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            calls.append(("init", args, kwargs))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def post(self, url, **kwargs):
+            calls.append(("post", url, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(auth_mod, "AuthManager", lambda: FakeAuth())
+    monkeypatch.setattr(subprocess_tools.httpx, "AsyncClient", FakeAsyncClient)
+
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(
+            tool_type="host_shell",
+            content=json.dumps({"command": "ip neigh", "timeout": 12}),
+        ),
+        owner="admin",
+        client_runtime_context={
+            "surface": "odysseus-tui",
+            "host_shell_bridge": {
+                "url": "http://host.docker.internal:17654/run",
+                "token": "bridge-token",
+            }
+        },
+    )
+
+    assert desc.startswith("host_shell:")
+    assert result["exit_code"] == 0
+    assert result["output"] == "ajax 192.168.1.42"
+    assert calls[1][1] == "http://host.docker.internal:17654/run"
+    bridge_payload = calls[1][2]["json"]
+    assert bridge_payload["command"] == "ip neigh"
+    assert bridge_payload["timeout"] == 12
+    assert isinstance(bridge_payload["request_id"], str)
+    assert bridge_payload["request_id"]
+    assert calls[1][2]["headers"]["X-Odysseus-TUI-Bridge-Token"] == "bridge-token"
+
+
+@pytest.mark.asyncio
+async def test_host_shell_forwards_detach_and_job_polling(monkeypatch):
+    auth_mod = _install_core_auth_stub(monkeypatch)
+    from src.tool_execution import execute_tool_block
+    import src.agent_tools.subprocess_tools as subprocess_tools
+
+    class FakeAuth:
+        is_configured = True
+
+        def is_admin(self, username):
+            return True
+
+    responses = iter([
+        {"stdout": "started", "stderr": "", "exit_code": 0, "detached": True, "job_id": "job-1"},
+        {"stdout": "still running", "stderr": "", "exit_code": 0, "status": "running", "job_id": "job-1"},
+    ])
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return next(responses)
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def post(self, url, **kwargs):
+            calls.append(kwargs["json"])
+            return FakeResponse()
+
+    monkeypatch.setattr(auth_mod, "AuthManager", lambda: FakeAuth())
+    monkeypatch.setattr(subprocess_tools.httpx, "AsyncClient", FakeAsyncClient)
+    context = {
+        "surface": "odysseus-tui",
+        "host_shell_bridge": {"url": "http://host.docker.internal:17654/run", "token": "bridge-token"},
+    }
+
+    _, started = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(tool_type="host_shell", content=json.dumps({"command": "sleep 5", "detach": True})),
+        owner="admin", client_runtime_context=context,
+    )
+    _, running = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(tool_type="host_shell", content=json.dumps({"job_id": "job-1"})),
+        owner="admin", client_runtime_context=context,
+    )
+
+    assert started["detached"] is True
+    assert started["job_id"] == "job-1"
+    assert running["status"] == "running"
+    assert calls == [
+        {"command": "sleep 5", "timeout": 30, "detach": True},
+        {"job_id": "job-1", "timeout": 30},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_host_shell_rejects_non_local_bridge_url_before_http(monkeypatch):
+    auth_mod = _install_core_auth_stub(monkeypatch)
+    from src.tool_execution import execute_tool_block
+    import src.agent_tools.subprocess_tools as subprocess_tools
+
+    class FakeAuth:
+        is_configured = True
+
+        def is_admin(self, username):
+            return True
+
+    class UnexpectedAsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("host_shell should reject unsafe bridge URL before HTTP")
+
+    monkeypatch.setattr(auth_mod, "AuthManager", lambda: FakeAuth())
+    monkeypatch.setattr(subprocess_tools.httpx, "AsyncClient", UnexpectedAsyncClient)
+
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(
+            tool_type="host_shell",
+            content=json.dumps({"command": "ip neigh", "timeout": 12}),
+        ),
+        owner="admin",
+        client_runtime_context={
+            "host_shell_bridge": {
+                "url": "http://169.254.169.254/run",
+                "token": "bridge-token",
+            }
+        },
+    )
+
+    assert desc.startswith("host_shell:")
+    assert result["exit_code"] == 1
+    assert result.get("failure_kind") == "resource_identity_denied"
+    assert "unresolved" in result["error"].lower()
+
+
+def test_host_shell_bridge_allows_backend_default_gateway(monkeypatch):
+    import src.agent_tools.subprocess_tools as subprocess_tools
+
+    monkeypatch.setattr(
+        subprocess_tools,
+        "_docker_default_gateway_ips",
+        lambda: {"172.18.0.1"},
+    )
+
+    assert subprocess_tools.is_host_shell_bridge_url_allowed(
+        "http://172.18.0.1:17654/run"
+    )
+    assert not subprocess_tools.is_host_shell_bridge_url_allowed(
+        "http://172.18.0.2:17654/run"
+    )
 
 
 @pytest.mark.asyncio
@@ -514,6 +779,33 @@ async def test_app_api_blocks_cookbook_host_control_routes_before_loopback(monke
 
         assert result["exit_code"] == 1
         assert error_text in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_app_api_blocks_search_route_before_loopback(monkeypatch):
+    import httpx
+    from src.tool_implementations import do_app_api
+
+    class UnexpectedAsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("app_api should block search routes before loopback")
+
+    monkeypatch.setattr(httpx, "AsyncClient", UnexpectedAsyncClient)
+
+    result = await do_app_api(
+        json.dumps(
+            {
+                "action": "call",
+                "method": "GET",
+                "path": "/api/search",
+                "query": {"q": "crow box designs"},
+            }
+        ),
+        owner="admin",
+    )
+
+    assert result["exit_code"] == 1
+    assert "use the `web_search` tool" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -604,9 +896,12 @@ async def test_app_api_endpoint_discovery_hides_cookbook_host_control_routes(mon
 
 
 @pytest.mark.asyncio
-async def test_public_agent_policy_blocks_sensitive_tools(monkeypatch):
+async def test_public_agent_policy_blocks_sensitive_tools(monkeypatch, tmp_path):
     auth_mod = _install_core_auth_stub(monkeypatch)
     from src.tool_execution import execute_tool_block
+    import src.tool_execution as tool_execution
+    mcp = _FakeMcpManager()
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: mcp)
 
     class FakeAuth:
         is_configured = True
@@ -616,10 +911,25 @@ async def test_public_agent_policy_blocks_sensitive_tools(monkeypatch):
 
     monkeypatch.setattr(auth_mod, "AuthManager", lambda: FakeAuth())
 
-    for tool_name in ("send_email", "read_file", "mcp__email__send_email"):
-        desc, result = await execute_tool_block(
-            SimpleNamespace(tool_type=tool_name, content="{}"),
+    # Every bare email tool name is spelled out (not imported from
+    # BUILTIN_EMAIL_TOOLS) so accidentally dropping one from that set fails
+    # here instead of silently shrinking the blocklist.
+    bare_email_tools = (
+        "list_email_accounts", "list_emails", "read_email", "search_emails",
+        "scan_email_unsubscribes", "unsubscribe_email",
+        "send_email", "reply_to_email", "draft_email", "draft_email_reply",
+        "ai_draft_email_reply", "archive_email", "delete_email",
+        "mark_email_read", "bulk_email", "download_attachment",
+    )
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("sample")
+    for tool_name in bare_email_tools + ("read_file", "mcp__email__send_email"):
+        content = json.dumps({"path": str(test_file)}) if tool_name == "read_file" else "{}"
+        desc, result = await _execute_without_run_context(
+            execute_tool_block,
+            SimpleNamespace(tool_type=tool_name, content=content),
             owner="regular-user",
+            workspace=str(tmp_path),
         )
         assert desc == f"{tool_name}: BLOCKED"
         assert result["exit_code"] == 1
@@ -627,14 +937,390 @@ async def test_public_agent_policy_blocks_sensitive_tools(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_disabled_qualified_email_tool_blocks_bare_alias(monkeypatch):
+    """A bare email fence is an alias for its mcp__email__ form. Plan mode and
+    the MCP settings toggle write the QUALIFIED name into disabled_tools, so
+    the gate must block the bare spelling too — and never reach the MCP
+    manager (PR #3681 review follow-up)."""
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block, NO_TOOL_SECURITY_CONTEXT
+    from src.turn_contract import canonical_tool
+    from src.agent_runtime.authority import RequestAuthority, OperationGrant
+
+    def fail_get_mcp_manager():
+        raise AssertionError("blocked email tool must not reach the MCP manager")
+
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", fail_get_mcp_manager)
+
+    for bare, disabled in (
+        # qualified denylist entry blocks the bare alias…
+        ("list_emails", {"mcp__email__list_emails"}),
+        ("download_attachment", {"mcp__email__download_attachment"}),
+        # …and a bare denylist entry blocks the qualified spelling.
+        ("mcp__email__delete_email", {"delete_email"}),
+    ):
+        canon = canonical_tool(bare)
+        auth = RequestAuthority("test", "admin-user", "", "", (OperationGrant(canon),), backend_resources=())
+        desc, result = await execute_tool_block(
+            SimpleNamespace(tool_type=bare, content="{}"),
+            owner="admin-user",
+            disabled_tools=disabled,
+            request_authority=auth,
+            security_context=NO_TOOL_SECURITY_CONTEXT,
+        )
+        assert desc == f"{bare}: BLOCKED"
+        assert result["exit_code"] == 1
+        assert "disabled by user" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_tool_policy_qualified_email_block_covers_bare_alias(monkeypatch):
+    """Same aliasing rule for the turn ToolPolicy denylist."""
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block, NO_TOOL_SECURITY_CONTEXT
+    from src.tool_policy import ToolPolicy
+    from src.agent_runtime.authority import RequestAuthority, OperationGrant
+
+    def fail_get_mcp_manager():
+        raise AssertionError("blocked email tool must not reach the MCP manager")
+
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", fail_get_mcp_manager)
+
+    policy = ToolPolicy(disabled_tools=frozenset({"mcp__email__send_email"}))
+    auth = RequestAuthority("test", "admin-user", "", "", (OperationGrant("send_email"),), backend_resources=())
+    desc, result = await execute_tool_block(
+        SimpleNamespace(tool_type="send_email", content="{}"),
+        owner="admin-user",
+        tool_policy=policy,
+        request_authority=auth,
+        security_context=NO_TOOL_SECURITY_CONTEXT,
+    )
+    assert desc == "send_email: BLOCKED"
+    assert result["exit_code"] == 1
+
+
+@pytest.mark.asyncio
+async def test_disable_tool_email_covers_full_builtin_set(monkeypatch):
+    """The friendly `disable_tool email` toggle must cover every built-in
+    email tool, in BOTH spellings — bare names (function-schema hiding,
+    bare-fence dispatch) and mcp__email__* (MCP schema hiding, runtime
+    qualified blocks). Hand-picking a subset left tools like delete_email
+    and download_attachment enabled (PR #3681 review follow-up)."""
+    # Import first so the module loads against the real core package; only
+    # the call-time SessionLocal import below sees the stub.
+    from src.tool_implementations import do_manage_settings
+    import src.settings as settings_mod
+
+    db_mod = types.ModuleType("core.database")
+
+    class _Db:
+        def close(self):
+            pass
+
+    db_mod.SessionLocal = lambda: _Db()
+    monkeypatch.setitem(sys.modules, "core.database", db_mod)
+
+    store = {}
+
+    def fake_load_settings():
+        return dict(store)
+
+    def fake_save_settings(s):
+        store.clear()
+        store.update(s)
+
+    monkeypatch.setattr(settings_mod, "load_settings", fake_load_settings)
+    monkeypatch.setattr(settings_mod, "save_settings", fake_save_settings)
+
+    result = await do_manage_settings(
+        '{"action": "disable_tool", "tool": "email"}', owner="admin"
+    )
+
+    assert result["exit_code"] == 0
+    disabled = set(store["disabled_tools"])
+    # Spelled out (not imported from BUILTIN_EMAIL_TOOLS) so dropping a name
+    # from the constant fails here instead of silently shrinking the toggle.
+    bare_email_tools = (
+        "list_email_accounts", "list_emails", "read_email", "search_emails",
+        "scan_email_unsubscribes", "unsubscribe_email",
+        "send_email", "reply_to_email", "draft_email", "draft_email_reply",
+        "ai_draft_email_reply", "archive_email", "delete_email",
+        "mark_email_read", "bulk_email", "download_attachment",
+    )
+    for tool_name in bare_email_tools:
+        assert tool_name in disabled, tool_name
+        assert f"mcp__email__{tool_name}" in disabled, tool_name
+
+    # enable_tool is refused from chat: the denylist is admin policy and can
+    # only be widened in Settings > Agent Tools (issue #5523). The full set
+    # must stay disabled.
+    result = await do_manage_settings(
+        '{"action": "enable_tool", "tool": "email"}', owner="admin"
+    )
+    assert result["exit_code"] == 1
+    assert set(store["disabled_tools"]) == disabled
+
+
+def _install_admin_auth_stub(monkeypatch):
+    auth_mod = _install_core_auth_stub(monkeypatch)
+
+    class FakeAdminAuth:
+        is_configured = True
+
+        def is_admin(self, username):
+            return True
+
+    monkeypatch.setattr(auth_mod, "AuthManager", lambda: FakeAdminAuth())
+
+
+class _FakeMcpManager:
+    def __init__(self):
+        self.calls = []
+
+    def resource_identity(self, qualified_name):
+        from src.agent_runtime.resources import ExternalResource
+        server = qualified_name.split("__")[1] if "__" in qualified_name else "email"
+        return ExternalResource("mcp", f"mcp:{server}", server, qualified_name, "fake-incarnation")
+
+    async def call_tool(self, name, args):
+        self.calls.append((name, args))
+        return {"output": "ok", "exit_code": 0}
+
+
+@pytest.mark.asyncio
+async def test_bare_email_dispatch_rejects_non_object_json_args(monkeypatch):
+    """The fence parser accepts JSON arrays as inline args, but email tools
+    take objects — a correctable error must come back instead of a silent
+    empty-args call (same class as #3966)."""
+    _install_admin_auth_stub(monkeypatch)
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    mcp = _FakeMcpManager()
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: mcp)
+
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(tool_type="bulk_email", content='["10", "11"]'),
+        owner="admin-user",
+    )
+    assert result["exit_code"] == 1
+    assert "JSON object" in result["error"]
+    assert mcp.calls == [], "non-object args must never reach the MCP server"
+
+
+@pytest.mark.asyncio
+async def test_bare_email_dispatch_rejects_invalid_json_body(monkeypatch):
+    """The classic tag/body form reaches execution unvalidated (only INLINE
+    args are JSON-checked by the parser). A non-JSON-object body must return a
+    correctable parse error — silently becoming {} args would read the DEFAULT
+    mailbox instead of the one the model meant. Covers both the brace-looking
+    `{account: "work"}` and the bare `account: work` shapes."""
+    _install_admin_auth_stub(monkeypatch)
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    for bad_body in ('{account: "work"}', "account: work"):
+        mcp = _FakeMcpManager()
+        monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: mcp)
+        desc, result = await _execute_without_run_context(
+            execute_tool_block,
+            SimpleNamespace(tool_type="list_emails", content=bad_body),
+            owner="admin-user",
+        )
+        assert result["exit_code"] == 1, bad_body
+        assert "not valid JSON" in result["error"], bad_body
+        assert mcp.calls == [], f"malformed args must never reach MCP: {bad_body!r}"
+
+
+@pytest.mark.asyncio
+async def test_legacy_mcp_tools_decode_inline_json_args(monkeypatch):
+    """The relaxed parser accepts inline JSON for non-code tags, but the legacy
+    line-based arg builders (web_search/web_fetch/read_file/write_file/
+    generate_image) would wrap the whole JSON string as the query/path/prompt.
+    A JSON object carrying the tool's primary key must be used directly."""
+    import src.tool_execution as tool_execution
+    from src.tool_execution import _build_mcp_args
+
+    cases = {
+        "web_search": ('{"query": "odysseus pr 3681"}', {"query": "odysseus pr 3681"}),
+        "web_fetch": ('{"url": "https://example.com"}', {"url": "https://example.com"}),
+        "read_file": ('{"path": "/tmp/x.txt"}', {"path": "/tmp/x.txt"}),
+        "write_file": ('{"path": "/tmp/x", "content": "hi"}', {"path": "/tmp/x", "content": "hi"}),
+        "generate_image": ('{"prompt": "a cat"}', {"prompt": "a cat"}),
+    }
+    for tool, (content, expected) in cases.items():
+        assert _build_mcp_args(tool, content) == expected, tool
+
+    # Freeform (non-JSON) content keeps the line-based behavior.
+    assert _build_mcp_args("web_search", "latest python release") == {"query": "latest python release"}
+    # A JSON object WITHOUT the tool's primary key is not args — fall back
+    # (write_file content the model happened to write as a bare object).
+    assert _build_mcp_args("write_file", '{"config": "value"}') == {
+        "path": '{"config": "value"}', "content": "",
+    }
+
+
+def test_mcp_json_primary_keys_are_all_live():
+    """Every _MCP_JSON_PRIMARY_KEYS entry must be reachable: _build_mcp_args is
+    only called from _call_mcp_tool, which only runs for _MCP_TOOL_MAP tools.
+    An entry outside _MCP_TOOL_MAP is dead code whose inline-JSON decode never
+    executes — manage_memory was exactly that (it routes through
+    dispatch_ai_tool), and a unit test on _build_mcp_args passed on the dead
+    path while the real call still corrupted. This pins it so it can't recur."""
+    from src.tool_execution import _MCP_JSON_PRIMARY_KEYS, _MCP_TOOL_MAP
+
+    dead = set(_MCP_JSON_PRIMARY_KEYS) - set(_MCP_TOOL_MAP)
+    assert not dead, f"dead JSON-primary entries (never reach _build_mcp_args): {sorted(dead)}"
+
+
+@pytest.mark.asyncio
+async def test_write_file_inline_json_args(monkeypatch):
+    """write_file has no MCP server, so it runs via _direct_fallback ->
+    WriteFileTool, NOT _build_mcp_args. Inline JSON must therefore be decoded
+    by the handler itself: drive the LIVE path (execute_tool_block, no MCP) and
+    assert the file is written to the intended path with the intended content,
+    not a file literally named with the JSON blob. A _build_mcp_args unit test
+    can't catch this — it's on the dead MCP path for write_file."""
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(tool_execution, "is_public_blocked_tool", lambda t: False)
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: None)
+
+    captured = {}
+    import src.agent_tools.filesystem_tools as fst
+
+    def fake_resolve(p):
+        captured["path"] = p
+        raise ValueError("probe-stop-before-disk")
+
+    monkeypatch.setattr(tool_execution, "_resolve_tool_path", fake_resolve)
+
+    from src.tool_parsing import parse_tool_blocks
+    blocks = parse_tool_blocks('```write_file {"path": "/tmp/wf.txt", "content": "hi"}\n```')
+    for b in blocks:
+        await _execute_without_run_context(execute_tool_block, b, owner="admin", workspace="/tmp")
+
+    assert captured.get("path") in ("/tmp/wf.txt", os.path.abspath("/tmp/wf.txt")), (
+        f"write_file did not decode inline JSON args; got path {captured.get('path')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_missing_content_in_legacy_native_shape(monkeypatch, tmp_path):
+    """A native call missing schema-required content must not create 0-byte artifacts."""
+    import json
+    import src.tool_execution as tool_execution
+    from src.agent_tools.filesystem_tools import WriteFileTool
+
+    touched = []
+    target = tmp_path / "should-not-be-written.html"
+
+    def fake_resolve(path):
+        touched.append(path)
+        return str(target)
+
+    monkeypatch.setattr(tool_execution, "_resolve_tool_path", fake_resolve)
+
+    # 1. Missing content section in legacy shape is rejected
+    result = await WriteFileTool().execute("/workspace/output.html", {})
+    assert result["exit_code"] == 1
+    assert "content required" in result["error"]
+    assert touched == ["/workspace/output.html"]
+    assert not target.exists()
+
+    # 2. Missing content in native JSON shape is also rejected
+    result_json = await WriteFileTool().execute(json.dumps({"path": "/workspace/output.html"}), {})
+    assert result_json["exit_code"] == 1
+    assert "content required" in result_json["error"]
+
+    # 3. Positive control: explicit empty body on a new path creates an empty file under Task 3.5/3.7
+    result_created = await WriteFileTool().execute("/workspace/output.html\n", {})
+    assert result_created["exit_code"] == 0
+    assert target.exists()
+    assert target.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_blocks_mutating_email_aliases_without_mcp_inventory(monkeypatch):
+    """Plan-mode safety for bare email aliases must hold from the STATIC
+    partition alone — no MCP read-only inventory involved: mutators (the
+    draft/download tools included) are blocked before dispatch, while the
+    explicitly read-only search_emails goes through."""
+    _install_admin_auth_stub(monkeypatch)
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+    from src.tool_security import plan_mode_disabled_tools
+
+    mcp = _FakeMcpManager()
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: mcp)
+    denied = plan_mode_disabled_tools()
+
+    for tool_name in ("draft_email", "draft_email_reply", "ai_draft_email_reply",
+                      "download_attachment", "send_email", "delete_email", "unsubscribe_email"):
+        desc, result = await _execute_without_run_context(
+            execute_tool_block,
+            SimpleNamespace(tool_type=tool_name, content="{}"),
+            owner="admin-user",
+            disabled_tools=denied,
+        )
+        assert result["exit_code"] == 1, tool_name
+        assert mcp.calls == [], f"{tool_name} reached the MCP server in plan mode"
+
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(tool_type="search_emails", content='{"query": "x"}'),
+        owner="admin-user",
+        disabled_tools=denied,
+    )
+    assert result["exit_code"] == 0
+    assert mcp.calls == [
+        ("mcp__email__search_emails", {"query": "x", "_odysseus_owner": "admin-user"}),
+    ]
+
+    mcp.calls.clear()
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(tool_type="scan_email_unsubscribes", content='{"limit": 1}'),
+        owner="admin-user",
+        disabled_tools=denied,
+    )
+    assert result["exit_code"] == 0
+    assert mcp.calls == [
+        ("mcp__email__scan_email_unsubscribes", {"limit": 1, "_odysseus_owner": "admin-user"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bare_email_dispatch_empty_content_calls_with_empty_args(monkeypatch):
+    """An empty fence (```list_email_accounts``` with no body) dispatches with
+    {} args — the no-arg call shape local models really emit."""
+    _install_admin_auth_stub(monkeypatch)
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    mcp = _FakeMcpManager()
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: mcp)
+
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(tool_type="list_email_accounts", content=""),
+        owner="admin-user",
+    )
+    assert result["exit_code"] == 0
+    assert mcp.calls == [
+        ("mcp__email__list_email_accounts", {"_odysseus_owner": "admin-user"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_email_mcp_non_object_args_fail_before_dispatch(monkeypatch):
     import src.tool_execution as tool_execution
     from src.tool_execution import execute_tool_block
 
-    class FakeMcp:
-        def __init__(self):
-            self.calls = []
-
+    class FakeMcp(_FakeMcpManager):
         async def call_tool(self, name, args):
             self.calls.append((name, args))
             return {"output": "called", "exit_code": 0}
@@ -643,7 +1329,8 @@ async def test_email_mcp_non_object_args_fail_before_dispatch(monkeypatch):
     monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
     monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: fake)
 
-    desc, result = await execute_tool_block(
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
         SimpleNamespace(tool_type="mcp__email__list_emails", content='["INBOX"]'),
         owner="alice",
     )
@@ -659,10 +1346,7 @@ async def test_email_mcp_dispatch_includes_hidden_owner(monkeypatch):
     import src.tool_execution as tool_execution
     from src.tool_execution import execute_tool_block
 
-    class FakeMcp:
-        def __init__(self):
-            self.calls = []
-
+    class FakeMcp(_FakeMcpManager):
         async def call_tool(self, name, args):
             self.calls.append((name, args))
             return {"output": "called", "exit_code": 0}
@@ -671,12 +1355,35 @@ async def test_email_mcp_dispatch_includes_hidden_owner(monkeypatch):
     monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
     monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: fake)
 
-    desc, result = await execute_tool_block(
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
         SimpleNamespace(tool_type="mcp__email__list_emails", content='{"folder":"INBOX"}'),
         owner="alice",
     )
 
     assert desc == "mcp: mcp__email__list_emails"
+    assert result["exit_code"] == 0
+    assert fake.calls == [
+        ("mcp__email__list_emails", {"folder": "INBOX", "_odysseus_owner": "alice"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bare_email_mcp_dispatch_includes_hidden_owner(monkeypatch):
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    fake = _FakeMcpManager()
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: fake)
+
+    desc, result = await _execute_without_run_context(
+        execute_tool_block,
+        SimpleNamespace(tool_type="list_emails", content='{"folder":"INBOX"}'),
+        owner="alice",
+    )
+
+    assert desc == "email: list_emails"
     assert result["exit_code"] == 0
     assert fake.calls == [
         ("mcp__email__list_emails", {"folder": "INBOX", "_odysseus_owner": "alice"}),
@@ -821,7 +1528,7 @@ async def test_webhook_tool_reuses_private_url_validation():
     monkeypatch.setitem(sys.modules, "core.database", fake_core_db)
     monkeypatch.setitem(sys.modules, "src.database", fake_src_db)
 
-    from src.tool_implementations import do_manage_webhooks
+    from src.agent_tools.admin_tools import do_manage_webhooks
 
     try:
         result = await do_manage_webhooks(

@@ -1,4 +1,4 @@
-"""Diagnostics routes — /api/db/stats, /api/rag/stats, /api/test/youtube, /api/test-research."""
+"""Diagnostics routes — admin-only service health, log tail, and DB stats."""
 
 import logging
 import os
@@ -59,8 +59,8 @@ def setup_diagnostics_routes(
         try:
             from core.database import get_detailed_stats
             return get_detailed_stats()
-        except Exception as e:
-            logger.error(f"DB stats error: {e}")
+        except Exception:
+            logger.exception("DB stats retrieval failed")
             raise HTTPException(500, "Failed to retrieve database statistics")
 
     @router.get("/api/rag/stats")

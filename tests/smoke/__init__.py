@@ -1,0 +1,1 @@
+"""Smoke area marker package."""

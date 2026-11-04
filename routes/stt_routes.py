@@ -18,9 +18,12 @@ def setup_stt_routes(stt_service):
         """Get STT service statistics"""
         try:
             return stt_service.get_stats()
-        except Exception as e:
-            logger.error(f"Failed to get STT stats: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Failed to get STT stats")
+            raise HTTPException(
+                status_code=500,
+                detail={"message": "Failed to read STT stats"},
+            )
 
     @router.post("/transcribe")
     async def transcribe_audio(file: UploadFile = File(...)):
@@ -47,11 +50,11 @@ def setup_stt_routes(stt_service):
 
         except HTTPException:
             raise
-        except Exception as e:
-            logger.error(f"Transcription error: {e}", exc_info=True)
+        except Exception:
+            logger.exception("Transcription error")
             raise HTTPException(
                 status_code=500,
-                detail={"message": f"Transcription failed: {str(e)}"}
+                detail={"message": "Transcription failed"},
             )
 
     return router

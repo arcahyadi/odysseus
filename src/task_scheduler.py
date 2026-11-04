@@ -1,17 +1,44 @@
 """Background scheduler for ScheduledTask execution."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Tuple
 
 from core.auth import RESERVED_USERNAMES
+from src.owner_identity import REQUEST_SENTINEL_OWNERS, auth_disabled
+from src.task_action_policy import (
+    is_admin_only_task_action,
+    owner_has_admin_task_privileges,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class TaskEndpointAuthorityError(RuntimeError):
+    """A scheduled task's endpoint or its credentials cannot be authorized."""
+
+
+def _require_task_owner(owner):
+    if not str(owner or "").strip() and not auth_disabled():
+        raise TaskEndpointAuthorityError("Scheduled task has no owner in authenticated mode")
+
+
+def _is_sft_fixture_owner(owner: str | None) -> bool:
+    """Synthetic SFT accounts may manage tasks but must never auto-fire them."""
+    return str(owner or "").strip().lower().startswith("sft_")
+
+
+def _background_owner_filter(column):
+    """SQL predicate matching real/ownerless accounts, excluding SFT fixtures."""
+    from sqlalchemy import or_
+    return or_(column.is_(None), ~column.like("sft\\_%", escape="\\"))
 
 
 def _utcnow() -> datetime:
@@ -79,19 +106,47 @@ async def _cached(key: Tuple, ttl: float, fetch: Callable[[], Awaitable[Any]]) -
             pending = fut
             owner = True
     if not owner:
-        return await pending
+        # A cancelled waiter must not cancel the shared Future for the owner
+        # and every other waiter.
+        return await asyncio.shield(pending)
     try:
         val = await fetch()
         async with _shared_cache_lock:
             _shared_cache[key] = (time.monotonic() + ttl, val)
-            _shared_cache_pending.pop(key, None)
         pending.set_result(val)
         return val
+    except asyncio.CancelledError:
+        # Cancellation is a BaseException on supported Python versions, so it
+        # bypasses the Exception handler below. Wake all current waiters while
+        # allowing a later caller to retry the fetch.
+        pending.cancel()
+        raise
     except Exception as e:
-        async with _shared_cache_lock:
-            _shared_cache_pending.pop(key, None)
         pending.set_exception(e)
         raise
+    finally:
+        # Keep this cleanup synchronous so a second cancellation cannot
+        # interrupt it and leave a permanently pending Future behind. All
+        # access runs on the scheduler's event-loop thread.
+        if _shared_cache_pending.get(key) is pending:
+            _shared_cache_pending.pop(key, None)
+
+
+def is_valid_cron(cron_expression: str) -> bool:
+    """True for a standard 5-field cron expression that croniter can parse.
+
+    croniter also accepts 6- and 7-field expressions with a seconds field, but
+    the scheduler works at one-minute resolution and would run such a task
+    every second.
+    """
+    if len((cron_expression or "").split()) != 5:
+        return False
+    try:
+        from croniter import croniter
+        croniter(cron_expression)
+    except Exception:
+        return False
+    return True
 
 
 def compute_next_run(schedule: str, scheduled_time: str,
@@ -137,6 +192,9 @@ def compute_next_run(schedule: str, scheduled_time: str,
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
     if schedule == "cron" and cron_expression:
+        if not is_valid_cron(cron_expression):
+            logger.warning(f"Invalid cron expression '{cron_expression}'")
+            return None
         try:
             from croniter import croniter
             cron = croniter(cron_expression, now)
@@ -239,10 +297,11 @@ HOUSEKEEPING_DEFAULTS = {
     "tidy_research":        {"name": "Research Tidy",            "trigger_type": "event", "trigger_event": "research_completed", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Tidy Research"]},
     "summarize_emails":     {"name": "Email (Summary)",          "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */2 * * *", "ship_paused": True, "legacy_names": ["Tidy Email (Summary)"]},
     "draft_email_replies":  {"name": "Email AI Auto Reply",      "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */2 * * *", "ship_paused": True, "legacy_names": ["Tidy Email (Replies)", "AI Auto Reply"]},
+    "email_auto_translate": {"name": "Email Auto Translate",     "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */2 * * *", "ship_paused": True, "legacy_names": ["Auto-translate Emails", "Auto Translate Email"]},
     "extract_email_events": {"name": "Email Calendar Events",    "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */1 * * *", "ship_paused": True, "legacy_names": ["Email → Calendar Events"]},
     "classify_events":      {"name": "Calendar Classify Events", "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 6,18 * * *", "ship_paused": True, "legacy_names": ["Classify Calendar Events"]},
     "check_email_urgency":   {"name": "Email Tags",               "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 * * * *", "ship_paused": True, "old_cron_expressions": ["*/15 * * * *"], "legacy_names": ["Email Triage", "Urgent Email"]},
-    "audit_skills":          {"name": "Skills Audit",             "trigger_type": "event", "trigger_event": "skill_added", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Audit Skills"]},
+    "audit_skills":          {"name": "Skills Audit",             "trigger_type": "schedule", "schedule": "daily", "scheduled_time": "02:00", "cron_expression": None, "legacy_names": ["Audit Skills"]},
 }
 
 RETIRED_HOUSEKEEPING_ACTIONS = frozenset({
@@ -267,7 +326,7 @@ def _digest_windows(now):
 
 
 def _checkin_calendar_events(db, owner, start, end):
-    """Calendar events in [start, end] for ONE owner, for the check-in digest.
+    """Calendar events in [start, end) for ONE owner, for the check-in digest.
 
     Ownership lives on CalendarCal.owner; events inherit it via calendar_id.
     The digest query had no owner scope, so it pulled EVERY user's events into
@@ -281,12 +340,78 @@ def _checkin_calendar_events(db, owner, start, end):
         .filter(
             _CC.owner == owner,
             _CE.dtstart >= start,
-            _CE.dtstart <= end,
+            _CE.dtstart < end,
             _CE.status != "cancelled",
         )
         .order_by(_CE.dtstart)
         .all()
     )
+
+
+def _normalize_chat_endpoint(url: str) -> str:
+    """Repair a resolved task endpoint to a full chat-completions URL.
+
+    Unlike the chat path — which stores ``build_chat_url(normalize_base(base))``
+    on the session — the task executor passes ``task.endpoint_url`` verbatim to
+    the model HTTP call. A bare OpenAI-compatible base such as
+    ``http://host:11434/v1`` therefore POSTs to a 404 ("page not found") and the
+    model silently appears to "return an empty response".
+
+    Repair only bare OpenAI-compatible bases. Native-Ollama URLs (``/api...``)
+    and URLs that already point at a concrete endpoint are returned untouched, so
+    their own downstream normalizers keep working. Idempotent: a URL already
+    ending in ``/chat/completions`` is left as-is.
+    """
+    if not url:
+        return url
+    # Imports kept function-local (endpoint_resolver pulls in heavy deps) but
+    # OUTSIDE the try: an import failure is a real bug that should surface, not
+    # be silently swallowed into the un-normalized URL this function exists to
+    # repair.
+    from urllib.parse import urlparse
+    from src.endpoint_resolver import normalize_base, build_chat_url
+    path = (urlparse(url).path or "").rstrip("/")
+    if path == "/api" or path.startswith("/api/"):
+        return url  # native Ollama — handled by the native path downstream
+    if path.endswith(("/chat/completions", "/messages", "/responses", "/completions")):
+        return url  # already a concrete endpoint
+    try:
+        return build_chat_url(normalize_base(url))
+    except Exception:
+        # Guard only the actual normalization. Returning the URL un-normalized
+        # reverts to the 404 this fixes, so make the silent revert visible.
+        logger.debug("task endpoint normalization failed for %r; using as-is", url, exc_info=True)
+        return url
+
+
+def _resolve_research_settings(get_setting_fn):
+    """Resolve the scheduled-research settings with crash-proof fallbacks.
+
+    A hand-edited or agent-written data/settings.json can hold non-numeric
+    values for the research_* keys; the bare int() reads previously raised
+    inside TaskScheduler._execute_research_task and killed every scheduled
+    research run until settings.json was fixed by hand (#5049).
+    src/research_handler.py already guards the same reads defensively —
+    this mirrors that for the scheduler. Valid values pass through
+    unchanged (numeric strings like "4096" still parse).
+    """
+    try:
+        max_tokens = int(get_setting_fn("research_max_tokens", 8192))
+    except (TypeError, ValueError, OverflowError):
+        max_tokens = 8192
+    try:
+        extraction_timeout = int(
+            get_setting_fn("research_extraction_timeout_seconds", 90) or 90
+        )
+    except (TypeError, ValueError, OverflowError):
+        extraction_timeout = 90
+    try:
+        extraction_concurrency = int(
+            get_setting_fn("research_extraction_concurrency", 3) or 3
+        )
+    except (TypeError, ValueError, OverflowError):
+        extraction_concurrency = 3
+    return max_tokens, extraction_timeout, extraction_concurrency
 
 
 class TaskScheduler:
@@ -299,7 +424,7 @@ class TaskScheduler:
         # coroutine; trigger_task() can be called from request handlers; the
         # event bus fires from background tasks. Without this lock long-running
         # tasks could be double-dispatched.
-        self._executing_lock = asyncio.Lock()
+        self._executing_lock = threading.RLock()
         self._pending_notifications = []  # completed task notifications
         self._task_defer_counts = {}
         # Strict serial execution — exactly one task runs at a time. Anything
@@ -309,6 +434,24 @@ class TaskScheduler:
         self._run_semaphore = asyncio.Semaphore(1)
         self._concurrency_cap = 1
         self._task_handles = {}
+
+    @contextlib.asynccontextmanager
+    async def _executing_guard(self):
+        # This scheduler can be touched by request handlers, event-bus tasks,
+        # and the background scheduler loop. An asyncio.Lock is bound to the
+        # first event loop that awaits it, which breaks after app reloads or
+        # loop changes. The guarded sections only mutate in-memory sets/maps
+        # and do not await, so a process-local reentrant lock is sufficient and
+        # loop-agnostic.
+        lock = self._executing_lock
+        if hasattr(lock, "__aenter__"):
+            # Compatibility for tests or old in-memory scheduler instances that
+            # predate the RLock migration.
+            async with lock:
+                yield
+            return
+        with lock:
+            yield
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -356,20 +499,70 @@ class TaskScheduler:
             logger.debug("Task abort marker failed for %s", task_id, exc_info=True)
             return False
 
+    def _finish_cancelled_run(self, task_id: str, run_id: str, message: str, foreground: bool):
+        """Persist running-task cancellation using a worker-owned DB session."""
+        from core.database import SessionLocal, ScheduledTask, TaskRun
+        with SessionLocal() as db:
+            run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+            if run:
+                run.status = 'aborted'
+                run.error = message
+                run.result = run.result or message
+                run.finished_at = _utcnow()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if task:
+                task.last_run = _utcnow()
+                if foreground:
+                    task.next_run = _utcnow() + timedelta(minutes=15)
+                elif (task.trigger_type or 'schedule') == 'schedule':
+                    task.next_run = compute_next_run(
+                        task.schedule, task.scheduled_time, task.scheduled_day,
+                        task.scheduled_date, after=_utcnow(),
+                        cron_expression=task.cron_expression,
+                        tz_name=_resolve_task_timezone(db, task),
+                    )
+                else:
+                    task.next_run = None
+            db.commit()
+
     def add_notification(self, task_name: str, status: str, task_id: str = None, owner: str = None, body: str = None):
         """Store a notification about a completed task run. Tagged with the
         task's owner so `pop_notifications` can return only that user's
         notifications and prevent cross-tenant drain. `body` is the result
         text — populated when output_target='notification' so the client can
         show a rich browser Notification, not just a toast."""
-        self._pending_notifications.append({
+        timestamp = _utcnow()
+        notification = {
             "task_name": task_name,
             "status": status,
             "task_id": task_id,
             "owner": owner,
             "body": (body[:500] + "…") if body and len(body) > 500 else body,
-            "timestamp": _utcnow().isoformat() + "Z",
-        })
+            "timestamp": timestamp.isoformat() + "Z",
+        }
+        self._pending_notifications.append(notification)
+        # Keep a durable copy because the live notifications endpoint consumes
+        # its queue after delivering the toast/browser notification.
+        try:
+            from core.database import SessionLocal, NotificationLog
+            db = SessionLocal()
+            try:
+                db.add(NotificationLog(
+                    id=uuid.uuid4().hex,
+                    owner=owner,
+                    task_name=task_name or "Untitled task",
+                    task_id=task_id,
+                    status=status or "success",
+                    body=notification["body"],
+                    timestamp=timestamp,
+                ))
+                db.commit()
+            finally:
+                db.close()
+        except Exception:
+            # A database write must never prevent the live notification from
+            # reaching the user or interrupt task completion.
+            logger.warning("Could not persist task notification", exc_info=True)
         # Cap at 50 to avoid unbounded growth
         if len(self._pending_notifications) > 50:
             self._pending_notifications = self._pending_notifications[-50:]
@@ -440,6 +633,7 @@ class TaskScheduler:
                     _ST.status == "active",
                     _ST.next_run.isnot(None),
                     _ST.next_run < now,
+                    _background_owner_filter(_ST.owner),
                 ).all()
                 if overdue:
                     for t in overdue:
@@ -516,6 +710,7 @@ class TaskScheduler:
                     ScheduledTask.status == "active",
                     ScheduledTask.trigger_type == "schedule",
                     ScheduledTask.next_run.isnot(None),
+                    _background_owner_filter(ScheduledTask.owner),
                 ).all()
                 buckets: Dict[str, list] = {}
                 for r in rows:
@@ -601,7 +796,7 @@ class TaskScheduler:
         try:
             owners = set()
             for r in db.query(ScheduledTask.owner).distinct().all():
-                if r[0]:
+                if r[0] and not _is_sft_fixture_owner(r[0]):
                     owners.add(r[0])
             note_q = db.query(Note.owner).filter(
                 Note.due_date.isnot(None),
@@ -609,7 +804,7 @@ class TaskScheduler:
                 Note.archived == False,  # noqa: E712
             ).distinct()
             for r in note_q.all():
-                if r[0]:
+                if r[0] and not _is_sft_fixture_owner(r[0]):
                     owners.add(r[0])
             return sorted(owners)
         except Exception:
@@ -635,6 +830,7 @@ class TaskScheduler:
                     next_run = _db.query(_ST.next_run).filter(
                         _ST.status == "active",
                         _ST.next_run.isnot(None),
+                        _background_owner_filter(_ST.owner),
                     ).order_by(_ST.next_run.asc()).first()
                     if next_run and next_run[0]:
                         delta = (next_run[0] - _utcnow()).total_seconds()
@@ -650,21 +846,33 @@ class TaskScheduler:
         db = SessionLocal()
         try:
             now = _utcnow()
-            async with self._executing_lock:
+            foreground_active = False
+            try:
+                from src.interactive_gate import has_foreground_activity
+                foreground_active = has_foreground_activity()
+            except Exception:
+                foreground_active = False
+            async with self._executing_guard():
                 # Snapshot under the lock so we don't race with mid-iteration adds.
                 executing_snapshot = set(self._executing)
                 # Scheduled tasks and deferred event tasks both use next_run.
                 due = db.query(ScheduledTask).filter(
                     ScheduledTask.status == "active",
                     ScheduledTask.next_run <= now,
+                    _background_owner_filter(ScheduledTask.owner),
                     ScheduledTask.id.notin_(executing_snapshot) if executing_snapshot else True,
                 ).all()
                 to_dispatch = []
                 for task in due:
                     if task.id in self._executing:
                         continue
+                    if foreground_active:
+                        task.next_run = now + timedelta(minutes=15)
+                        continue
                     self._executing.add(task.id)
                     to_dispatch.append(task.id)
+                if foreground_active and due:
+                    db.commit()
             for task_id in to_dispatch:
                 asyncio.create_task(self._execute_task(task_id))
         finally:
@@ -698,25 +906,67 @@ class TaskScheduler:
 
         try:
             if bypass_model_slot or not self._task_needs_model_slot(task_id):
-                await self._execute_task_locked(task_id, run_id, release_executing=release_executing)
+                await self._execute_task_locked(
+                    task_id,
+                    run_id,
+                    release_executing=release_executing,
+                    gate_foreground=not bypass_model_slot,
+                )
                 return
 
             async with self._run_semaphore:
-                await self._execute_task_locked(task_id, run_id, release_executing=release_executing)
+                await self._execute_task_locked(
+                    task_id,
+                    run_id,
+                    release_executing=release_executing,
+                    gate_foreground=True,
+                )
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
             # _execute_task_locked never runs and cannot update the Activity row.
-            self._mark_run_aborted(task_id, run_id)
+            await asyncio.to_thread(self._mark_run_aborted, task_id, run_id)
+            await asyncio.to_thread(
+                self._defer_immediately_due_task, task_id, delay=timedelta(minutes=15),
+            )
             raise
         finally:
             handle = self._task_handles.get(task_id)
             if handle is current:
                 self._task_handles.pop(task_id, None)
             if release_executing:
-                async with self._executing_lock:
+                async with self._executing_guard():
                     self._executing.discard(task_id)
 
-    async def _execute_task_locked(self, task_id: str, run_id: str, *, release_executing: bool = True):
+    def _defer_immediately_due_task(self, task_id: str, *, delay: timedelta):
+        """A queued task can be cancelled before _execute_task_locked gets a DB
+        handle. If its next_run stays in the past, the scheduler dispatches it
+        again on the next tick and spams aborted Activity rows."""
+        try:
+            from core.database import SessionLocal, ScheduledTask
+            db = SessionLocal()
+            try:
+                task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                if (
+                    task
+                    and task.status == "active"
+                    and task.next_run is not None
+                    and task.next_run <= _utcnow()
+                ):
+                    task.next_run = _utcnow() + delay
+                    db.commit()
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("Failed to defer cancelled queued task %s", task_id, exc_info=True)
+
+    async def _execute_task_locked(
+        self,
+        task_id: str,
+        run_id: str,
+        *,
+        release_executing: bool = True,
+        gate_foreground: bool = True,
+    ):
         from core.database import SessionLocal, ScheduledTask, TaskRun
 
         db = SessionLocal()
@@ -732,6 +982,36 @@ class TaskScheduler:
                     stale.error = f"Task no longer active (status={task.status if task else 'deleted'})"
                     db.commit()
                 return
+
+            if (
+                is_admin_only_task_action(task.task_type, task.action)
+                and not owner_has_admin_task_privileges(task.owner)
+            ):
+                msg = f"Action '{task.action}' requires admin privileges"
+                blocked = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if blocked:
+                    blocked.status = "error"
+                    blocked.result = msg
+                    blocked.error = msg
+                    blocked.finished_at = _utcnow()
+                task.status = "paused"
+                task.next_run = None
+                task.last_run = _utcnow()
+                logger.warning(
+                    "Paused admin-only task %s for non-admin owner %r",
+                    task_id,
+                    task.owner,
+                )
+                db.commit()
+                return
+
+            if gate_foreground:
+                waiting = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if waiting and waiting.status == "queued":
+                    waiting.result = "Queued — waiting for Odysseus to be idle…"
+                    db.commit()
+                from src.interactive_gate import wait_for_interactive_quiet
+                await wait_for_interactive_quiet(f"scheduled task {task.name}")
 
             # Flip the run from queued → running. Reset started_at to the
             # actual execution start so queue wait time is visible from
@@ -763,6 +1043,27 @@ class TaskScheduler:
             # previous llm/research run's model. The executors set it once the
             # model is resolved.
             self._last_run_model = None
+            foreground_cancel = {"hit": False}
+            foreground_monitor = None
+            if gate_foreground:
+                current_task = asyncio.current_task()
+
+                async def _cancel_if_foreground_active():
+                    # Give the just-finished quiet gate a tiny grace window,
+                    # then keep enforcing "background means background" while
+                    # a long email/LLM action is already running.
+                    await asyncio.sleep(0.1)
+                    from src.interactive_gate import has_foreground_activity
+                    while True:
+                        await asyncio.sleep(0.25)
+                        if has_foreground_activity():
+                            foreground_cancel["hit"] = True
+                            logger.info("Task '%s' interrupted because Odysseus became active", task.name)
+                            if current_task and not current_task.cancelling():
+                                current_task.cancel()
+                            return
+
+                foreground_monitor = asyncio.create_task(_cancel_if_foreground_active())
             try:
                 if task_type == "action":
                     result, success = await self._execute_action(task, run_id=run_id)
@@ -802,25 +1103,19 @@ class TaskScheduler:
                 db.commit()
                 return
             except asyncio.CancelledError:
-                logger.info("Task '%s' stopped by user", task.name)
-                run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
-                if run_obj:
-                    run_obj.status = "aborted"
-                    run_obj.error = "Stopped by user"
-                    run_obj.result = run_obj.result or "Stopped by user"
-                    run_obj.finished_at = _utcnow()
-                task.last_run = _utcnow()
-                if (task.trigger_type or "schedule") == "schedule":
-                    task.next_run = compute_next_run(
-                        task.schedule, task.scheduled_time,
-                        task.scheduled_day, task.scheduled_date,
-                        after=_utcnow(),
-                        cron_expression=task.cron_expression,
-                        tz_name=_resolve_task_timezone(db, task),
-                    )
-                else:
-                    task.next_run = None
-                db.commit()
+                msg = (
+                    "Paused because Odysseus became active"
+                    if foreground_cancel.get("hit")
+                    else "Stopped by user"
+                )
+                logger.info("Task '%s' %s", task.name, msg)
+                # Release the loop-owned transaction before the worker writes.
+                # Do not move a live ORM session/objects across threads.
+                db.close()
+                await asyncio.to_thread(
+                    self._finish_cancelled_run, task_id, run_id, msg,
+                    bool(foreground_cancel.get('hit')),
+                )
                 return
             except TaskNoop as noop:
                 # Action reported "nothing to do". Mark the run as `skipped`
@@ -845,6 +1140,13 @@ class TaskScheduler:
                     task.next_run = None
                 db.commit()
                 return
+            finally:
+                if foreground_monitor and not foreground_monitor.done():
+                    foreground_monitor.cancel()
+                    try:
+                        await foreground_monitor
+                    except asyncio.CancelledError:
+                        pass
 
             run.finished_at = _utcnow()
 
@@ -1001,7 +1303,7 @@ class TaskScheduler:
             if handle is asyncio.current_task():
                 self._task_handles.pop(task_id, None)
             if release_executing:
-                async with self._executing_lock:
+                async with self._executing_guard():
                     self._executing.discard(task_id)
 
 
@@ -1014,6 +1316,7 @@ class TaskScheduler:
         "learn_sender_signatures",
         "summarize_emails",
         "draft_email_replies",
+        "email_auto_translate",
         "extract_email_events",
         "classify_events",
         "tidy_sessions",
@@ -1027,6 +1330,7 @@ class TaskScheduler:
     _MODEL_BACKED_ACTIONS = frozenset({
         "summarize_emails",
         "draft_email_replies",
+        "email_auto_translate",
         "extract_email_events",
         "classify_events",
         "learn_sender_signatures",
@@ -1070,7 +1374,19 @@ class TaskScheduler:
 
     async def _execute_action(self, task, run_id: str | None = None) -> tuple:
         """Execute a built-in action (no LLM needed)."""
+        _require_task_owner(task.owner)
         from src.builtin_actions import BUILTIN_ACTIONS
+        from src.agent_runtime.authority import (
+            bind_request_authority, restore_task_authority, task_operation,
+        )
+        authority = restore_task_authority(
+            getattr(task, "request_authority_json", None), task.prompt, task.task_type,
+            task.action, owner=task.owner)
+        from src.settings import get_setting
+        authority = authority.restrict(disabled_tools=get_setting("disabled_tools", []) or ())
+        operation = task_operation(task.task_type, task.action, task.prompt)
+        if operation is None or not authority.permits(operation):
+            return "Scheduled action has no matching server request authority.", False
 
         action_fn = BUILTIN_ACTIONS.get(task.action)
         if not action_fn:
@@ -1083,13 +1399,24 @@ class TaskScheduler:
                 self._set_run_progress(run_id, message)
 
             kwargs = {"owner": task.owner, "task_name": task.name, "progress_cb": _progress}
+            if task.prompt:
+                kwargs["prompt"] = task.prompt
             if task.action in ("run_script", "run_local", "ssh_command") and task.prompt:
                 kwargs["script" if task.action in ("run_script", "run_local") else "command"] = task.prompt
             # cookbook_serve carries its JSON config in task.prompt — feed it
             # through as `command` so action_cookbook_serve can json.loads it.
             elif task.action == "cookbook_serve" and task.prompt:
                 kwargs["command"] = task.prompt
-            result, success = await action_fn(**kwargs)
+            # Model-backed actions normally use the shared Utility/Default
+            # chain. A task-level choice is an explicit override and must be
+            # available to actions such as Skills Audit as well.
+            if getattr(task, "model", None):
+                kwargs["model"] = task.model
+                kwargs["endpoint_url"] = getattr(task, "endpoint_url", None)
+            with bind_request_authority(authority):
+                result, success = await action_fn(**kwargs)
+            if getattr(task, "model", None):
+                self._last_run_model = task.model
             return result, success
         except TaskNoop:
             # Bubble up so _execute_task_locked can drop the run row silently.
@@ -1337,6 +1664,7 @@ class TaskScheduler:
     async def _execute_llm_task(self, task, db) -> str:
         """Execute an LLM task with full tool access via the agent loop."""
         from core.database import Session as DbSession, ChatMessage, CrewMember
+        _require_task_owner(task.owner)
 
         # If this task is wired to a CrewMember (personal assistant, custom
         # crew), prefer the crew member's persona/model/endpoint as overrides.
@@ -1357,6 +1685,12 @@ class TaskScheduler:
             endpoint_url, model = self._resolve_defaults(db, task.owner)
         if not endpoint_url or not model:
             raise RuntimeError("No model/endpoint configured")
+        # Authorize the original URL before normalization can erase a query,
+        # fragment, or caller-selected path. Stored tasks do not themselves
+        # grant permission to contact an endpoint.
+        from src.endpoint_resolver import resolve_owner_registered_endpoint
+        resolve_owner_registered_endpoint(db, endpoint_url, task.owner or None)
+        endpoint_url = _normalize_chat_endpoint(endpoint_url)
         # Record the resolved model so _execute_task_locked can persist it on
         # the run (tasks rarely pin a model, so this is the only record of
         # which model actually produced the output).
@@ -1413,19 +1747,18 @@ class TaskScheduler:
                     system_prompt = f"{char_prompt}\n\n{system_prompt}"
             except Exception:
                 pass
-        # Inject current time so the model knows what's past vs upcoming
+        # Provide current date/time as a user-role message so the system prompt
+        # stays byte-identical across runs and doesn't bust the Anthropic prompt
+        # cache on every scheduled tick (see issue #2927 and the identical fix on
+        # the interactive-chat path in src/agent_loop.py).  The message is built
+        # once here and shared by both execution paths below (agent loop and the
+        # direct fallback) so time grounding is never lost on either path.
         tz_name = _resolve_task_timezone(db, task)
         try:
-            if tz_name:
-                from zoneinfo import ZoneInfo
-                from datetime import timezone
-                now_local = _utcnow().replace(tzinfo=timezone.utc).astimezone(ZoneInfo(tz_name))
-                time_str = now_local.strftime("%A, %B %d %Y, %H:%M %Z")
-            else:
-                time_str = _utcnow().strftime("%A, %B %d %Y, %H:%M UTC")
+            from src.user_time import current_datetime_context_message_for_tz
+            _dt_msg: dict | None = current_datetime_context_message_for_tz(tz_name)
         except Exception:
-            time_str = _utcnow().strftime("%A, %B %d %Y, %H:%M UTC")
-        system_prompt = f"Current time: {time_str}\n\n{system_prompt}"
+            _dt_msg = None
 
         # Compute the disabled-tools set: the crew's enabled_tools allowlist
         # (inverted) plus the operator's global disabled_tools setting. The
@@ -1473,14 +1806,17 @@ class TaskScheduler:
                 endpoint_url, model, task, session_id,
                 system_prompt=system_prompt, disabled_tools=disabled_tools or None,
                 relevant_tools=relevant_tools,
+                datetime_context_msg=_dt_msg,
             )
+        except TaskEndpointAuthorityError:
+            raise
         except Exception as e:
             logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
             from src.task_endpoint import task_llm_call_async
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task.prompt},
-            ]
+            messages: list = [{"role": "system", "content": system_prompt}]
+            if _dt_msg:
+                messages.append(_dt_msg)
+            messages.append({"role": "user", "content": task.prompt})
             result = await task_llm_call_async(
                 messages,
                 fallback_url=endpoint_url,
@@ -1547,6 +1883,8 @@ class TaskScheduler:
                 model_name = model_name or resolved_model
             except Exception:
                 pass
+
+        endpoint_url = _normalize_chat_endpoint(endpoint_url)
 
         session_id = task.session_id
         if not session_id:
@@ -1643,8 +1981,15 @@ class TaskScheduler:
 
         target = (output or "").strip()
         explicit = ""
+        account_id = ""
         if target.startswith("email:"):
             explicit = target.split(":", 1)[1].strip()
+            if "|account=" in explicit:
+                explicit, account_id = explicit.split("|account=", 1)
+                explicit = explicit.strip()
+                account_id = account_id.strip()
+            if explicit == "self":
+                explicit = ""
         elif "@" in target:
             explicit = target
 
@@ -1652,7 +1997,7 @@ class TaskScheduler:
             from routes.email_routes import _resolve_send_config
             from routes.email_helpers import _send_smtp_message
 
-            cfg = _resolve_send_config(owner=task.owner or "")
+            cfg = _resolve_send_config(account_id=account_id or None, owner=task.owner or "")
             to_addr = explicit or cfg.get("from_address") or cfg.get("smtp_user") or ""
             if not to_addr:
                 raise RuntimeError("No email recipient resolved for task output")
@@ -1667,7 +2012,7 @@ class TaskScheduler:
             msg["X-Odysseus-Ref"] = str(task.id)
             msg.set_content(result or "")
             _send_smtp_message(cfg, from_addr, [to_addr], msg.as_string(), timeout=30)
-            logger.info("Task %s emailed result to %s (%sb)", task.id, to_addr, len(result or ""))
+            logger.info("Task %s emailed result (recipient_set=%s, %sb)", task.id, bool(to_addr), len(result or ""))
         except Exception as e:
             logger.error("Task %s email delivery failed: %s", task.id, e, exc_info=True)
             raise
@@ -1676,38 +2021,45 @@ class TaskScheduler:
                               system_prompt: str | None = None,
                               disabled_tools: set | None = None,
                               relevant_tools: set | None = None,
-                              override_user_message: str | None = None) -> str:
+                              override_user_message: str | None = None,
+                              datetime_context_msg: dict | None = None) -> str:
         """Run the full agent loop with tool access, collecting the final text."""
+        _require_task_owner(task.owner)
         from src.agent_loop import stream_agent_loop
+        from src.agent_runtime.authority import restore_task_authority
 
         system_content = system_prompt or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
         user_content = override_user_message or task.prompt
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ]
+        # Build the message list. The datetime context message (user-role) is
+        # inserted immediately before the task prompt so the system prefix stays
+        # byte-identical and cacheable across runs (see issue #2927).
+        messages: list = [{"role": "system", "content": system_content}]
+        if datetime_context_msg:
+            messages.append(datetime_context_msg)
+        messages.append({"role": "user", "content": user_content})
 
-        # Resolve headers from the endpoint's API key
+        # Recover the registered runtime URL and credentials for this chat route.
         headers = {}
         try:
-            from core.database import SessionLocal, ModelEndpoint
-            from src.endpoint_resolver import normalize_base, build_headers
-            from src.auth_helpers import owner_filter
+            from core.database import SessionLocal
+            from src.endpoint_resolver import (
+                build_chat_url, build_headers, resolve_endpoint_runtime,
+                resolve_owner_registered_endpoint,
+            )
             db2 = SessionLocal()
             try:
-                ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-                ep_q = owner_filter(ep_q, ModelEndpoint, task.owner or None)
-                eps = ep_q.all()
-                for ep in eps:
-                    if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
-                        headers = build_headers(ep.api_key, normalize_base(ep.base_url))
-                        break
+                ep = resolve_owner_registered_endpoint(db2, endpoint_url, task.owner or None)
+                base, api_key = resolve_endpoint_runtime(ep, owner=task.owner or None)
+                endpoint_url = build_chat_url(base)
+                headers = build_headers(api_key, base)
             finally:
                 db2.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            raise TaskEndpointAuthorityError("Scheduled task endpoint is unavailable or unauthorized") from exc
         full_text = ""
+        final_text_replaced = False
         tool_results = []
+        approval_pause = None
 
         # Honor per-task max_steps (defense against runaway agent loops).
         # Falls back to 20 if not set — the historical default.
@@ -1716,6 +2068,8 @@ class TaskScheduler:
         # behind the primary endpoint so a downed primary won't silently yield
         # `(no output)`.
         try:
+            from src.interactive_gate import wait_for_interactive_quiet
+            await wait_for_interactive_quiet(f"agent task {task.name}")
             from src.task_endpoint import resolve_task_candidates
             _task_fallbacks = resolve_task_candidates(
                 fallback_url=endpoint_url,
@@ -1725,34 +2079,89 @@ class TaskScheduler:
             )[1:]
         except Exception:
             _task_fallbacks = []
-        async for event_str in stream_agent_loop(
-            endpoint_url=endpoint_url,
-            model=model,
-            messages=messages,
-            max_rounds=_task_max_rounds,
-            session_id=session_id,
-            owner=task.owner,
-            headers=headers,
-            disabled_tools=disabled_tools,
-            relevant_tools=relevant_tools,
-            fallbacks=_task_fallbacks,
-        ):
-            if event_str.startswith("data: ") and not event_str.startswith("data: [DONE]"):
-                try:
-                    data = json.loads(event_str[6:])
-                    # Capture text from all event types, not just delta
-                    if "delta" in data:
-                        if data.get("thinking"):
-                            continue
-                        full_text += data["delta"]
-                    elif data.get("type") == "tool_output":
-                        # Tool results — capture summary so we have SOMETHING even
-                        # if the model never produces a final text response
-                        tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
-                        if isinstance(tool_summary, str) and tool_summary.strip():
-                            tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
-                except (json.JSONDecodeError, KeyError):
-                    pass
+        # Close the stream in this task on every exit, including the
+        # approval-pause break, so the agent run's context state unwinds here.
+        request_authority = restore_task_authority(
+            getattr(task, "request_authority_json", None), task.prompt,
+            getattr(task, "task_type", "llm"), getattr(task, "action", None),
+            owner=task.owner, session_id=session_id)
+        async with contextlib.aclosing(stream_agent_loop(
+                endpoint_url=endpoint_url,
+                model=model,
+                messages=messages,
+                max_rounds=_task_max_rounds,
+                session_id=session_id,
+                owner=task.owner,
+                workspace=request_authority.workspace or None,
+                headers=headers,
+                disabled_tools=disabled_tools,
+                relevant_tools=relevant_tools,
+                fallbacks=_task_fallbacks,
+                workload="background",
+                request_authority=request_authority,
+        )) as agent_stream:
+            async for event_str in agent_stream:
+                if event_str.startswith("data: ") and not event_str.startswith("data: [DONE]"):
+                    try:
+                        data = json.loads(event_str[6:])
+                        # Capture text from all event types, not just delta
+                        if "delta" in data:
+                            if data.get("thinking"):
+                                continue
+                            if final_text_replaced:
+                                # A later answer supersedes the replacement,
+                                # as the completion gate treats it.
+                                full_text = ""
+                                final_text_replaced = False
+                            full_text += data["delta"]
+                        elif data.get("type") == "final_response":
+                            # The completion gate may present its sanitized
+                            # answer as one replacement instead of deltas.
+                            full_text = str(data.get("content") or "")
+                            final_text_replaced = True
+                        elif data.get("type") == "tool_output":
+                            # Tool results — capture summary so we have SOMETHING even
+                            # if the model never produces a final text response
+                            tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
+                            if isinstance(tool_summary, str) and tool_summary.strip():
+                                tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
+                            approval = data.get("ask_user")
+                            if (
+                                isinstance(approval, dict)
+                                and approval.get("kind") == "tool_approval"
+                            ):
+                                approval_pause = {
+                                    "tool": data.get("tool") or "tool",
+                                    "approval_id": approval.get("approval_id"),
+                                }
+                                # Scheduled tasks have no interactive surface that
+                                # can safely resume a one-use grant. Retire the
+                                # record immediately instead of leaving it pending
+                                # and report an explicit manual-action boundary.
+                                try:
+                                    from src.tool_approvals import tool_approval_store
+                                    tool_approval_store.consume(
+                                        approval_pause["approval_id"],
+                                        decision="deny",
+                                        owner=task.owner,
+                                        session_id=session_id,
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "Could not retire scheduled-task approval",
+                                        exc_info=True,
+                                    )
+                                break
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
+        if approval_pause is not None:
+            return (
+                "Scheduled task paused safely: "
+                f"{approval_pause['tool']} requested an exact action after "
+                "untrusted context. That action was not executed. Run this task "
+                "interactively to inspect and approve the action."
+            )
 
         # Grace summarization — if the model exhausted rounds on tool calls
         # without producing a final text response, do one last LLM call
@@ -1787,6 +2196,14 @@ class TaskScheduler:
 
     async def _execute_research_task(self, task, db) -> str:
         """Execute a deep research task using DeepResearcher."""
+        from src.agent_runtime.authority import bind_request_authority, restore_task_authority, task_operation
+        from src.settings import get_setting
+        authority = restore_task_authority(
+            getattr(task, "request_authority_json", None), task.prompt, task.task_type,
+            getattr(task, "action", None), owner=task.owner)
+        authority = authority.restrict(disabled_tools=get_setting("disabled_tools", []) or ())
+        if not authority.permits(task_operation(task.task_type, getattr(task, "action", None), task.prompt)):
+            raise PermissionError("Scheduled research has no matching server request authority.")
         from core.database import Session as DbSession, ChatMessage
         from src.deep_research import DeepResearcher
         from src.research_handler import RESEARCH_DATA_DIR, ResearchHandler
@@ -1794,10 +2211,15 @@ class TaskScheduler:
         from src.settings import get_setting
 
         # Resolve endpoint/model: research settings > task settings > session defaults
+        _require_task_owner(task.owner)
         endpoint_url = task.endpoint_url
         model = task.model
         headers = {}
         headers_from_resolver = False
+
+        if endpoint_url:
+            from src.endpoint_resolver import resolve_owner_registered_endpoint
+            resolve_owner_registered_endpoint(db, endpoint_url, task.owner or None)
 
         if not endpoint_url or not model:
             try:
@@ -1821,29 +2243,28 @@ class TaskScheduler:
             endpoint_url, model = self._resolve_defaults(db, task.owner)
         if not endpoint_url or not model:
             raise RuntimeError("No model/endpoint configured for research")
+        endpoint_url = _normalize_chat_endpoint(endpoint_url)
         # Record the resolved model for the run record (see _execute_task_locked).
         self._last_run_model = model
 
-        # Resolve headers
+        # Authorize the selected URL before normalization can collapse service paths.
         try:
-            from core.database import ModelEndpoint
-            from src.endpoint_resolver import normalize_base, build_headers
-            from src.auth_helpers import owner_filter
-            db2 = db
+            from src.endpoint_resolver import (
+                build_chat_url, build_headers, resolve_endpoint_runtime,
+                resolve_owner_registered_endpoint,
+            )
             if not headers_from_resolver:
-                ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-                ep_q = owner_filter(ep_q, ModelEndpoint, task.owner or None)
-                eps = ep_q.all()
-                for ep in eps:
-                    if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
-                        headers = build_headers(ep.api_key, normalize_base(ep.base_url))
-                        break
-        except Exception:
-            pass
+                ep = resolve_owner_registered_endpoint(db, endpoint_url, task.owner or None)
+                base, api_key = resolve_endpoint_runtime(ep, owner=task.owner or None)
+                endpoint_url = build_chat_url(base)
+                headers = build_headers(api_key, base)
+        except Exception as exc:
+            raise TaskEndpointAuthorityError("Scheduled research endpoint is unavailable or unauthorized") from exc
+        endpoint_url = _normalize_chat_endpoint(endpoint_url)
 
-        max_tokens = int(get_setting("research_max_tokens", 8192))
-        extraction_timeout = int(get_setting("research_extraction_timeout_seconds", 90) or 90)
-        extraction_concurrency = int(get_setting("research_extraction_concurrency", 3) or 3)
+        max_tokens, extraction_timeout, extraction_concurrency = (
+            _resolve_research_settings(get_setting)
+        )
 
         researcher = DeepResearcher(
             llm_endpoint=endpoint_url,
@@ -1857,7 +2278,8 @@ class TaskScheduler:
         )
 
         started_ts = time.time()
-        report = await researcher.research(task.prompt)
+        with bind_request_authority(authority):
+            report = await researcher.research(task.prompt)
         completed_ts = time.time()
         try:
             stats = researcher.get_stats() or {}
@@ -1893,13 +2315,25 @@ class TaskScheduler:
         try:
             RESEARCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
             findings = getattr(researcher, "findings", []) or []
+            sources = ResearchHandler._extract_sources(findings)
+            # Phase 2: structured citations + References section (Req 7.4)
+            report_out = report or ""
+            citations = []
+            try:
+                from services.citations.citation_service import citation_service
+                citations = citation_service.build_research_citations(sources)
+                if citations:
+                    report_out = citation_service.inject_references_section(report_out, citations)
+            except Exception as _ce:
+                logger.warning("Research citation build failed: %s", _ce)
             payload = {
                 "query": task.prompt or task.name or "Scheduled research",
                 "status": "done",
-                "result": report,
-                "raw_report": strip_thinking(report or ""),
-                "sources": ResearchHandler._extract_sources(findings),
+                "result": report_out,
+                "raw_report": strip_thinking(report_out or ""),
+                "sources": sources,
                 "raw_findings": ResearchHandler._extract_raw_findings(findings),
+                "citations": citations,
                 "stats": stats,
                 "category": "scheduled",
                 "started_at": started_ts,
@@ -1923,7 +2357,7 @@ class TaskScheduler:
         """Run a chained task. Acquires _executing membership the same way
         run_task_now does so an overlapping scheduler tick can't double-dispatch
         the same task while the chain run is in flight."""
-        async with self._executing_lock:
+        async with self._executing_guard():
             if task_id in self._executing:
                 return  # already in flight (manual trigger, scheduler tick, or another chain)
             self._executing.add(task_id)
@@ -1971,11 +2405,11 @@ class TaskScheduler:
         have to special-case each tool's schema; the MCP tool ignores keys it
         doesn't recognise.
         """
+        _require_task_owner(task.owner)
         from src.tool_utils import get_mcp_manager
         mcp = get_mcp_manager()
         if not mcp:
-            logger.warning(f"Task {task.id}: MCP manager not available for delivery")
-            return
+            raise RuntimeError("MCP manager not available for task delivery")
 
         # Resolve recipient — prefer the configured email From (the established
         # "email yourself" pattern from daily_brief), fall back to task.owner.
@@ -1984,7 +2418,7 @@ class TaskScheduler:
         recipient = None
         try:
             from routes.email_helpers import _get_email_config
-            cfg = _get_email_config() or {}
+            cfg = _get_email_config(owner=task.owner or "") or {}
             recipient = cfg.get("from_address") or None
         except Exception as _e:
             logger.debug(f"_deliver_via_mcp: email config lookup failed: {_e}")
@@ -2000,6 +2434,14 @@ class TaskScheduler:
                 "X-Odysseus-Ref": str(task.id),
             },
         }
+        if tool_name.startswith("mcp__email__"):
+            # The email server uses this reserved field for its account and
+            # approval scope; it must come from the task owner, never a model.
+            from src.tool_execution import _EMAIL_MCP_OWNER_ARG, _EMAIL_MCP_SESSION_ARG
+            if task.owner:
+                args[_EMAIL_MCP_OWNER_ARG] = task.owner
+            if getattr(task, "session_id", None):
+                args[_EMAIL_MCP_SESSION_ARG] = task.session_id
         if recipient:
             # Cover the common field names so we work across MCP servers (Gmail,
             # generic SMTP, Slack DMs, etc.) without having to hard-code each.
@@ -2014,32 +2456,25 @@ class TaskScheduler:
             )
         try:
             mcp_result = await mcp.call_tool(tool_name, args)
-            stderr = mcp_result.get("stderr", "")
-            stdout = mcp_result.get("stdout", "")
-            body_len = len(result or "")
-            exit_code = mcp_result.get("exit_code", 0)
-            if exit_code != 0:
-                logger.warning(
-                    f"Task {task.id} MCP delivery FAILED via {tool_name}: "
-                    f"exit={exit_code} stderr={stderr[:400]!r} stdout={stdout[:400]!r}"
-                )
-            else:
-                # Include the MCP tool's own stdout (e.g. email_server returns
-                # "Sent email to ... with subject ...") + the body size so a
-                # silent SMTP failure is easier to spot in the logs.
-                logger.info(
-                    f"Task {task.id} delivered via MCP tool {tool_name} "
-                    f"(to={recipient or '<unset>'}, body={body_len}b, reply={stdout[:200]!r})"
-                )
+            if isinstance(mcp_result, dict):
+                from src.tool_execution import _normalize_mcp_text_error
+                mcp_result = _normalize_mcp_text_error(dict(mcp_result))
+            if not isinstance(mcp_result, dict) or mcp_result.get("error") or mcp_result.get("exit_code") != 0:
+                raise RuntimeError("MCP task delivery failed or returned an invalid result")
+            if tool_name == "mcp__email__send_email" and not str(mcp_result.get("stdout") or "").strip().startswith("Sent email to "):
+                raise RuntimeError("MCP email delivery did not report a completed send")
+            logger.info("Task %s delivered via MCP tool %s (recipient_set=%s, body=%sb)",
+                        task.id, tool_name, bool(recipient), len(result or ""))
         except Exception as e:
             logger.error(f"Task {task.id} MCP delivery failed: {e}")
+            raise
 
     async def run_task_now(self, task_id: str, *, force: bool = False):
         """Manually trigger a task execution."""
         if force:
             asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
             return True
-        async with self._executing_lock:
+        async with self._executing_guard():
             if task_id in self._executing:
                 return False
             self._executing.add(task_id)
@@ -2051,14 +2486,44 @@ class TaskScheduler:
         handle = self._task_handles.get(task_id)
         stopped = False
         if handle and not handle.done():
-            handle.cancel()
+            # A second cancel interrupts the first cancellation's async DB
+            # cleanup, potentially leaving an overdue task immediately due.
+            if not handle.cancelling():
+                handle.cancel()
             stopped = True
-        async with self._executing_lock:
+        async with self._executing_guard():
             if task_id in self._executing:
                 self._executing.discard(task_id)
                 stopped = True
 
-        stopped = self._mark_run_aborted(task_id) or stopped
+        stopped = await asyncio.to_thread(self._mark_run_aborted, task_id) or stopped
+        return stopped
+
+    async def stop_background_tasks_for_foreground(self, *, reason: str = "Odysseus became active") -> int:
+        """Cancel all in-process scheduler tasks because the user is active.
+
+        This is intentionally blunt for scheduled/background work: when the
+        user opens or uses Odysseus, foreground interaction wins immediately.
+        Manual force-runs can be restarted by the user; automatic jobs will be
+        deferred by their cancellation path instead of stealing the app.
+        """
+        async with self._executing_guard():
+            task_ids = list(self._executing)
+        stopped = 0
+        for task_id in task_ids:
+            handle = self._task_handles.get(task_id)
+            if handle and not handle.done():
+                if not handle.cancelling():
+                    handle.cancel()
+                stopped += 1
+        # Cancel every handle before waiting on persistence. A contended SQLite
+        # writer must not stall the foreground request's event loop, or delay
+        # cancellation of the remaining background work.
+        for task_id in task_ids:
+            if await asyncio.to_thread(self._mark_run_aborted, task_id):
+                stopped += 1
+        if stopped:
+            logger.info("Stopped %d background scheduler task(s): %s", stopped, reason)
         return stopped
 
     async def ensure_defaults(self, owner: str):
@@ -2182,6 +2647,34 @@ class TaskScheduler:
                             tz_name=_resolve_task_timezone(db, task),
                         )
                         normalized = True
+                if desired_trigger == "schedule" and (
+                    (task.trigger_type or "schedule") != "schedule"
+                    or task.trigger_event is not None
+                    or task.trigger_count is not None
+                    or task.schedule != defs.get("schedule")
+                    or task.scheduled_time != defs.get("scheduled_time")
+                    or task.scheduled_date is not None
+                    or task.cron_expression != defs.get("cron_expression")
+                ):
+                    # Migrate older event-based housekeeping tasks to their
+                    # current scheduled definition. Keep the user's status;
+                    # only replace the trigger configuration.
+                    task.trigger_type = "schedule"
+                    task.trigger_event = None
+                    task.trigger_count = None
+                    task.trigger_counter = 0
+                    task.schedule = defs.get("schedule")
+                    task.scheduled_time = defs.get("scheduled_time")
+                    task.scheduled_day = None
+                    task.scheduled_date = None
+                    task.cron_expression = defs.get("cron_expression")
+                    task.next_run = compute_next_run(
+                        task.schedule, task.scheduled_time,
+                        task.scheduled_day, task.scheduled_date,
+                        after=_utcnow(), cron_expression=task.cron_expression,
+                        tz_name=_resolve_task_timezone(db, task),
+                    )
+                    normalized = True
                 if desired_trigger == "event" and (
                     (task.trigger_type or "schedule") != "event"
                     or task.trigger_event != defs.get("trigger_event")
@@ -2222,6 +2715,7 @@ class TaskScheduler:
                 if (task.output_target or "session") == "session":
                     task.output_target = defs.get("output_target", "none")
             seeded = []
+            from src.agent_runtime.authority import seal_task_authority
             for action, defs in HOUSEKEEPING_DEFAULTS.items():
                 if action in existing_actions:
                     continue
@@ -2239,6 +2733,7 @@ class TaskScheduler:
                     name=defs["name"],
                     task_type="action",
                     action=action,
+                    request_authority_json=seal_task_authority(None, "action", action, owner=owner),
                     trigger_type=trigger_type,
                     trigger_event=defs.get("trigger_event"),
                     trigger_count=defs.get("trigger_count"),
@@ -2283,7 +2778,7 @@ class TaskScheduler:
         # check-ins seeded, which then double-fire alongside the human user's
         # check-ins. This was the root cause of the duplicate 'Morning check-in'
         # rows we had to manually clean up.
-        if not owner or owner in RESERVED_USERNAMES:
+        if not owner or owner in REQUEST_SENTINEL_OWNERS:
             logger.info(f"ensure_assistant_defaults: skip synthetic owner {owner!r}")
             return
         from core.database import SessionLocal, CrewMember, ScheduledTask

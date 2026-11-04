@@ -1,0 +1,20 @@
+{
+  "name": "odysseus-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "description": "LAN mobile companion for a self-hosted Odysseus AI workspace (plain JavaScript / Expo).",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "expo": "~51.0.0",
+    "expo-status-bar": "~1.12.1",
+    "react": "18.2.0",
+    "react-native": "0.74.5",
+    "@react-native-async-storage/async-storage": "1.23.1"
+  }
+}

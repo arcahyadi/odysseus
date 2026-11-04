@@ -22,12 +22,27 @@ import {
   // Plain specifier (no ?v=) — must match every other cookbook.js importer so the
   // browser loads it once. See cookbook-hwfit.js.
 } from './cookbook.js';
-import uiModule from './ui.js';
+import uiModule from './ui.js?v=20260916largetoolscroll1';
 
 // Tiny HTML-escape — keeps the file standalone instead of leaning on a
 // shared helper that may not be exported from this module's import surface.
 function _diagEsc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function _diagFetchWithTimeout(input, init = {}, timeoutMs = 75000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const parentSignal = init.signal;
+  const abortFromParent = () => controller.abort();
+  if (parentSignal) {
+    if (parentSignal.aborted) controller.abort();
+    else parentSignal.addEventListener('abort', abortFromParent, { once: true });
+  }
+  return fetch(input, { ...init, signal: controller.signal }).finally(() => {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener('abort', abortFromParent);
+  });
 }
 
 // Pick an icon for a diagnosis-action button based on the label. The icon
@@ -74,7 +89,7 @@ export function openCookbookDependencies(pkgName = '', opts = {}) {
 function _openCookbookDependencies(pkgName = '', opts = {}) {
   const cookbook = window.cookbookModule;
   if (cookbook && typeof cookbook.open === 'function') {
-    cookbook.open({ tab: 'Dependencies' });
+    cookbook.open({ tab: 'Dependencies', dependencyModel: opts.model || '' });
   } else {
     document.getElementById('tool-cookbook-btn')?.click();
   }
@@ -149,18 +164,138 @@ function _openCpuServeEdit(panel) {
   });
 }
 
-// Infer the gated base repo that single-file checkpoints need configs from
-function _inferBaseRepo(text) {
-  if (!text) return null;
-  const t = text.toLowerCase();
-  if (t.includes('sd3.5') || t.includes('stable-diffusion-3.5')) return 'stabilityai/stable-diffusion-3.5-large';
-  if (t.includes('sd3') || t.includes('stable-diffusion-3')) return 'stabilityai/stable-diffusion-3-medium-diffusers';
-  if (t.includes('flux')) return 'black-forest-labs/FLUX.1-schnell';
-  if (t.includes('sdxl') || t.includes('stable-diffusion-xl')) return 'stabilityai/stable-diffusion-xl-base-1.0';
-  return null;
+function _taskForDiagnosisPanel(panel) {
+  const taskEl = panel?.closest?.('.cookbook-task');
+  const taskId = taskEl?.dataset?.taskId || '';
+  if (!taskId) return null;
+  return (_loadTasks() || []).find(t => t.sessionId === taskId) || null;
+}
+
+function _pythonFromServeCmd(cmd) {
+  const s = String(cmd || '');
+  const abs = s.match(/(?:^|\s)(\/[^\s]+\/bin\/python3?)(?=\s+-m\s+(?:sglang\.launch_server|mlx_lm\.server))/);
+  if (abs) return abs[1];
+  const rel = s.match(/(?:^|\s)(python3?)(?=\s+-m\s+(?:sglang\.launch_server|mlx_lm\.server))/);
+  return rel ? rel[1] : '';
+}
+
+function _pythonForDiagnosisPanel(panel) {
+  const task = _taskForDiagnosisPanel(panel);
+  const fromCmd = _pythonFromServeCmd(task?.payload?._cmd || '');
+  if (fromCmd) return fromCmd;
+  return (_envState.env === 'venv' && _envState.envPath)
+    ? `${_envState.envPath.replace(/\/+$/, '')}/bin/python3`
+    : 'python3';
+}
+
+function _sglangKernelRepairCommand(panel) {
+  return `${_pythonForDiagnosisPanel(panel)} -m pip install -U --force-reinstall --no-cache-dir sglang-kernel`;
+}
+
+function _mlxLmInstallCommand(panel) {
+  return `${_pythonForDiagnosisPanel(panel)} -m pip install -U mlx-lm`;
+}
+
+async function _repairSglangKernel(panel) {
+  const task = _taskForDiagnosisPanel(panel);
+  uiModule.showToast('Repairing sglang-kernel on the selected server...');
+  await _launchServeTask(
+    'repair-sglang-kernel',
+    'pip-update',
+    _sglangKernelRepairCommand(panel),
+    null,
+    task?.remoteHost || undefined,
+    task ? {
+      serverKey: task.remoteServerKey || task.remoteHost || '',
+      serverName: task.remoteServerName || task.remoteHost || '',
+    } : null,
+  );
+}
+
+async function _installMlxLm(panel) {
+  const task = _taskForDiagnosisPanel(panel);
+  uiModule.showToast('Installing MLX LM on the selected server...');
+  await _launchServeTask(
+    'install-mlx-lm',
+    'pip-update',
+    _mlxLmInstallCommand(panel),
+    null,
+    task?.remoteHost || undefined,
+    _diagnosisTargetMeta(task),
+  );
+}
+
+function _diagnosisTargetMeta(task) {
+  return task ? {
+    serverKey: task.remoteServerKey || task.remoteHost || '',
+    serverName: task.remoteServerName || task.remoteHost || '',
+  } : null;
+}
+
+function _gpuCleanupCommand() {
+  return `set -u
+echo "[odysseus] Clearing GPU compute processes..."
+if command -v nvidia-smi >/dev/null 2>&1; then
+  pids="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | tr -d " " | grep -E "^[0-9]+$" | sort -u)"
+  if [ -z "$pids" ]; then
+    echo "[odysseus] No NVIDIA compute processes found."
+    exit 0
+  fi
+  echo "[odysseus] GPU PIDs: $pids"
+  ps -fp $pids 2>/dev/null || true
+  echo "[odysseus] Sending TERM..."
+  kill -TERM $pids || true
+  sleep 3
+  alive=""
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then alive="$alive $pid"; fi
+  done
+  if [ -n "$alive" ]; then
+    echo "[odysseus] Force killing remaining GPU PIDs:$alive"
+    kill -KILL $alive || true
+  fi
+  sleep 1
+  remaining="$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits 2>/dev/null | sed "/^$/d" || true)"
+  if [ -n "$remaining" ]; then
+    echo "[odysseus] GPU processes still remain:"
+    echo "$remaining"
+    exit 2
+  fi
+  echo "[odysseus] GPU cleanup complete. No NVIDIA compute processes remain."
+else
+  echo "[odysseus] nvidia-smi not found; falling back to common model-server process cleanup."
+  pkill -TERM -f "sglang.launch_server|vllm|llama-server|text-generation-launcher|aphrodite" || true
+  sleep 3
+  pkill -KILL -f "sglang.launch_server|vllm|llama-server|text-generation-launcher|aphrodite" || true
+  echo "[odysseus] Fallback cleanup complete."
+fi`;
+}
+
+async function _clearGpuProcesses(panel) {
+  uiModule.showToast('Clearing GPU compute processes on the selected server...');
+  await _runQuickCmd(panel, _gpuCleanupCommand());
 }
 
 export const ERROR_PATTERNS = [
+  {
+    pattern: /tmux is required|tmux.*not found|tmux:\s*command not found|command not found:\s*tmux|No such file or directory:\s*['"]?tmux/i,
+    message: 'tmux is missing on this server.',
+    suggestion: 'Suggested action: open Dependencies and install tmux on the selected server.',
+    fixes: [
+      { label: 'Open tmux dependency', action: () => _openCookbookDependencies('tmux') },
+      { label: 'Copy apt install', action: () => _copyText('sudo apt install -y tmux') },
+      { label: 'Copy pacman install', action: () => _copyText('sudo pacman -S --needed tmux') },
+    ],
+  },
+  {
+    pattern: /Port \d+ is already serving|port is occupied by a different model|choose another port before launching/i,
+    message: 'Serve port is already occupied by another model.',
+    suggestion: 'Suggested action: stop the old server or choose a different port before relaunching.',
+    fixes: [
+      { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
+      { label: 'Copy check command', action: () => _copyText('curl http://127.0.0.1:PORT/v1/models') },
+    ],
+  },
   {
     pattern: /No available memory for the cache blocks|Available KV cache memory:.*-/i,
     message: 'No GPU memory left for KV cache after loading model.',
@@ -177,6 +312,39 @@ export const ERROR_PATTERNS = [
       { label: 'Retry with GPU mem 0.80', action: (panel) => _serveAutoRetryReplace(panel, '--gpu-memory-utilization', '0.80') },
       { label: 'Retry with --max-num-seqs 64', action: (panel) => _serveAutoRetry(panel, '--max-num-seqs 64') },
       { label: 'Retry with --max-num-seqs 32', action: (panel) => _serveAutoRetry(panel, '--max-num-seqs 32') },
+    ],
+  },
+  {
+    pattern: /Loaded weights leave no GPU memory for the KV cache under --mem-fraction-static|Raise --mem-fraction-static above/i,
+    message: 'SGLang static memory fraction is too low for the loaded weights.',
+    suggestion: 'Suggested action: retry with --mem-fraction-static 0.80 so weights fit and KV cache can still allocate.',
+    fixes: [
+      { label: 'Retry mem 0.80', action: (panel) => _serveAutoRetryReplace(panel, '--mem-fraction-static', '0.80') },
+      { label: 'Retry mem 0.82', action: (panel) => _serveAutoRetryReplace(panel, '--mem-fraction-static', '0.82') },
+      { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
+    ],
+  },
+  {
+    pattern: /get_paged_mqa_logits_metadata|deepseek_v4_backend\.py|paged_mqa_metadata\.cuh:113.*CUDA error:\s*invalid argument/i,
+    message: 'SGLang DeepSeek-V4 attention metadata kernel failed on this GPU/runtime.',
+    suggestion: 'Suggested action: stop retrying graph/memory tweaks for this exact FP8 command. SGLang’s RTX PRO 6000 recipe uses the original deepseek-ai/DeepSeek-V4-Flash checkpoint with --moe-runner-backend marlin, not the converted sgl-project FP8 checkpoint. Try that recipe/checkpoint, official SGLang container/nightly, or supported Hopper/Blackwell hardware.',
+    fixes: [
+      { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
+      { label: 'Copy error', action: (panel) => {
+        const task = panel.closest('.cookbook-task');
+        const text = task?.querySelector('.cookbook-task-output')?.textContent || task?.textContent || '';
+        _copyText(text.trim());
+      } },
+    ],
+  },
+  {
+    pattern: /Capture cuda graph failed|cuda graph failed|paged_mqa_metadata|cuda-graph-backend-decode|cuda-graph-max-bs-decode|CUDA error:\s*invalid argument/i,
+    message: 'SGLang failed while capturing decode CUDA graphs.',
+    suggestion: 'Suggested action: disable SGLang decode CUDA graph for this launch. DeepSeek-V4 is reaching graph capture, but this kernel is failing on the target hardware.',
+    fixes: [
+      { label: 'Disable decode graph', action: (panel) => _serveAutoRetryReplace(panel, '--cuda-graph-backend-decode', 'disabled') },
+      { label: 'Retry mem 0.80', action: (panel) => _serveAutoRetryReplace(panel, '--mem-fraction-static', '0.80') },
+      { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
     ],
   },
   {
@@ -286,11 +454,10 @@ export const ERROR_PATTERNS = [
     message: 'Single-file checkpoint needs a base model for missing components (text encoder, VAE). The base model may be gated — accept the license and set your HF token.',
     fixes: [
       { label: 'Request access to base model', action: (panel, _text) => {
-        // Extract gated repo from error, or infer from model name
         const gated = _text && _text.match(/Access to model\s+(\S+)\s+is restricted/i);
         const base = _text && _text.match(/config=([^\s,)]+)/i);
         const model = _text && _text.match(/load model from\s+(\S+)/i);
-        const repo = (gated && gated[1]) || (base && base[1]) || _inferBaseRepo(_text);
+        const repo = (gated && gated[1]) || (base && base[1]);
         if (repo) window.open('https://huggingface.co/' + repo, '_blank');
         else if (model && model[1]) window.open('https://huggingface.co/' + model[1].replace(/[.]$/, ''), '_blank');
       }},
@@ -301,12 +468,20 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
+    pattern: /OmniGen2Pipeline|module diffusers has no attribute .*Pipeline|custom_pipeline=.*failed/i,
+    message: 'This image model uses a custom Diffusers pipeline that your launch environment does not know yet.',
+    fixes: [
+      { label: 'Update image dependencies', action: () => _openCookbookDependencies('diffusers') },
+      { label: 'Copy diagnosis', action: (_panel, _text) => navigator.clipboard?.writeText(_text || '') },
+    ],
+  },
+  {
     pattern: /Entry Not Found.*model_index\.json|Could not load model.*Check diffusers/i,
-    message: 'Single-file model — needs base config from a gated repo. Accept the license and set your HF token.',
+    message: 'Single-file model may need an explicit base config. Add --single-file-config <repo_or_path> if the checkpoint is missing components.',
     fixes: [
       { label: 'Request access to base model', action: (panel, _text) => {
         const gated = _text && _text.match(/Access to model\s+(\S+)\s+is restricted/i);
-        const repo = (gated && gated[1]) || _inferBaseRepo(_text);
+        const repo = gated && gated[1];
         if (repo) window.open('https://huggingface.co/' + repo, '_blank');
         else window.open('https://huggingface.co/settings/gated-repos', '_blank');
       }},
@@ -335,6 +510,18 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
+    pattern: /memory capacity is unbalanced|Some GPUs may be occupied by other processes|pre_model_load_memory=.*local_gpu_memory/i,
+    message: 'SGLang refused to start because free GPU memory is uneven across the selected tensor-parallel GPUs.',
+    suggestion: 'Suggested action: run Clear GPUs, then relaunch. If it still fails, choose only equally free GPUs or lower TP/context.',
+    fixes: [
+      { label: 'Clear GPUs', action: (panel) => _clearGpuProcesses(panel) },
+      { label: 'Copy clear command', action: () => _copyText(_gpuCleanupCommand()) },
+      { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
+      { label: 'Set TP to 1', action: (panel) => _setPanelField(panel, 'tp', '1') },
+      { label: 'Lower context', action: (panel) => _setPanelField(panel, 'ctx', '32768') },
+    ],
+  },
+  {
     pattern: /KV cache.*too (small|large)|max_model_len.*exceeds|maximum.*context/i,
     message: 'Context length too large for available GPU memory.',
     fixes: [
@@ -355,11 +542,14 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
-    pattern: /sgl_kernel[\s\S]*(Python\.h|libnuma\.so\.1|common_ops)|(Python\.h|libnuma\.so\.1|common_ops)[\s\S]*sgl_kernel|Please ensure sgl_kernel is properly installed/i,
-    message: 'SGLang native dependencies are missing on this server.',
+    pattern: /sgl_kernel[\s\S]*(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)|(?:Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)[\s\S]*sgl_kernel|Could not load any common_ops library|Please ensure sgl_kernel is properly installed/i,
+    message: 'SGLang native kernel/runtime is missing or mismatched on this server.',
+    suggestion: 'Suggested action: relaunch with Odysseus’ venv CUDA library path fix. If the venv does not contain the matching NVIDIA runtime libs, run Repair sglang-kernel.',
     fixes: [
+      { label: 'Edit / relaunch serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
+      { label: 'Repair sglang-kernel', action: (panel) => _repairSglangKernel(panel) },
+      { label: 'Copy repair command', action: (panel) => _copyText(_sglangKernelRepairCommand(panel)) },
       { label: 'Copy OS package command', action: () => _copyText('sudo apt-get install -y libnuma-dev python3.12-dev build-essential') },
-      { label: 'Copy kernel upgrade', action: () => _copyText('python3 -m pip install --upgrade sglang-kernel') },
       { label: 'Open Dependencies', action: () => _openCookbookDependencies('sglang') },
     ],
   },
@@ -369,6 +559,39 @@ export const ERROR_PATTERNS = [
     fixes: [
       { label: 'Open Dependencies', action: () => _openCookbookDependencies('sglang') },
       { label: 'Copy install command', action: () => _copyText('python3 -m pip install "sglang[all]"') },
+    ],
+  },
+  {
+    pattern: /No module named ['"]?mlx_lm|mlx_lm.*command not found|MLX is not installed|MLX LM is not installed/i,
+    message: 'MLX LM is not installed on this server.',
+    suggestion: 'Suggested action: install mlx-lm in the selected Python environment. MLX serving is intended for Apple Silicon Macs.',
+    fixes: [
+      { label: 'Install MLX LM', action: (panel) => _installMlxLm(panel) },
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('mlx_lm') },
+      { label: 'Copy install command', action: () => _copyText('python3 -m pip install -U mlx-lm') },
+    ],
+  },
+  {
+    pattern: /mflux-generate-qwen.*not found|mflux-generate.*not found|MLX image serving requires mflux|No module named ['"]?mflux/i,
+    message: 'MLX image serving requires mflux on this Apple Silicon server.',
+    suggestion: 'Suggested action: install mflux in the selected Python environment. This is for MLX image generation, not text MLX-LM.',
+    fixes: [
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('mflux') },
+      { label: 'Copy install command', action: () => _copyText('python3 -m pip install -U mflux fastapi uvicorn') },
+    ],
+  },
+  {
+    pattern: /Unable to quantize model of type <class ['"]mlx_lm\.models\.switch_layers\.QuantizedSwitchLinear['"]>|QuantizedSwitchLinear/i,
+    message: 'MLX-LM tried to quantize an already-quantized DeepSeek switch layer.',
+    suggestion: 'Suggested action: relaunch from the cached local snapshot path. Odysseus now rewrites MLX repo-id launches to the newest local Hugging Face snapshot when it exists on the selected Mac.',
+    fixes: [
+      { label: 'Edit / relaunch serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('mlx_lm') },
+      { label: 'Copy error', action: (panel) => {
+        const task = panel.closest('.cookbook-task');
+        const text = task?.querySelector('.cookbook-task-output')?.textContent || task?.textContent || '';
+        _copyText(text.trim());
+      } },
     ],
   },
   {
@@ -522,11 +745,11 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
-    pattern: /No module named ['"]?torch|No module named ['"]?diffusers|diffusers.*command not found/i,
-    message: 'Diffusion serving needs PyTorch and diffusers. Install diffusers from Cookbook → Dependencies.',
+    pattern: /No module named ['"]?torch|No module named ['"]?torchvision|No module named ['"]?diffusers|No module named ['"]?scipy|install scipy if you want to use beta sigmas|requires the Torchvision library|diffusers.*command not found/i,
+    message: 'Diffusion serving needs PyTorch, Torchvision, Diffusers, Accelerate, and SciPy. Install Diffusers image deps from Cookbook → Dependencies.',
     fixes: [
       { label: 'Open Dependencies', action: () => _openCookbookDependencies('diffusers') },
-      { label: 'Copy install command', action: () => _copyText('python3 -m pip install "diffusers[torch]"') },
+      { label: 'Copy install command', action: () => _copyText('python3 -m pip install "diffusers[torch]" torchvision accelerate scipy python-multipart') },
     ],
   },
   {
@@ -834,22 +1057,38 @@ export function _clearDiagnosis(panel) {
 // ── Quick command ──
 
 export async function _runQuickCmd(panel, cmd) {
+  const task = _taskForDiagnosisPanel(panel);
   let fullCmd = cmd;
-  if (_envState.remoteHost) {
-    fullCmd = _sshCmd(_envState.remoteHost, cmd);
+  const host = task?.remoteHost || _envState.remoteHost || '';
+  const port = task?.sshPort || task?.payload?.ssh_port || _envState.sshPort || '';
+  if (host) {
+    fullCmd = _sshCmd(host, cmd, port);
   }
   const diag = panel.querySelector('.cookbook-diagnosis');
-  if (diag) { diag.classList.remove('hidden'); diag.textContent = `Running: ${fullCmd}...`; }
+  if (diag) {
+    diag.classList.remove('hidden');
+    diag.innerHTML = '<div class="cookbook-diag-message">Running command...</div>';
+  }
 
   try {
-    const res = await fetch('/api/shell/stream', {
+    const res = await _diagFetchWithTimeout('/api/shell/exec', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: fullCmd }),
+      body: JSON.stringify({ command: fullCmd, timeout: 60 }),
     });
-    if (diag) diag.textContent = res.ok ? `Done: ${cmd}` : `Failed (HTTP ${res.status})`;
+    const data = await res.json().catch(() => ({}));
+    const out = [data.stdout, data.stderr].filter(Boolean).join('\n').trim();
+    const ok = res.ok && Number(data.exit_code ?? 1) === 0;
+    if (diag) {
+      diag.innerHTML = ''
+        + `<div class="cookbook-diag-message">${ok ? 'Command completed.' : 'Command failed.'}</div>`
+        + `<div class="cookbook-diag-suggestion" style="opacity:0.75;margin-top:1px;">Exit code: ${_diagEsc(data.exit_code ?? 'unknown')}</div>`
+        + (out ? `<pre class="cookbook-diag-output" style="margin:6px 0 0;white-space:pre-wrap;max-height:180px;overflow:auto;font-size:10px;line-height:1.35;">${_diagEsc(out)}</pre>` : '');
+    }
   } catch (e) {
-    if (diag) diag.textContent = `Error: ${e.message}`;
+    if (diag) {
+      diag.innerHTML = `<div class="cookbook-diag-message">Command error.</div><div class="cookbook-diag-suggestion">${_diagEsc(e.message)}</div>`;
+    }
   }
 }

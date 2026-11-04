@@ -55,3 +55,19 @@ def test_genuine_keywords_still_force_include():
     assert "reply_to_email" in ti.get_tools_for_query("reply to this email")
     assert "edit_document" in ti.get_tools_for_query("edit the document")
     assert "serve_model" in ti.get_tools_for_query("serve the model")
+
+
+def test_find_info_online_forces_web_search_tools():
+    ti = _index()
+    tools = ti.get_tools_for_query("find info online about crow box designs")
+    assert "web_search" in tools
+    assert "web_fetch" in tools
+
+
+def test_hardware_aware_model_recommendation_includes_app_api():
+    ti = _index()
+    for query in (
+        "find the best model to run on my hardware",
+        "recommend a compatible model for this GPU",
+    ):
+        assert "app_api" in ti.get_tools_for_query(query), query

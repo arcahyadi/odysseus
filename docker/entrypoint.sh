@@ -29,12 +29,12 @@ fi
 ODY_USER="$(getent passwd "$PUID" | cut -d: -f1)"
 [ -z "$ODY_USER" ] && ODY_USER=odysseus
 
-# Docker-socket group plumbing. When /var/run/docker.sock is bind-mounted
-# (Cookbook uses docker exec to reach sibling containers), the socket is
-# owned by root:<host docker gid>. Add the app user to that group and later
-# call gosu by username so supplementary groups are retained.
+# Docker-socket group plumbing for the explicit host-Docker overlay. When
+# opted in, the socket is owned by root:<host docker gid>. Add the app user
+# to that group and later call gosu by username so supplementary groups are
+# retained.
 DOCKER_SOCK="${DOCKER_SOCK:-/var/run/docker.sock}"
-if [ -S "$DOCKER_SOCK" ]; then
+if [ "${ODYSSEUS_ENABLE_HOST_DOCKER:-}" = "true" ] && [ -S "$DOCKER_SOCK" ]; then
     SOCK_GID="$(stat -c '%g' "$DOCKER_SOCK" 2>/dev/null || echo '')"
     if [ -n "$SOCK_GID" ] && [ "$SOCK_GID" != "0" ]; then
         if ! getent group "$SOCK_GID" >/dev/null 2>&1; then
@@ -96,7 +96,16 @@ repair_bind_mount_ownership() {
 # Repair image-owned writable paths without walking into bind-mounted host
 # trees, then repair the app-owned mount roots separately.
 repair_app_tree_ownership
-for dir in /app/data /app/logs /app/.ssh /app/.cache/huggingface /app/.local; do
+# Docker creates the parent of the HuggingFace bind mount as root before this
+# entrypoint runs. Repair only the parent directory itself so app-user caches
+# such as /app/.cache/vllm and /app/.cache/flashinfer can be created without
+# recursively walking the mounted model cache.
+chown "$PUID:$PGID" /app/.cache 2>/dev/null || true
+# The Hugging Face cache can contain hundreds of gigabytes and is a nested
+# mount with its own ownership contract. Repair its mount root so new cache
+# entries are writable, but never traverse or rewrite existing model files.
+chown "$PUID:$PGID" /app/.cache/huggingface 2>/dev/null || true
+for dir in /app/data /app/logs /app/.ssh /app/.local; do
     repair_bind_mount_ownership "$dir"
 done
 

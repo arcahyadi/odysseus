@@ -16,7 +16,7 @@ sys.path.insert(0, BASE_DIR)
 from src.constants import (
     DATA_DIR, AUTH_FILE, UPLOAD_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR,
     TTS_CACHE_DIR, GENERATED_IMAGES_DIR, DEEP_RESEARCH_DIR, CHROMA_DIR,
-    RAG_DIR, MEMORY_VECTORS_DIR, PASSWORD_MIN_LENGTH,
+    RAG_DIR, MEMORY_VECTORS_DIR, AGENT_WORKSPACE_DIR, PASSWORD_MIN_LENGTH,
 )
 from core.auth import RESERVED_USERNAMES
 
@@ -31,6 +31,7 @@ DIRS = [
     CHROMA_DIR,
     RAG_DIR,
     MEMORY_VECTORS_DIR,
+    AGENT_WORKSPACE_DIR,
     os.path.join(BASE_DIR, "logs"),
 ]
 
@@ -238,6 +239,15 @@ def check_arch():
 
 def main():
     print("\n=== Odysseus Setup ===\n")
+
+    # Load .env so pre-seeded ODYSSEUS_ADMIN_USER / ODYSSEUS_ADMIN_PASSWORD (and
+    # other deployment vars) are honored on native installs, not just when they
+    # are exported in the shell. Mirrors app.py: encoding="utf-8-sig" tolerates a
+    # UTF-8 BOM in a Notepad-saved .env. load_dotenv does not override already
+    # exported OS env vars, so the existing precedence is preserved. python-dotenv
+    # is a hard dependency (requirements.txt) and is verified by check_deps below.
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(BASE_DIR, ".env"), encoding="utf-8-sig")
 
     # Fail fast with a clear message if the CPU architecture is wrong (Apple
     # Silicon under an x86/Rosetta Python) before importing anything native.

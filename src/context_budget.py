@@ -18,6 +18,13 @@ DEFAULT_BUDGET = 6000
 DEFAULT_HEADROOM = 0.85
 
 
+def _int_or_zero(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def compute_input_token_budget(
     configured: int,
     context_length: int,
@@ -48,8 +55,8 @@ def compute_input_token_budget(
         - When the window is unknown (context_length <= 0), use the conservative
           ``default`` budget and do NOT scale off the fallback.
     """
-    configured = int(configured or 0)
-    context_length = int(context_length or 0)
+    configured = _int_or_zero(configured)
+    context_length = _int_or_zero(context_length)
 
     if explicit and configured > 0:
         return min(configured, context_length) if context_length > 0 else configured
@@ -59,6 +66,42 @@ def compute_input_token_budget(
         return max(1, min(scaled, hard_max))
 
     return configured if configured > 0 else default
+
+
+def bound_trim_reserve(context_window: int, requested_reserve: int) -> int:
+    """Keep the response reserve from consuming the entire context window.
+
+    At least half of a small context window remains available for input. The
+    caller can then combine this bounded reserve with its independently
+    computed input budget without subtracting the reserve twice.
+    """
+
+    budget = max(0, _int_or_zero(context_window))
+    reserve = max(0, _int_or_zero(requested_reserve))
+    return min(reserve, budget // 2)
+
+
+def compute_trim_context_window(
+    input_budget: int,
+    context_length: int,
+    requested_reserve: int,
+) -> tuple[int, int]:
+    """Return ``(trim_window, reserve)`` for ``trim_for_context``.
+
+    ``compute_input_token_budget`` returns an input allowance, whereas
+    ``trim_for_context`` expects a total window and subtracts its response
+    reserve internally. Add the reserve to the input allowance exactly once,
+    clamped to the model's real context window.
+    """
+
+    input_budget = max(1, _int_or_zero(input_budget))
+    context_length = max(0, _int_or_zero(context_length))
+    reserve_basis = context_length if context_length > 0 else input_budget
+    reserve = bound_trim_reserve(reserve_basis, requested_reserve)
+    trim_window = input_budget + reserve
+    if context_length > 0:
+        trim_window = min(trim_window, context_length)
+    return max(1, trim_window), reserve
 
 
 def budget_is_explicit(configured: int, *, default: int = DEFAULT_BUDGET) -> bool:
@@ -73,3 +116,56 @@ def budget_is_explicit(configured: int, *, default: int = DEFAULT_BUDGET) -> boo
     """
     configured = int(configured or 0)
     return configured > 0 and configured != default
+
+# ── Context-window driven tool-set tiering ──
+#
+# Small context windows cannot carry the full agent prompt AND a wide tool
+# schema block. Retrieval `k` used to be hard-coded to 8 tools regardless of
+# model window, so a 4K model burned ~2K tokens on tool schemas before the
+# user's message even started. These helpers scale both the retrieval width
+# and the "always-available" fallback to what the discovered window can
+# actually hold.
+#
+# Thresholds (context_length in tokens):
+#   <  4096  → k=4,  small core set (ask_user, update_plan)
+#   <  8192  → k=5,  small core set (manage_memory still reachable via RAG)
+#   < 32768  → k=8,  full ALWAYS_AVAILABLE (today's behaviour)
+#   ≥ 32768  → k=12, full ALWAYS_AVAILABLE, richer retrieval
+TIER_SMALL_K = 4
+TIER_TIGHT_K = 5
+TIER_DEFAULT_K = 8
+TIER_LARGE_K = 12
+
+TIER_SMALL_MAX = 4096
+TIER_TIGHT_MAX = 8192
+TIER_LARGE_MIN = 32768
+
+
+def compute_tool_retrieval_k(context_length: int, *, default: int = TIER_DEFAULT_K) -> int:
+    """Return how many tools vector retrieval should surface for a given window.
+
+    Pure and side-effect free. ``context_length <= 0`` (window unknown or
+    probing failed) falls back to ``default`` — the conservative wide-8
+    behaviour pre-tiering shipped with, so an unprobed endpoint isn't
+    silently degraded.
+    """
+    ctx = _int_or_zero(context_length)
+    if ctx <= 0:
+        return default
+    if ctx < TIER_SMALL_MAX:
+        return TIER_SMALL_K
+    if ctx < TIER_TIGHT_MAX:
+        return TIER_TIGHT_K
+    if ctx < TIER_LARGE_MIN:
+        return TIER_DEFAULT_K
+    return TIER_LARGE_K
+
+
+def is_small_context_window(context_length: int, *, threshold: int = TIER_TIGHT_MAX) -> bool:
+    """True when the discovered window is too tight to carry the full
+    ALWAYS_AVAILABLE set alongside RAG results. Callers use this to swap
+    in the reduced small-context tool set as the base."""
+    ctx = _int_or_zero(context_length)
+    if ctx <= 0:
+        return False
+    return ctx < threshold

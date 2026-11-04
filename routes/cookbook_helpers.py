@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 from routes._validators import validate_remote_host, validate_ssh_port
+from routes.cookbook_output import HF_PARTIAL_BLOB_HELPER
 from core.platform_compat import _ssh_exec_argv
 
 logger = logging.getLogger(__name__)
@@ -378,6 +379,7 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
     """
     lines = [
         "import json, os, re, shutil, subprocess, urllib.request",
+        *HF_PARTIAL_BLOB_HELPER.splitlines(),
         "models = []",
         "seen = set()",
         "BLOCKED_ROOTS = ('/sys', '/proc', '/dev', '/run', '/var/run')",
@@ -436,26 +438,51 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "        sz, nf, ic = 0, 0, False",
         "        if os.path.isdir(blobs):",
         "            for f in os.scandir(blobs):",
+        "                if f.name.endswith('.incomplete'):",
+        "                    if not is_partial_blob(f.path): continue",
+        "                    ic = True",
         "                if f.is_file(): nf += 1; sz += f.stat().st_size",
-        "                if f.name.endswith('.incomplete'): ic = True",
         "        snap = os.path.join(cache, d, 'snapshots')",
-        "        # Windows HF cache stores files directly in snapshots/; blobs/ may be empty.",
-        "        # Fallback: scan snapshots for real files when blobs yielded nothing.",
-        "        if sz == 0 and os.path.isdir(snap):",
+        "        def snapshot_size():",
+        "            total, count, incomplete = 0, 0, False",
+        "            seen_real = set()",
         "            for sd in os.listdir(snap):",
         "                sf = os.path.join(snap, sd)",
         "                if not os.path.isdir(sf): continue",
-        "                for f in os.scandir(sf):",
-        "                    if f.is_file(): nf += 1; sz += f.stat().st_size",
-        "                    if f.name.endswith('.incomplete'): ic = True",
-        "        is_diffusion = False; gguf_files = []",
+        "                for root, dirs, fns in safe_walk(sf):",
+        "                    for fn in fns:",
+        "                        fp = os.path.join(root, fn)",
+        "                        if fn.endswith('.incomplete'): incomplete = True",
+        "                        try:",
+        "                            real = os.path.realpath(fp)",
+        "                            if real in seen_real: continue",
+        "                            seen_real.add(real)",
+        "                            total += os.path.getsize(real)",
+        "                            count += 1",
+        "                        except Exception:",
+        "                            pass",
+        "            return total, count, incomplete",
+        "        # Some HF caches (macOS/MLX/Xet-style) keep blobs elsewhere or expose",
+        "        # snapshot symlinks only. Size snapshots too when blob accounting is empty.",
+        "        if sz == 0 and os.path.isdir(snap):",
+        "            sz2, nf2, ic2 = snapshot_size()",
+        "            sz, nf, ic = sz2, nf2, ic or ic2",
+        "        is_video = bool(re.search(r'(?i)(^|/)Lightricks/LTX-|(^|/)LTX[-_/]|video|text-to-video|image-to-video', rid))",
+        "        is_diffusion = is_video; is_adapter = bool(re.search(r'(?i)(lora|adapter|peft|qlora|control[-_]?lora|diffusion[-_]?lora)', rid)); gguf_files = []",
         "        if os.path.isdir(snap):",
         "            for sd in os.listdir(snap):",
         "                sf = os.path.join(snap, sd)",
         "                if not os.path.isdir(sf): continue",
         "                if os.path.exists(os.path.join(sf, 'model_index.json')): is_diffusion = True",
+        "                if os.path.exists(os.path.join(sf, 'adapter_config.json')) or os.path.exists(os.path.join(sf, 'adapter_model.safetensors')): is_adapter = True",
+        "                for _root, _dirs, _fns in safe_walk(sf):",
+        "                    for _fn in _fns:",
+        "                        _lfn = _fn.lower()",
+        "                        if _lfn.endswith('.safetensors') and re.search(r'(?i)(ltx|video|upscaler)', _lfn): is_video = True; is_diffusion = True",
+        "                        if _lfn in ('adapter_config.json','adapter_model.safetensors','pytorch_lora_weights.safetensors') or 'lora' in _lfn:",
+        "                            is_adapter = True",
         "                for f in collect_ggufs(sf): f['rel_path'] = sd + '/' + f['rel_path']; gguf_files.append(f)",
-        "        models.append({'repo_id':rid,'size_bytes':sz,'nb_files':nf,'has_incomplete':ic,'path':cache,'is_diffusion':is_diffusion,'is_gguf':bool(gguf_files),'gguf_files':gguf_files})",
+        "        models.append({'repo_id':rid,'size_bytes':sz,'nb_files':nf,'has_incomplete':ic,'path':cache,'is_diffusion':is_diffusion,'is_video':is_video,'is_adapter':is_adapter,'is_gguf':bool(gguf_files),'gguf_files':gguf_files})",
         "def hf_cache_paths():",
         "    candidates = []",
         "    def add(p):",
@@ -471,7 +498,18 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "    add('/app/.cache/huggingface/hub')",
         f"    add({add_hf_cache!r})" if add_hf_cache else "",
         "    return candidates",
+        "def normalize_model_dir(p):",
+        "    p = os.path.expanduser((p or '').strip())",
+        "    if not p: return p",
+        "    if os.path.isdir(p) or os.path.isabs(p): return p",
+        "    # Users often paste Linux absolute paths without the leading slash.",
+        "    # Treat home/<user>/... as /home/<user>/... so remote scans work.",
+        "    if p.startswith(('home/', 'mnt/', 'media/', 'data/', 'opt/', 'srv/', 'var/')):",
+        "        prefixed = '/' + p",
+        "        if os.path.isdir(prefixed): return prefixed",
+        "    return p",
         "def scan_dir(p):",
+        "    p = normalize_model_dir(p)",
         "    if not os.path.isdir(p) or not safe_path(p): return",
         "    for d in sorted(os.listdir(p)):",
         "        if d.startswith('.'): continue",
@@ -479,11 +517,12 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "        fp = os.path.join(p, d)",
         "        if not os.path.isdir(fp) or os.path.islink(fp) or not safe_path(fp): continue",
         "        if d in seen: continue",
-        "        is_model = False; gguf_files = []",
+        "        is_model = False; is_adapter = bool(re.search(r'(?i)(lora|adapter|peft|qlora|control[-_]?lora|diffusion[-_]?lora)', d)); gguf_files = []",
         "        for root, dirs, fns in safe_walk(fp):",
         "            for fn in fns:",
         "                if fn.lower().endswith('.gguf'): is_model = True",
         "                elif fn == 'config.json' or fn.endswith('.safetensors') or fn.endswith('.bin'): is_model = True",
+        "                if fn in ('adapter_config.json','adapter_model.safetensors','pytorch_lora_weights.safetensors') or 'lora' in fn.lower(): is_adapter = True",
         "            if is_model: break",
         "        if not is_model: continue",
         "        gguf_files = collect_ggufs(fp)",
@@ -494,7 +533,7 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "                try: nf += 1; sz += os.path.getsize(os.path.join(dp, fn))",
         "                except Exception: pass",
         "        is_diff = os.path.exists(os.path.join(fp, 'model_index.json'))",
-        "        models.append({'repo_id':d,'size_bytes':sz,'nb_files':nf,'has_incomplete':False,'path':p,'is_local_dir':True,'is_diffusion':is_diff,'is_gguf':bool(gguf_files),'gguf_files':gguf_files})",
+        "        models.append({'repo_id':d,'size_bytes':sz,'nb_files':nf,'has_incomplete':False,'path':p,'is_local_dir':True,'is_diffusion':is_diff,'is_adapter':is_adapter,'is_gguf':bool(gguf_files),'gguf_files':gguf_files})",
         "def parse_size(num, unit):",
         "    try: n = float(num)",
         "    except Exception: return 0",
@@ -541,7 +580,7 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "scan_ollama()",
     ]
     for model_dir in model_dirs or []:
-        lines.append(f"scan_dir(os.path.expanduser({model_dir!r}))")
+        lines.append(f"scan_dir({model_dir!r})")
     lines.append("print(json.dumps(models))")
     return "\n".join(lines) + "\n"
 
@@ -558,10 +597,22 @@ def _bash_squote(v: str) -> str:
     return v.replace("'", "'\\''")
 
 
+# Shown by generated runner scripts when the ollama binary is missing on the
+# target host. Must stay free of backticks/$( ) and be emitted single-quoted:
+# an earlier version wrapped the install one-liner in backticks inside a
+# double-quoted echo, which bash executed as command substitution and ran the
+# system-wide installer (including on remote SSH hosts) instead of printing
+# the hint.
+OLLAMA_MISSING_HINT = (
+    "ERROR: Ollama not found on this server. Install it from "
+    "https://ollama.com/download or run: curl -fsSL https://ollama.com/install.sh | sh"
+)
+
+
 # Allow-list of binaries permitted as the leading token of `req.cmd` for /api/model/serve.
 # Anything else is rejected before the cmd is interpolated into a tmux/PowerShell wrapper.
 _SERVE_CMD_ALLOWLIST = {
-    "vllm", "llama-server", "llama_server", "llama.cpp", "ollama",
+    "vllm", "llama-server", "llama-server.exe", "llama_server", "llama.cpp", "ollama",
     "python", "python3",
     "sglang", "lmdeploy",
     "node", "npx",
@@ -576,6 +627,16 @@ _SERVE_CMD_ALLOWLIST = {
 # validate the serve binaries it guards rather than rejecting it wholesale.
 _GGUF_PRELUDE_RE = re.compile(
     r'^MODEL_FILE=\$\([^\n]*?\)\s*&&\s*\{[^{}]*\}\s*\|\|\s*\{[^{}]*\}\s*&&\s*'
+)
+_SAFE_SUBSHELL_TEXT = r"[^'\n;&|`$()<>]+"
+_SAFE_SUBSHELL_DQ_HOME_PATH = r'"\$HOME/[^"\n;&|`()<>]*"'
+_SAFE_PRINTF_SUBSHELL_RE = re.compile(
+    rf"^\$\(printf[ \t]+%s[ \t]+(?:'{_SAFE_SUBSHELL_TEXT}'|\$\{{HOME\}}'/{_SAFE_SUBSHELL_TEXT}')\)$"
+)
+_SAFE_FIND_MMPROJ_SUBSHELL_RE = re.compile(
+    rf"^\$\(find[ \t]+(?:'{_SAFE_SUBSHELL_TEXT}'|{_SAFE_SUBSHELL_DQ_HOME_PATH}|{_SAFE_SUBSHELL_TEXT})"
+    r"[ \t]+-iname[ \t]+'mmproj\*\.gguf'"
+    r"(?:[ \t]+2>/dev/null)?[ \t]*\|[ \t]*sort[ \t]*\|[ \t]*head[ \t]+-1\)$"
 )
 _OLLAMA_HOST_ASSIGNMENT_RE = re.compile(r"(?:^|\s)OLLAMA_HOST=([^\s]+)")
 _OLLAMA_BIND_RE = re.compile(r"^\[([^\]]+)\]:(\d+)$|^([^:]+):(\d+)$")
@@ -667,14 +728,26 @@ def _check_serve_binary(seg: str) -> None:
     if not tokens:
         return
     env_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-    first = next((t for t in tokens if not env_re.match(t)), "")
+    idx = next((i for i, t in enumerate(tokens) if not env_re.match(t)), len(tokens))
+    first = tokens[idx] if idx < len(tokens) else ""
     base = os.path.basename(first)
+    # The vLLM/SGLang Dependencies recipes install with `uv pip install …
+    # --torch-backend auto`. Allow uv for that subcommand only, not `uv run`.
+    if base == "uv" and tokens[idx + 1:idx + 3] == ["pip", "install"]:
+        return
     if base not in _SERVE_CMD_ALLOWLIST:
         raise HTTPException(
             400,
             f"cmd binary '{base or '(empty)'}' is not allowed. Must start with one of: "
             f"{', '.join(sorted(_SERVE_CMD_ALLOWLIST))}",
         )
+
+
+def _is_safe_serve_subshell(subshell: str) -> bool:
+    return bool(
+        _SAFE_PRINTF_SUBSHELL_RE.fullmatch(subshell)
+        or _SAFE_FIND_MMPROJ_SUBSHELL_RE.fullmatch(subshell)
+    )
 
 
 def _validate_serve_cmd(v: str | None) -> str | None:
@@ -708,15 +781,15 @@ def _validate_serve_cmd(v: str | None) -> str | None:
             _check_serve_binary(part.strip())
         return v
 
-    # Otherwise: a single invocation — no shell metacharacters allowed.
-    # Temporarily replace safe $(printf %s ...) expressions with a placeholder
-    # to avoid triggering the metacharacter/command-injection checks.
-    cleaned_v = v
-    printf_matches = list(re.finditer(r"\$\(\s*printf\s+%s\s+([^\n()]*?)\)", v))
-    for match in printf_matches:
-        inner = match.group(1)
-        if not any(c in inner for c in (";", "&&", "||", "$(", "`")):
-            cleaned_v = cleaned_v.replace(match.group(0), "/placeholder/safe/path.gguf")
+    # Otherwise: a single invocation — no shell metacharacters allowed. Replace
+    # only the exact command substitutions emitted by the Cookbook UI:
+    # $(printf %s 'safe-path') and the mmproj lookup
+    # $(find <path> -iname 'mmproj*.gguf' 2>/dev/null | sort | head -1).
+    def _replace_safe_subshell(match: re.Match[str]) -> str:
+        subshell = match.group(0)
+        return "/placeholder/safe/path" if _is_safe_serve_subshell(subshell) else subshell
+
+    cleaned_v = re.sub(r"\$\([^()]*\)", _replace_safe_subshell, v)
 
     # (`$(` was the original intent; bare `$` is fine for shell-safe paths.)
     if any(c in cleaned_v for c in (";", "&&", "||", "$(")):
@@ -966,6 +1039,166 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     runner_lines.append('  fi  # end _odysseus_have_prebuilt guard')
 
 
+ODYSSEUS_LLAMA_SHIM_MARKER = "# Auto-generated by Odysseus Cookbook: a `llama-server` lookalike"
+
+
+def _append_llama_server_resolution_definition_lines(runner_lines: list[str]) -> None:
+    """Define the helper shell function that discovers, reconciles and prioritizes llama-server."""
+    marker = f"'{_bash_squote(ODYSSEUS_LLAMA_SHIM_MARKER)}'"
+    runner_lines.append('_odysseus_resolve_llama_server() {')
+    runner_lines.append('  _odysseus_llama_bin=""')
+    runner_lines.append(f'  local _marker={marker}')
+    runner_lines.append('  local _saved_ifs="$IFS"')
+    runner_lines.append("  IFS=':'")
+    runner_lines.append('  local -a _parts')
+    runner_lines.append('  read -r -a _parts <<< "$PATH"')
+    runner_lines.append('  IFS="$_saved_ifs"')
+    runner_lines.append('  local _dir _cand')
+    runner_lines.append('  for _dir in "${_parts[@]}"; do')
+    runner_lines.append('    [ -n "$_dir" ] || continue')
+    runner_lines.append('    _cand="$_dir/llama-server"')
+    runner_lines.append('    [ -x "$_cand" ] || continue')
+    runner_lines.append('    if [ -f "$_cand" ] && [ ! -L "$_cand" ] && grep -Fxq "$_marker" "$_cand" 2>/dev/null; then')
+    runner_lines.append('      continue')
+    runner_lines.append('    fi')
+    runner_lines.append('    if "$_cand" --version >/dev/null 2>&1; then')
+    runner_lines.append('      _odysseus_llama_bin="$_cand"')
+    runner_lines.append('      break')
+    runner_lines.append('    fi')
+    runner_lines.append('  done')
+    runner_lines.append('  if [ -f "$HOME/bin/llama-server" ] && [ ! -L "$HOME/bin/llama-server" ] && grep -Fxq "$_marker" "$HOME/bin/llama-server" 2>/dev/null; then')
+    runner_lines.append('    if [ -n "$_odysseus_llama_bin" ]; then')
+    runner_lines.append('      echo "[odysseus] Native llama-server detected — retiring Odysseus compatibility shim in ~/bin"')
+    runner_lines.append('      rm -f "$HOME/bin/llama-server"')
+    runner_lines.append('      hash -r')
+    runner_lines.append('    elif python3 -c "import llama_cpp.server" 2>/dev/null; then')
+    runner_lines.append('      _odysseus_llama_bin="$HOME/bin/llama-server"')
+    runner_lines.append('    else')
+    runner_lines.append('      echo "[odysseus] Removing stale Odysseus llama-server shim (python3 -m llama_cpp.server unavailable)"')
+    runner_lines.append('      rm -f "$HOME/bin/llama-server"')
+    runner_lines.append('      hash -r')
+    runner_lines.append('    fi')
+    runner_lines.append('  fi')
+    runner_lines.append('  if [ -n "$_odysseus_llama_bin" ]; then')
+    runner_lines.append('    local _cand_dir')
+    runner_lines.append('    _cand_dir="$(dirname "$_odysseus_llama_bin")"')
+    runner_lines.append('    if [ "${PATH%%:*}" != "$_cand_dir" ]; then')
+    runner_lines.append('      export PATH="$_cand_dir:$PATH"')
+    runner_lines.append('    fi')
+    runner_lines.append('    hash -r')
+    runner_lines.append('    return 0')
+    runner_lines.append('  fi')
+    runner_lines.append('  return 1')
+    runner_lines.append('}')
+
+
+def _append_llama_server_shim_definition_lines(runner_lines: list[str]) -> None:
+    """Define the helper shell function that generates the Odysseus compatibility shim."""
+    _append_llama_server_resolution_definition_lines(runner_lines)
+    marker = f"'{_bash_squote(ODYSSEUS_LLAMA_SHIM_MARKER)}'"
+    runner_lines.append('_odysseus_create_llama_shim() {')
+    runner_lines.append('  local _target="$HOME/bin/llama-server"')
+    runner_lines.append(f'  local _marker={marker}')
+    runner_lines.append('  if [ -e "$_target" ] || [ -L "$_target" ]; then')
+    runner_lines.append('    if [ -f "$_target" ] && [ ! -L "$_target" ] && grep -Fxq "$_marker" "$_target" 2>/dev/null; then')
+    runner_lines.append('      : # existing Odysseus shim — safe to replace')
+    runner_lines.append('    else')
+    runner_lines.append('      echo "[odysseus] WARNING: $_target already exists and is not an Odysseus-managed shim; leaving untouched." >&2')
+    runner_lines.append('      return 1')
+    runner_lines.append('    fi')
+    runner_lines.append('  fi')
+    runner_lines.append('  mkdir -p "$HOME/bin" || return 1')
+    runner_lines.append('  local _tmp')
+    runner_lines.append('  _tmp="$(mktemp "$HOME/bin/.llama-server.odysseus.tmp.XXXXXX")" || {')
+    runner_lines.append('    echo "[odysseus] ERROR: unable to create secure temporary llama-server shim in $HOME/bin" >&2')
+    runner_lines.append('    return 1')
+    runner_lines.append('  }')
+    runner_lines.append("  if ! cat > \"$_tmp\" <<'_ODY_LLAMA_SHIM_EOF'")
+    runner_lines.append('#!/usr/bin/env bash')
+    runner_lines.append(ODYSSEUS_LLAMA_SHIM_MARKER)
+    runner_lines.append('# that translates the native CLI to `python -m llama_cpp.server`.')
+    runner_lines.append('# Lets cookbook-generated launch commands run unchanged on hosts')
+    runner_lines.append('# where only the pip llama-cpp-python package is installed.')
+    runner_lines.append('ARGS=()')
+    runner_lines.append('while [ $# -gt 0 ]; do')
+    runner_lines.append('  case "$1" in')
+    runner_lines.append('    -ngl|--gpu-layers|--n-gpu-layers) ARGS+=(--n_gpu_layers "$2"); shift 2 ;;')
+    runner_lines.append('    -c|--ctx-size) ARGS+=(--n_ctx "$2"); shift 2 ;;')
+    runner_lines.append('    -b|--batch-size) ARGS+=(--n_batch "$2"); shift 2 ;;')
+    runner_lines.append('    -ub|--ubatch-size) shift 2 ;;  # llama-cpp-python has no separate ubatch')
+    runner_lines.append('    --flash-attn) ARGS+=(--flash_attn true); shift 2 ;;')
+    runner_lines.append('    --cache-type-k) ARGS+=(--type_k "$2"); shift 2 ;;')
+    runner_lines.append('    --cache-type-v) ARGS+=(--type_v "$2"); shift 2 ;;')
+    runner_lines.append('    --n-cpu-moe) ARGS+=(--n_cpu_moe "$2"); shift 2 ;;')
+    runner_lines.append('    --mmproj) ARGS+=(--clip_model_path "$2"); shift 2 ;;')
+    runner_lines.append('    --image-max-tokens) shift 2 ;;  # native-only')
+    runner_lines.append('    --no-mmap) ARGS+=(--no_mmap true); shift ;;')
+    runner_lines.append('    --no-warmup) shift ;;  # native-only')
+    runner_lines.append('    --chat-template) ARGS+=(--chat_format "$2"); shift 2 ;;')
+    runner_lines.append('    --fit|--split-mode|--tensor-split|--main-gpu|--parallel) shift 2 ;;  # native-only')
+    runner_lines.append('    --mlock) ARGS+=(--use_mlock true); shift ;;')
+    runner_lines.append('    *) ARGS+=("$1"); shift ;;')
+    runner_lines.append('  esac')
+    runner_lines.append('done')
+    runner_lines.append('exec python3 -m llama_cpp.server "${ARGS[@]}"')
+    runner_lines.append('_ODY_LLAMA_SHIM_EOF')
+    runner_lines.append('  then')
+    runner_lines.append('    rm -f -- "$_tmp"')
+    runner_lines.append('    return 1')
+    runner_lines.append('  fi')
+    runner_lines.append('  chmod +x "$_tmp" || { rm -f -- "$_tmp"; return 1; }')
+    runner_lines.append('  mv -f -- "$_tmp" "$_target" || { rm -f -- "$_tmp"; return 1; }')
+    runner_lines.append('  hash -r')
+    runner_lines.append('  echo "[odysseus] Created llama-server shim → python -m llama_cpp.server (no native binary needed)"')
+    runner_lines.append('}')
+
+
+def _append_llama_server_shim_reconciliation_lines(runner_lines: list[str]) -> None:
+    """Reconcile an existing ~/bin/llama-server if it is owned by Odysseus Cookbook.
+
+    Invariants:
+    - Never touch an arbitrary user-owned executable or symlink.
+    - If ~/bin/llama-server is an Odysseus generated shim:
+        - If a native llama-server is present and healthy elsewhere on PATH, remove the shim
+          so the native binary is used.
+        - If python3 -m llama_cpp.server is unavailable, remove the stale shim
+          and hash -r so the fallback/build path is triggered.
+        - If no healthy native server exists and llama_cpp.server is working, preserve it.
+    - If a healthy native candidate exists on PATH (even later in PATH), prioritize it and
+      ensure the launched executable is the validated candidate.
+    """
+    runner_lines.append('[ -r ~/.config/odysseus-llama-cpp-env ] && . ~/.config/odysseus-llama-cpp-env')
+    runner_lines.append('if ! declare -F _odysseus_resolve_llama_server >/dev/null 2>&1; then')
+    _append_llama_server_resolution_definition_lines(runner_lines)
+    runner_lines.append('fi')
+    runner_lines.append('_odysseus_resolve_llama_server || true')
+
+
+def _append_llama_server_finalization_lines(runner_lines: list[str], platform_hint: str = "") -> None:
+    """Reconcile post-install launcher availability and enforce fail-closed invariant.
+
+    Guarantees that if python3 -m llama_cpp.server is usable but the `llama-server`
+    command is unresolvable, the compatibility launcher is created. If no usable
+    launcher exists after all build/install attempts, sets ODYSSEUS_PREFLIGHT_EXIT=127.
+    """
+    err_msg = (
+        f"ERROR: llama.cpp serving is not available on {platform_hint} after install attempts."
+        if platform_hint
+        else "ERROR: llama.cpp serving is not available after install/build attempts."
+    )
+    runner_lines.append('if ! declare -F _odysseus_resolve_llama_server >/dev/null 2>&1; then')
+    _append_llama_server_resolution_definition_lines(runner_lines)
+    runner_lines.append('fi')
+    runner_lines.append('if [ -z "$_odysseus_llama_bin" ] && python3 -c "import llama_cpp.server" 2>/dev/null; then')
+    runner_lines.append('  _odysseus_create_llama_shim')
+    runner_lines.append('  _odysseus_resolve_llama_server || true')
+    runner_lines.append('fi')
+    runner_lines.append('if [ -z "$_odysseus_llama_bin" ]; then')
+    runner_lines.append(f'  echo "{err_msg}"')
+    runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+    runner_lines.append('fi')
+
+
 def _llama_cpp_rebuild_cmd(update_source: bool = False) -> str:
     """Shell command that clears the Cookbook-managed llama.cpp build.
 
@@ -1021,6 +1254,10 @@ class ServeRequest(BaseModel):
     hf_token: str | None = None
     gpus: str | None = None
     platform: str | None = None    # "linux", "termux", or "windows"
+    # Optional explicit image runtime adapter. "auto" preserves compatibility
+    # with older callers; catalog-backed launches can set this without relying
+    # on model-name heuristics in the generated runner.
+    runtime_adapter: str | None = None
 
 
 def _parse_serve_phase(snapshot: str, task_type: str = "serve") -> dict:
@@ -1140,6 +1377,41 @@ def _safe_env_prefix(ep: str | None) -> str | None:
     return f'[ -f "{path}" ] && source "{path}" || true'
 
 
+def _local_windows_bash_env_prefix(ep: str | None) -> str | None:
+    """Convert a frontend PowerShell venv prefix for the local Git Bash runner."""
+    if not ep:
+        return ep
+
+    prefix = ep.strip()
+    if not prefix.startswith("&"):
+        return ep
+
+    raw_path = prefix[1:].lstrip()
+    if not raw_path:
+        return ep
+    if raw_path.startswith("'"):
+        if len(raw_path) < 2 or not raw_path.endswith("'"):
+            return ep
+        quoted_path = raw_path[1:-1]
+        if "'" in quoted_path.replace("''", ""):
+            return ep
+        path = quoted_path.replace("''", "'")
+    else:
+        path = raw_path.rstrip()
+        if "'" in path or '"' in path:
+            return ep
+    if any(c in path for c in "\r\n;&|`$<>"):
+        return ep
+    if not path.replace("\\", "/").casefold().endswith("/scripts/activate.ps1"):
+        return ep
+
+    bash_path = _git_bash_path(path)
+    if "\\" in bash_path:
+        return ep
+    bash_path = bash_path[: -len("Activate.ps1")] + "activate"
+    return "source " + shlex.quote(bash_path)
+
+
 def _ssh_ps(host, script_path, port=None):
     """Build SSH command to run a PowerShell script on a Windows remote."""
     pf = f"-p {port} " if port and port != "22" else ""
@@ -1148,6 +1420,50 @@ def _ssh_ps(host, script_path, port=None):
 
 # Windows session dir — stored in user's temp on the remote
 WIN_SESSION_DIR = "$env:TEMP\\\\odysseus-sessions"
+
+
+def _diagnose_download_output(text: str) -> dict | None:
+    """Turn common failed model downloads into actionable UI feedback."""
+    if not text:
+        return None
+    tail = text[-6000:]
+    cases = (
+        (
+            r"No space left on device|\[Errno 28\]|disk full",
+            "The model download ran out of space.",
+            [{"label": "Choose a disk with more free space in settings", "op": "settings"}],
+        ),
+        (
+            r"403 Forbidden|access to model .*restricted|gated repo|GatedRepoError",
+            "This model repository is gated or access was denied.",
+            [
+                {"label": "Accept the model license on Hugging Face", "op": "manual"},
+                {"label": "Set an HF token with access to the model", "op": "settings"},
+            ],
+        ),
+        (
+            r"Entry not found|does not appear to have a file named|404.*\.gguf",
+            "The requested model file or quant doesn't exist in this repository.",
+            [{"label": "Check the file name and quantization tag", "op": "manual"}],
+        ),
+        (
+            r"ConnectionResetError|ConnectionError|connection reset by peer|hf_transfer.*error|timed out",
+            "The download hit a network or hf_transfer error.",
+            [
+                {"label": "Retry the download", "op": "retry"},
+                {"label": "Disable hf_transfer and retry", "op": "settings"},
+            ],
+        ),
+    )
+    for pattern, message, suggestions in cases:
+        if re.search(pattern, tail, flags=re.IGNORECASE):
+            return {"message": message, "suggestions": suggestions}
+    if "Traceback (most recent call last)" in tail:
+        return {
+            "message": "The download failed with a Python traceback.",
+            "suggestions": [{"label": "Inspect the output and retry", "op": "manual"}],
+        }
+    return None
 
 
 def _diagnose_serve_output(text: str) -> dict | None:
@@ -1225,6 +1541,20 @@ def _diagnose_serve_output(text: str) -> dict | None:
             [{"label": "retry on port 8001", "op": "replace", "flag": "--port", "value": "8001"}],
         ),
         (
+            # PyPI torch/vLLM wheels now target CUDA 13, which needs driver 580+.
+            # torch: "The NVIDIA driver on your system is too old (found version 12080)";
+            # vLLM kernels: "CUDA driver version is insufficient for CUDA runtime version".
+            r"NVIDIA driver on your system is too old|CUDA driver version is insufficient",
+            "The installed PyTorch/vLLM build needs a newer NVIDIA driver than this server has.",
+            [
+                {
+                    "label": "install builds for the driver's CUDA version, e.g. vLLM's +cu129 wheel from its GitHub release with uv pip install … --torch-backend cu129",
+                    "op": "manual",
+                },
+                {"label": "or update the NVIDIA driver (CUDA 13 builds need driver 580 or newer)", "op": "manual"},
+            ],
+        ),
+        (
             r"No CUDA GPUs are available|no GPU.*found|CUDA_VISIBLE_DEVICES.*invalid",
             "No GPUs are visible to the serve process.",
             [{"label": "clear Cookbook GPU selection or choose available GPUs", "op": "settings", "field": "gpus", "value": ""}],
@@ -1244,19 +1574,54 @@ def _diagnose_serve_output(text: str) -> dict | None:
             [{"label": "install vLLM in Cookbook Dependencies", "op": "dependency", "package": "vllm"}],
         ),
         (
-            r"sgl_kernel[\s\S]*(Python\.h|libnuma\.so\.1|common_ops)|"
-            r"(Python\.h|libnuma\.so\.1|common_ops)[\s\S]*sgl_kernel|"
+            r"sgl_kernel[\s\S]*(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)|"
+            r"(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)[\s\S]*sgl_kernel|"
+            r"Could not load any common_ops library|"
             r"Please ensure sgl_kernel is properly installed",
-            "SGLang native dependencies are missing on this server.",
+            "SGLang native kernel/runtime is missing or mismatched on this server.",
             [
+                {"label": "repair sglang-kernel in this Python environment", "op": "dependency", "package": "sglang-kernel"},
                 {"label": "install OS packages: libnuma-dev python3.12-dev build-essential", "op": "manual"},
-                {"label": "upgrade sglang-kernel after OS packages are installed", "op": "manual"},
+                {"label": "if libnvrtc is still missing, install the matching CUDA/NVRTC runtime on this host", "op": "manual"},
             ],
         ),
         (
             r"sglang.*command not found|No module named sglang|SGLang is not installed",
             "SGLang is not installed or not in PATH on this server.",
             [{"label": "install SGLang in Cookbook Dependencies", "op": "dependency", "package": "sglang[all]"}],
+        ),
+        (
+            r"No module named ['\"]?mlx_lm|mlx_lm.*command not found|MLX is not installed|MLX LM is not installed",
+            "MLX LM is not installed on this server.",
+            [{"label": "install mlx-lm in Cookbook Dependencies", "op": "dependency", "package": "mlx-lm"}],
+        ),
+        (
+            r"OmniGen2Pipeline|module diffusers has no attribute .*Pipeline|custom_pipeline=.*failed",
+            "This image model uses a custom Diffusers pipeline that the launch environment does not know yet.",
+            [{"label": "update Diffusers image dependencies", "op": "dependency", "package": "diffusers transformers accelerate"}],
+        ),
+        (
+            r"mflux-generate-qwen.*not found|mflux-generate.*not found|MLX image serving requires mflux|No module named ['\"]?mflux",
+            "MLX image serving requires mflux on this Apple Silicon server.",
+            [{"label": "install mflux in Cookbook Dependencies", "op": "dependency", "package": "mflux"}],
+        ),
+        (
+            r"mlx-lama-swift|odysseus-mlx-inpaint|mlx-lama-serve|LaMa / MI-GAN MLX inpainting models require",
+            "LaMa / MI-GAN MLX inpainting requires an Odysseus-compatible mlx-lama-swift bridge on this Apple Silicon server.",
+            [{"label": "build mlx-lama-swift bridge and put odysseus-mlx-inpaint or mlx-lama-serve on PATH", "op": "dependency", "package": "mlx_lama_swift"}],
+        ),
+        (
+            r"mlx-ddcolor-swift|odysseus-mlx-colorize|mlx-ddcolor-serve|DDColor MLX models require",
+            "DDColor MLX colorization requires an Odysseus-compatible mlx-ddcolor-swift bridge on this Apple Silicon server.",
+            [{"label": "build mlx-ddcolor-swift bridge and put odysseus-mlx-colorize or mlx-ddcolor-serve on PATH", "op": "dependency", "package": "mlx_ddcolor_swift"}],
+        ),
+        (
+            r"Unable to quantize model of type <class ['\"]mlx_lm\.models\.switch_layers\.QuantizedSwitchLinear['\"]>|QuantizedSwitchLinear",
+            "MLX-LM tried to quantize an already-quantized DeepSeek switch layer.",
+            [
+                {"label": "relaunch from the cached local Hugging Face snapshot path on this Mac", "op": "manual"},
+                {"label": "Odysseus now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
+            ],
         ),
         # System build deps come BEFORE the generic llama.cpp catch-all so
         # cmake / build-essential / git missing → a specific OS-package
@@ -1288,9 +1653,9 @@ def _diagnose_serve_output(text: str) -> dict | None:
             [{"label": "download a GGUF build of this model (repo name usually ends in -GGUF, file like Q4_K_M.gguf)", "op": "manual"}],
         ),
         (
-            r"No module named 'torch'|No module named torch|No module named 'diffusers'|No module named diffusers",
-            "Diffusion serving requires PyTorch and diffusers.",
-            [{"label": "install diffusers[torch] in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch]"}],
+            r"No module named 'torch'|No module named torch|No module named 'torchvision'|No module named torchvision|No module named 'diffusers'|No module named diffusers|No module named 'scipy'|No module named scipy|install scipy if you want to use beta sigmas|requires the Torchvision library",
+            "Diffusion serving requires PyTorch, Torchvision, Diffusers, Accelerate, and SciPy.",
+            [{"label": "install Diffusers image deps in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch] torchvision accelerate scipy python-multipart"}],
         ),
         (
             r"403 Forbidden|401 Unauthorized|Access to model.*is restricted|gated repo|not in the authorized list|awaiting a review",

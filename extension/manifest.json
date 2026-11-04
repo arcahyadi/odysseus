@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Odysseus Clipper",
+  "version": "0.1.0",
+  "description": "Send selected text or whole pages to your Odysseus server (notes, documents, memory, or chat).",
+  "permissions": ["contextMenus", "storage", "activeTab", "scripting"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Send to Odysseus"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

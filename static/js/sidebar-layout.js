@@ -34,13 +34,56 @@ export function initSidebarLayout(Storage, opts) {
   // ── Icon rail + sidebar toggle ──
   const iconRail = document.getElementById('icon-rail');
   const hamburgerBtn = document.getElementById('hamburger-btn');
+  const SIDEBAR_MODE_KEY = 'odysseus-sidebar-mode';
+
+  function _setSidebarModeClasses(mode) {
+    document.documentElement.classList.remove('ody-mobile-startup-sidebar-hidden');
+    document.documentElement.classList.toggle('ody-sidebar-mini', mode === 'mini');
+    document.documentElement.classList.toggle('ody-sidebar-off', mode === 'off');
+  }
+
+  function _saveSidebarMode(mode) {
+    try { localStorage.setItem(SIDEBAR_MODE_KEY, mode); } catch (_) {}
+    _setSidebarModeClasses(mode);
+  }
+
+  function _applyStoredSidebarMode() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    if (window.innerWidth < 768 && document.getElementById('app-loader')) {
+      sidebar.classList.add('hidden');
+      if (iconRail) {
+        iconRail.classList.add('rail-hidden');
+        iconRail.classList.remove('mobile-mini');
+        iconRail.style.cssText = '';
+      }
+      _setSidebarModeClasses('off');
+      return;
+    }
+    let mode = 'full';
+    try { mode = localStorage.getItem(SIDEBAR_MODE_KEY) || 'full'; } catch (_) {}
+    if (mode === 'mini') {
+      sidebar.classList.add('hidden');
+      if (iconRail) iconRail.classList.remove('rail-hidden');
+    } else if (mode === 'off') {
+      sidebar.classList.add('hidden');
+      if (iconRail) iconRail.classList.add('rail-hidden');
+    } else {
+      sidebar.classList.remove('hidden');
+      if (iconRail) iconRail.classList.remove('rail-hidden');
+    }
+    _setSidebarModeClasses(mode);
+  }
+
+  // Phones in landscape get the desktop layout, but the icon rail is too small to use there
+  const _phoneLandscape = window.matchMedia('(pointer: coarse) and (max-height: 500px)');
 
   function _syncRailSideCore() {
     const sidebar = document.getElementById('sidebar');
     if (!iconRail) return;
     const isRight = sidebar.classList.contains('right-side');
     const sidebarHidden = sidebar.classList.contains('hidden');
-    const railHidden = iconRail.classList.contains('rail-hidden');
+    const railHidden = iconRail.classList.contains('rail-hidden') || _phoneLandscape.matches;
     const isMobileMini = iconRail.classList.contains('mobile-mini');
     iconRail.classList.toggle('right-side', isRight);
     // On mobile mini mode, JS already set inline styles — don't touch
@@ -62,6 +105,10 @@ export function initSidebarLayout(Storage, opts) {
       document.body.classList.toggle('hamburger-left', !isRight);
       document.body.classList.toggle('hamburger-only', sidebarHidden && railHidden);
       document.body.classList.toggle('sidebar-collapsed', sidebarHidden);
+      _setSidebarModeClasses(!sidebarHidden ? 'full' : (railHidden ? 'off' : 'mini'));
+      hamburgerBtn.setAttribute('aria-expanded', String(!sidebarHidden));
+      const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+      if (sidebarToggleBtn) sidebarToggleBtn.setAttribute('aria-expanded', String(!sidebarHidden));
     }
     // Keep incognito button clear of hamburger
     const incogBtn = document.getElementById('incognito-btn');
@@ -77,11 +124,13 @@ export function initSidebarLayout(Storage, opts) {
   // Set initial reference and expose globally
   _syncRailSideFn = _syncRailSideCore;
   window.syncRailSide = syncRailSide;
+  _phoneLandscape.addEventListener('change', () => syncRailSide());
 
   // Restore sidebar side preference
   if (Storage.get(Storage.KEYS.SIDEBAR_SIDE) === 'right') {
     document.getElementById('sidebar').classList.add('right-side');
   }
+  _applyStoredSidebarMode();
   syncRailSide();
 
   // In-sidebar toggle button — same behavior as hamburger
@@ -92,10 +141,11 @@ export function initSidebarLayout(Storage, opts) {
     });
   }
 
-  // New chat buttons — same as clicking brand
+  // Header-only new-chat aliases. #sidebar-new-chat-btn is wired in app.js
+  // because it needs the full default-model/pending-chat flow; wiring it here
+  // as well caused duplicate click handling and occasional no-op/race behavior.
   const chatNewBtn = document.getElementById('chat-new-btn');
-  const sidebarNewChat = document.getElementById('sidebar-new-chat-btn');
-  [chatNewBtn, sidebarNewChat].forEach(btn => {
+  [chatNewBtn].forEach(btn => {
     if (btn) btn.addEventListener('click', () => {
       const brandBtn = document.getElementById('sidebar-brand-btn');
       if (brandBtn) brandBtn.click();
@@ -105,6 +155,32 @@ export function initSidebarLayout(Storage, opts) {
   // Hamburger cycles: full sidebar → mini → off → full
   let _userToggledSidebar = false;
   let _wasAutoCollapsed = false;
+  let _wasMobileViewport = window.innerWidth < 768;
+
+  function _restoreDesktopSidebarSide() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    const wantRight = Storage.get(Storage.KEYS.SIDEBAR_SIDE) === 'right';
+    const changed = sidebar.classList.contains('right-side') !== wantRight;
+    sidebar.classList.toggle('right-side', wantRight);
+    if (iconRail) {
+      iconRail.classList.remove('mobile-mini');
+      iconRail.style.cssText = '';
+    }
+    if (changed && documentModule && documentModule.swapSide) {
+      try { documentModule.swapSide(); } catch (_) {}
+    }
+    syncRailSide();
+  }
+
+  // Move the closed drawer to the other edge without transitioning its
+  // transform across the screen, so it then slides in from the edge it opens on.
+  function _setSidebarSideInstantly(sidebar, right) {
+    sidebar.style.setProperty('transition', 'none', 'important');
+    sidebar.classList.toggle('right-side', right);
+    void sidebar.offsetWidth;
+    sidebar.style.removeProperty('transition');
+  }
 
   // Deliberate "open the sidebar" used by the mobile swipe gesture (wired at
   // module scope). It MUST set _userToggledSidebar so the auto-collapse
@@ -125,8 +201,12 @@ export function initSidebarLayout(Storage, opts) {
     if (side === 'left' || side === 'right') {
       const wantRight = side === 'right';
       if (sidebar.classList.contains('right-side') !== wantRight) {
-        sidebar.classList.toggle('right-side', wantRight);
-        try { Storage.set(Storage.KEYS.SIDEBAR_SIDE, side); } catch (_) {}
+        _setSidebarSideInstantly(sidebar, wantRight);
+        // Swipe-selected sides are temporary on compact/mobile layouts. Do
+        // not overwrite the user's desktop sidebar preference.
+        if (window.innerWidth >= 768) {
+          try { Storage.set(Storage.KEYS.SIDEBAR_SIDE, side); } catch (_) {}
+        }
         if (documentModule && documentModule.swapSide) { try { documentModule.swapSide(); } catch (_) {} }
       }
     }
@@ -153,12 +233,13 @@ export function initSidebarLayout(Storage, opts) {
         if (isSidebarVisible) {
           // Closing sidebar
           sidebar.classList.add('hidden');
+          _saveSidebarMode('off');
           if (backdrop) backdrop.classList.remove('visible');
         } else {
           // Mobile: the hamburger always opens the sidebar from the RIGHT.
           // (Not persisted — keeps the desktop side preference untouched.)
           if (!sidebar.classList.contains('right-side')) {
-            sidebar.classList.add('right-side');
+            _setSidebarSideInstantly(sidebar, true);
             if (documentModule && documentModule.swapSide) { try { documentModule.swapSide(); } catch (_) {} }
           }
           // Opening sidebar — blur keyboard first, then open after layout settles
@@ -168,11 +249,13 @@ export function initSidebarLayout(Storage, opts) {
             // Wait for keyboard dismiss to settle, then open
             setTimeout(() => {
               sidebar.classList.remove('hidden');
+              _saveSidebarMode('full');
               if (backdrop) backdrop.classList.add('visible');
               syncRailSide();
             }, 250);
           } else {
             sidebar.classList.remove('hidden');
+            _saveSidebarMode('full');
             if (backdrop) backdrop.classList.add('visible');
           }
         }
@@ -183,10 +266,13 @@ export function initSidebarLayout(Storage, opts) {
       // Desktop: full sidebar ↔ mini (icon rail) — simple toggle
       if (isSidebarVisible) {
         sidebar.classList.add('hidden');
+        if (iconRail) iconRail.classList.remove('rail-hidden');
+        _saveSidebarMode('mini');
       } else {
         _wasAutoCollapsed = false;
         iconRail.classList.remove('rail-hidden');
         sidebar.classList.remove('hidden');
+        _saveSidebarMode('full');
       }
       syncRailSide();
     });
@@ -216,6 +302,10 @@ export function initSidebarLayout(Storage, opts) {
 
   function checkSidebarAutoCollapse() {
     if (_userToggledSidebar) return;
+    // Mobile uses a fixed overlay drawer.  Keyboard and orientation changes
+    // emit resize events there, but should not run the desktop width-based
+    // auto-collapse logic against an intentionally opened drawer.
+    if (window.innerWidth < 768) return;
     const sidebar = document.getElementById('sidebar');
     if (!sidebar) return;
     const isHidden = sidebar.classList.contains('hidden');
@@ -234,25 +324,42 @@ export function initSidebarLayout(Storage, opts) {
       _wasAutoCollapsed = true;
       syncRailSide();
     } else if (window.innerWidth >= AUTO_COLLAPSE_WIDTH && isHidden && _wasAutoCollapsed) {
-      // Only restore if chat won't be too narrow
+      // Only restore if chat won't be too narrow. Suppress the width
+      // transition and sync the mode classes (ody-sidebar-mini also forces
+      // width 0) so the reflow measures the sidebar at its full width.
+      sidebar.style.transition = 'none';
       sidebar.classList.remove('hidden');
+      syncRailSide();
       void document.body.offsetWidth; // reflow
       if (chatContainer && chatContainer.offsetWidth < MIN_CHAT_WIDTH) {
         sidebar.classList.add('hidden');
       } else {
         _wasAutoCollapsed = false;
       }
+      void document.body.offsetWidth;
+      sidebar.style.transition = '';
       syncRailSide();
     }
   }
 
   window.addEventListener('resize', () => {
-    _userToggledSidebar = false; // allow auto-collapse on actual resize
+    const isMobileViewport = window.innerWidth < 768;
+    if (_wasMobileViewport && !isMobileViewport) _restoreDesktopSidebarSide();
+    _wasMobileViewport = isMobileViewport;
+    if (!isMobileViewport) _userToggledSidebar = false; // allow auto-collapse on desktop resize
     requestAnimationFrame(checkSidebarAutoCollapse);
   });
-  // Also re-check when doc panel toggles
-  new MutationObserver(() => requestAnimationFrame(checkSidebarAutoCollapse))
-    .observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  // Re-check when the document split is opened or closed. Do not react to
+  // every body class mutation: floating tools (notably Research) add their
+  // own view class, and re-evaluating a narrow document split there caused a
+  // hide → restore → hide loop in the sidebar.
+  let _lastDocView = document.body.classList.contains('doc-view');
+  new MutationObserver(() => {
+    const docView = document.body.classList.contains('doc-view');
+    if (docView === _lastDocView) return;
+    _lastDocView = docView;
+    requestAnimationFrame(checkSidebarAutoCollapse);
+  }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
   // Auto-collapse on initial load if window is small
   if (window.innerWidth < AUTO_COLLAPSE_WIDTH) {
@@ -483,7 +590,7 @@ function _initChatSwipeToOpenSidebar() {
 
   // Areas where a horizontal drag means something else (their own scroll/drag).
   const EXCLUDE = [
-    '#sidebar', '#icon-rail', '.modal', '.input-bar', '#message',
+    '#sidebar', '#icon-rail', '.modal', '.input-bar', '.chat-input-bar', '#message',
     '#minimized-dock', '.minimized-dock-chip', '#dock-trash-zone',
     'pre', 'table', '.agent-tool-output', '.agent-thread-cmd',
     'input', 'textarea', 'select',

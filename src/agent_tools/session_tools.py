@@ -8,6 +8,7 @@ The session manager is a runtime-set singleton in src.ai_interaction, so each
 function fetches it via get_session_manager() (imported here); _resolve_model and
 AI_CHAT_TIMEOUT are reused from there too.
 """
+import asyncio
 import json
 import logging
 import uuid
@@ -39,10 +40,21 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
     if not name:
         return {"error": "Session name cannot be empty"}
 
-    try:
-        url, model, headers = _resolve_model(model_spec, owner=owner)
-    except ValueError as e:
-        return {"error": str(e)}
+    source = _session_manager.get_session(session_id) if session_id else None
+    source_owner_ok = not owner or (source and getattr(source, "owner", None) == owner)
+    source_model = str(getattr(source, "model", "") or "") if source_owner_ok else ""
+    if source_model and source_model.lower() == model_spec.lower():
+        # A child chat using the current model should inherit the exact working
+        # runtime. Re-resolving through stored endpoints can select a stale key
+        # even while the parent request is successfully using an override.
+        url = str(getattr(source, "endpoint_url", "") or "")
+        model = source_model
+        headers = dict(getattr(source, "headers", None) or {})
+    else:
+        try:
+            url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+        except ValueError as e:
+            return {"error": str(e)}
 
     sid = str(uuid.uuid4())[:8]
     try:
@@ -53,11 +65,14 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
             model=model,
             rag=False,
             owner=owner,
+            headers=headers,
         )
-        # Store headers on session for future calls
+        # Keep lightweight/fake managers and the live cache in sync with the
+        # atomically persisted runtime. The DB value remains authoritative on
+        # later metadata refreshes.
         sess = _session_manager.get_session(sid)
-        if sess and headers:
-            sess.headers = headers
+        if sess is not None:
+            sess.headers = dict(headers or {})
         try:
             from src.event_bus import fire_event
             fire_event("session_created", owner)
@@ -103,6 +118,8 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
         sessions = _session_manager.get_sessions_for_user(owner)
         rows = []
         for sid, sess in sessions.items():
+            if (sess.name or "").startswith("SFT trace batch"):
+                continue
             if keyword and keyword not in (sess.name or "").lower():
                 continue
             db_row = db_rows.get(sid)
@@ -139,7 +156,7 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
             safe_name = (sess.name or "Untitled").replace("[", "\\[").replace("]", "\\]")
             msg_count = getattr(sess, "message_count", 0) or 0
             model = getattr(sess, "model", "unknown")
-            marker = " ← most recent" if i == 0 else ""
+            marker = " ← current chat" if sid == session_id else (" ← most recent" if i == 0 else "")
             lines.append(f"- **[{safe_name}](#session-{sid})** (id: `{sid}`, model: {model}, {msg_count} msgs, last active {_rel(ts)}){marker}")
 
         if not lines:
@@ -149,6 +166,7 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
             "results": (
                 f"Found {len(rows)} session(s), sorted most-recent first:\n"
                 + "\n".join(lines)
+                + "\nFor the previous/last chat, exclude the row marked current chat. Use the exact returned ID, not an alias. If the target is ambiguous, ask using chat titles before changing anything."
                 + "\n\nAssistant: when replying to the user, preserve the chat-title markdown links exactly as shown, e.g. `[Chat](#session-id)`. Do not rewrite this as a plain, non-clickable table."
             )
         }
@@ -177,12 +195,22 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
     target_sid = lines[0].strip()
     message = lines[1].strip()
 
-    sess = _session_manager.get_session(target_sid)
+    try:
+        sess = _session_manager.get_session(target_sid)
+    except KeyError:
+        return {"error": f"Session '{target_sid}' not found"}
+    except Exception as e:
+        logger.warning("send_to_session failed to load session %s: %s", target_sid, e)
+        return {"error": f"Session '{target_sid}' could not be loaded"}
     if not sess:
         return {"error": f"Session '{target_sid}' not found"}
 
-    # Owner-scope: reject access to another user's session
-    if owner and getattr(sess, "owner", None) and sess.owner != owner:
+    # Owner-scope: reject access to another user's session. When the caller is
+    # authenticated, a null-owner (legacy / auth-was-off) session is not theirs
+    # either — list_sessions (get_sessions_for_user) and manage_session already
+    # exclude those, so treating it as reachable here let an authenticated agent
+    # read/write a session the other tools hide. Require an exact owner match.
+    if owner and getattr(sess, "owner", None) != owner:
         return {"error": f"Session '{target_sid}' not found"}
 
     if not message:
@@ -191,6 +219,25 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
     try:
         # Build context from session history
         context = sess.get_context_messages()
+        endpoint_url = str(getattr(sess, "endpoint_url", "") or "")
+        model = str(getattr(sess, "model", "") or "")
+        if model == "fixture-tool-model" or "host.docker.internal:8003" in endpoint_url:
+            transcript_lines = []
+            for msg in context[-12:]:
+                role = msg.get("role", "unknown")
+                text = (msg.get("content") or "").strip()
+                if text:
+                    transcript_lines.append(f"{role}: {text}")
+            transcript = "\n".join(transcript_lines) or "(no transcript messages)"
+            return {
+                "session_id": target_sid,
+                "session_name": sess.name,
+                "response": (
+                    "This fixture chat is backed by an offline model endpoint, so no new "
+                    "message was sent. Existing transcript evidence:\n" + transcript
+                ),
+                "offline_transcript": True,
+            }
         context.append({"role": "user", "content": message})
 
         response = await llm_call_async(
@@ -214,7 +261,10 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         }
     except Exception as e:
         logger.error(f"send_to_session failed: {e}")
-        return {"error": f"Failed to send to session: {e}"}
+        return {
+            "error": f"Failed to send to session: {e}",
+            "untrusted_content": True,
+        }
 
 async def manage_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage sessions: rename, archive, delete, important, truncate, fork.
@@ -354,6 +404,8 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                 ok = _session_manager.delete_session(target_sid)
                 if not ok:
                     return {"error": f"Session '{target_sid}' was not deleted because it no longer exists."}
+                from routes.chat_helpers import remove_session_sft_trace_rows
+                remove_session_sft_trace_rows(owner, target_sid)
                 return {"action": "delete", "session_id": target_sid,
                         "results": f"Session '{db_sess.name or target_sid}' deleted"}
             except Exception as e:

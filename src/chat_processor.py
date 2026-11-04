@@ -12,6 +12,45 @@ from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_mess
 
 logger = logging.getLogger(__name__)
 
+
+def _clean_search_query(query: str, max_len: int = 200) -> str:
+    """Strip fenced code blocks from a search query while preserving inline
+    code text.
+
+    This is a focused, defensive cleanup for the *final* web-search query
+    selected in ``build_context_preface`` (issue #4547): regardless of whether
+    the query came from the LLM-generated path (#4557) or the first-line
+    fallback, residual fenced / inline markdown should not leak into the search
+    call. Rather than using regex (which is brittle and strips inline code
+    text like ``git reset`` from the query), we render the query to HTML via
+    ``markdown`` and parse it with ``BeautifulSoup`` so that:
+
+    * ``<pre>`` blocks (fenced / indented code) are removed entirely.
+    * ``<code>`` elements (inline code) are preserved as plain text.
+
+    Both libraries are already project dependencies. The result is whitespace
+    collapsed and truncated to ``max_len``; an all-code input collapses to an
+    empty string, which the caller treats as "no query".
+    """
+    import markdown as _md
+    from bs4 import BeautifulSoup as _BS
+
+    html = _md.markdown(query, extensions=["fenced_code"])
+    soup = _BS(html, "html.parser")
+
+    # Remove fenced / indented code blocks.
+    for pre in soup.find_all("pre"):
+        pre.decompose()
+
+    # Preserve inline code by unwrapping <code> to text.
+    for code in soup.find_all("code"):
+        code.replace_with(code.get_text())
+
+    text = soup.get_text(" ", strip=True)
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_len]
+
+
 # ── Stopwords & tokenizer ──
 
 _STOPWORDS = frozenset(
@@ -50,6 +89,77 @@ class ChatProcessor:
 
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
+    MEMORY_CONTEXT_LIMIT = 5
+    PINNED_MEMORY_LIMIT = MEMORY_CONTEXT_LIMIT
+    CORE_MEMORY_AUTO_INJECT_LIMIT = 5
+
+    def _is_core_memory(self, memory: Dict[str, Any]) -> bool:
+        """Return whether a pinned memory is safe to keep globally available."""
+        category = (memory.get("category") or "").lower()
+        if category in {"identity", "contact"}:
+            return True
+        text = (memory.get("text") or "").lower()
+        return any(marker in text for marker in (
+            "my name is",
+            "name is",
+            "call me",
+            "i am ",
+            "i'm ",
+            "email",
+            "phone",
+            "address",
+        ))
+
+    def _select_pinned_memories(self, message: str, pinned: list) -> list:
+        """Keep pinned memories high-priority without injecting all of them.
+
+        Pinned used to mean "always send every pinned memory to the model".
+        That bloats every request and leaks unrelated personal context into
+        tasks that do not need it. Now only a small set of core identity/contact
+        memories is always available; other pinned memories must match the
+        current request, but are retrieved before ordinary memories.
+        """
+        if not pinned:
+            return []
+
+        core = [
+            m for m in pinned
+            if self._is_core_memory(m)
+        ][:self.CORE_MEMORY_AUTO_INJECT_LIMIT]
+
+        core_ids = {m.get("id") for m in core if m.get("id")}
+        contextual_candidates = [
+            m for m in pinned
+            if not (m.get("id") and m.get("id") in core_ids)
+        ]
+        remaining_slots = max(self.PINNED_MEMORY_LIMIT - len(core), 0)
+        contextual = self._hybrid_retrieve(
+            message,
+            contextual_candidates,
+            k=remaining_slots,
+        ) if remaining_slots else []
+
+        selected = []
+        seen = set()
+        for memory in [*core, *contextual]:
+            key = memory.get("id") or memory.get("text")
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(memory)
+        return selected[:self.PINNED_MEMORY_LIMIT]
+
+    @staticmethod
+    def _is_memory_management_request(message: str) -> bool:
+        """Do not preload memory for an explicit memory-management command."""
+        text = re.sub(r"\s+", " ", str(message or "").strip().lower())
+        if not text or not re.search(r"\bmemories?\b|\bremember\b", text):
+            return False
+        return bool(re.search(
+            r"\b(list|show|find|search|look up|lookup|what do you remember|"
+            r"delete|remove|edit|update|add|save|store|forget|clear)\b",
+            text,
+        ))
 
     def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5) -> list:
         """Retrieve memories relevant to the message.
@@ -167,6 +277,7 @@ class ChatProcessor:
         preset_system_prompt: Optional[str] = None,
         owner: Optional[str] = None,
         character_name: Optional[str] = None,
+        persona_memory: Optional[str] = None,
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
@@ -191,6 +302,7 @@ class ChatProcessor:
         """
         preface = []
         rag_sources = []
+        self._last_rag_citations = []  # populated when RAG hits clear the threshold
 
         # Add preset system prompt if specified
         if preset_system_prompt:
@@ -203,28 +315,44 @@ class ChatProcessor:
             "content": UNTRUSTED_CONTEXT_POLICY,
         })
 
-        # Memory: pinned (always included) + extended (RAG-retrieved when relevant)
+        if character_name and persona_memory:
+            preface.append(untrusted_context_message(
+                "persona memory: continuity notes",
+                (
+                    f"Continuity notes for the active persona, {character_name}. "
+                    "Use these only to maintain established context for this persona; "
+                    "do not mention them unless relevant.\n"
+                    f"{persona_memory}"
+                ),
+            ))
+
+        # Memory: core pinned facts + relevant pinned/extended recall.
         self._last_used_memories = []  # track what was injected
-        if use_memory:
+        if use_memory and not self._is_memory_management_request(message):
             mem_entries = self.memory_manager.load(owner=owner)
 
             pinned = [m for m in mem_entries if m.get("pinned")]
             extended = [m for m in mem_entries if not m.get("pinned")]
 
             _used_ids: list = []
-            if pinned:
-                pinned_text = "\n- ".join([m["text"] for m in pinned])
+            selected_pinned = self._select_pinned_memories(message, pinned)
+            if selected_pinned:
+                pinned_text = "\n- ".join([m["text"] for m in selected_pinned])
                 preface.append(untrusted_context_message(
-                    "saved memory: pinned user facts",
-                    f"Core facts about the user:\n- {pinned_text}",
+                    "saved memory: pinned context",
+                    (
+                        "Pinned memory context. Some pinned memories are only "
+                        f"included when relevant:\n- {pinned_text}"
+                    ),
                 ))
-                for m in pinned:
+                for m in selected_pinned:
                     self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "pinned"})
                     if m.get("id"):
                         _used_ids.append(m["id"])
 
-            if extended:
-                relevant = self._hybrid_retrieve(message, extended, k=3)
+            remaining_memory_slots = max(self.MEMORY_CONTEXT_LIMIT - len(self._last_used_memories), 0)
+            if extended and remaining_memory_slots:
+                relevant = self._hybrid_retrieve(message, extended, k=remaining_memory_slots)
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
                     preface.append(untrusted_context_message(
@@ -249,6 +377,44 @@ class ChatProcessor:
             # (skills index injection moved out — see below; only fires in
             # agent mode so chat mode and incognito stay clean.)
 
+        # Knowledge-graph context (Phase 2, Req 4.x): entity/relationship
+        # neighbourhood around the current message, when the store has data.
+        if owner:
+            try:
+                from services.memory.graph import graph_store
+                _graph_ctx = graph_store.get_2hop_context(owner, message)
+                if _graph_ctx:
+                    preface.append(untrusted_context_message(
+                        "knowledge graph context", _graph_ctx,
+                    ))
+            except Exception as _ge:
+                logger.debug("Graph context injection skipped: %s", _ge)
+
+        # Recent digest summaries (Phase 2, Req 7.x): compact context from the
+        # last day or two of auto-digests, when present.
+        if owner:
+            try:
+                from services.digest.digest_service import digest_service
+                from datetime import date as _date, timedelta as _td2
+                _digests = digest_service.list_digests(owner, limit=7) or []
+                _recent = [
+                    d for d in _digests
+                    if (d.get("date") or "") >= (_date.today() - _td2(days=2)).isoformat()
+                ]
+                _parts = []
+                for _d in _recent[:2]:
+                    _sum = (_d.get("summary") or "").strip()
+                    if not _sum:
+                        _sum = (_d.get("content") or {}).get("summary", "") if isinstance(_d.get("content"), dict) else ""
+                    if _sum:
+                        _parts.append(f"[{_d.get('date')}]\n{str(_sum)[:400]}")
+                if _parts:
+                    preface.append(untrusted_context_message(
+                        "recent digest summaries", "\n\n".join(_parts),
+                    ))
+            except Exception as _de:
+                logger.debug("Digest context injection skipped: %s", _de)
+
         # RAG: search if enabled and rag_manager available, inject only above threshold
         if use_rag:
             try:
@@ -267,12 +433,24 @@ class ChatProcessor:
                             }
                             for r in relevant
                         ]
+                        # Phase 2: structured citations from the raw RAG hits
+                        # (id/document/metadata/distance), surfaced in message
+                        # metadata for the CitationRenderer (Req 7.3).
+                        try:
+                            from services.citations.citation_service import citation_service
+                            self._last_rag_citations = citation_service.build_rag_citations(relevant)
+                        except Exception as _ce:
+                            logger.warning("Citation build failed: %s", _ce)
+                            self._last_rag_citations = []
                         rag_content = "Relevant documents:\n\n" + "\n\n---\n\n".join(
                             f"[{s['filename']}]\n{r['document']}" for s, r in zip(rag_sources, relevant)
                         )
                         if len(rag_content) > 10000:
                             rag_content = rag_content[:10000] + "\n[Truncated]"
-                        preface.append(untrusted_context_message("retrieved documents", rag_content))
+                        preface.append(untrusted_context_message(
+                            "retrieved documents",
+                            rag_content,
+                        ))
             except Exception as e:
                 logger.warning(f"RAG retrieval failed: {e}")
 
@@ -280,10 +458,61 @@ class ChatProcessor:
         web_sources = []
         if use_web:
             try:
-                web_context, web_sources = comprehensive_web_search(
-                    message, time_filter=time_filter, return_sources=True
-                )
-                preface.append(untrusted_context_message("web search results", web_context))
+                from src.llm_core import llm_call
+
+                t_url, t_model, t_headers = session.endpoint_url, session.model, session.headers
+
+                # Default fallback is the first non-empty line of the original user message
+                fallback_query = next((line.strip() for line in message.split("\n") if line.strip()), "")
+                search_query = fallback_query
+
+                try:
+                    generated_query = llm_call(
+                        t_url,
+                        t_model,
+                        [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Extract a concise search query from the user's message. "
+                                    "Reply ONLY with the query."
+                                ),
+                            },
+                            {"role": "user", "content": message},
+                        ],
+                        headers=t_headers,
+                        temperature=0.1,
+                        max_tokens=50,
+                        timeout=15,
+                    ).strip()
+
+                    if generated_query:
+                        # LLM successfully generated a non-empty query -> use the generated query
+                        search_query = generated_query
+                    else:
+                        # LLM returned an empty or whitespace-only query -> fall back to original query
+                        logger.warning("LLM generated an empty search query, using fallback.")
+                except Exception as e:
+                    # LLM failed (exception/error) -> fall back to original user query
+                    logger.warning(f"Failed to generate search query via LLM, using fallback: {e}")
+
+                search_query = " ".join(search_query.split())
+                if len(search_query) > 150:
+                    search_query = search_query[:150].strip()
+
+                # Defensive cleanup of the final selected query (interim fix
+                # for #4547): strip any residual fenced/inline markdown so that
+                # neither the generated query nor the first-line fallback leaks
+                # fences or backticks into the search call. No-op on clean
+                # generated queries; collapses to "" when the query is all code.
+                search_query = _clean_search_query(search_query, max_len=150)
+
+                if search_query:
+                    # Execute web search using the final selected query
+                    web_context, web_sources = comprehensive_web_search(
+                        search_query, time_filter=time_filter, return_sources=True
+                    )
+                    preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:
                 logger.error(f"Web search failed: {e}")
                 preface.append({"role": "system", "content": "Web search encountered an error and could not retrieve results."})
@@ -299,12 +528,49 @@ class ChatProcessor:
         skip_url_fetch = len(message) > 2000 or len(non_yt_urls) > 3
         if not skip_url_fetch:
             for url in non_yt_urls:
-                result = fetch_webpage_content(url)
+                try:
+                    result = fetch_webpage_content(url)
+                except Exception:
+                    # The URL and exception can both contain signed-query
+                    # credentials or response-controlled text. Keep the log
+                    # diagnostic stable as well as the model-facing context.
+                    logger.warning("Automatic URL fetch failed while building context")
+                    result = {"success": False, "error": ""}
                 if result.get('success'):
                     content = result.get('content', '')[:10000]
                     preface.append(untrusted_context_message(
                         f"web page: {url}",
                         f"Content from {url}:\n\n{content}",
+                        provenance_origin="external",
+                    ))
+                    # Automatic exact-URL reads are real network evidence even
+                    # though they happen before the agent loop.  Publish the
+                    # source through the same provenance channel as web search
+                    # so the UI and persisted message do not make a grounded
+                    # answer look like an unsupported no-tool response.
+                    if not any(source.get("url") == url for source in web_sources):
+                        web_sources.append({
+                            "url": url,
+                            "title": str(result.get("title") or url),
+                            "acquisition": "automatic_url_fetch",
+                        })
+                else:
+                    # A failed automatic URL fetch is context too. Never pass
+                    # exception text or response-controlled diagnostics back to
+                    # the model: reduce the result to a small transport-owned
+                    # status and explicitly state that the page was not read.
+                    error = str(result.get("error") or "")
+                    status = "the page was unavailable"
+                    status_match = re.match(r"^HTTP\s+(\d{3})\b", error)
+                    if status_match:
+                        status = f"the server returned HTTP {status_match.group(1)}"
+                    elif error.startswith("TooLarge:"):
+                        status = "the response exceeded the fetch size limit"
+                    elif error.startswith("Rate limit"):
+                        status = "the request was rate limited"
+                    preface.append(untrusted_context_message(
+                        "web page fetch failure",
+                        f"A linked page was not read: {status}.",
                     ))
 
         # Skills index — progressive disclosure. Only injected when the
@@ -328,6 +594,9 @@ class ChatProcessor:
                     for s in sorted(by_cat[cat], key=lambda x: x["name"]):
                         desc = s.get("description") or ""
                         lines.append(f"    - {s['name']}: {desc}" if desc else f"    - {s['name']}")
-                preface.append(untrusted_context_message("available skills index", "\n".join(lines)))
+                preface.append(untrusted_context_message(
+                    "available skills index",
+                    "\n".join(lines),
+                ))
 
         return preface, rag_sources, web_sources

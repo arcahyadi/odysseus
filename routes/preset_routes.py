@@ -1,5 +1,6 @@
 """Preset routes — /api/presets GET, /api/presets/custom POST, user templates CRUD."""
 
+import asyncio
 import logging
 import uuid
 from typing import Dict, Any, List
@@ -20,6 +21,8 @@ class UserTemplateRequest(BaseModel):
     system_prompt: str = Field("", max_length=10000)
     temperature: float = Field(1.0, ge=0.0, le=2.0)
     max_tokens: int = Field(0, ge=0, le=65536)
+    persona_memory: str = Field("", max_length=6000)
+    persona_memory_schema: str = Field("general", pattern="^(general|health)$")
 
 
 def setup_preset_routes(preset_manager) -> APIRouter:
@@ -40,6 +43,10 @@ def setup_preset_routes(preset_manager) -> APIRouter:
                 preset_update.enabled,
                 preset_update.inject_prefix,
                 preset_update.inject_suffix,
+                preset_update.persona_memory,
+                preset_update.persona_memory_schema,
+                preset_update.thinking_mode,
+                preset_update.show_persona_name,
             )
             if success:
                 return {"success": True, "message": "Custom preset updated"}
@@ -102,7 +109,7 @@ def setup_preset_routes(preset_manager) -> APIRouter:
         try:
             model_spec = data.get("model") or ""
             user = effective_user(request)
-            url, model, headers = _resolve_model(model_spec, owner=user)
+            url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=user)
             result = await llm_call_async(url, model, messages, temperature=0.8, max_tokens=500, headers=headers)
             return {"success": True, "prompt": result.strip()}
         except Exception as e:

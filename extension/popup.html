@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Send to Odysseus</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main>
+    <h1>Send to Odysseus</h1>
+
+    <label for="server">Server URL</label>
+    <input id="server" type="url" placeholder="http://localhost:8090" spellcheck="false" />
+
+    <label for="token">API token (<code>ody_…</code>)</label>
+    <input id="token" type="password" placeholder="ody_…" spellcheck="false" />
+
+    <label for="type">Send as</label>
+    <select id="type">
+      <option value="note">Note</option>
+      <option value="document">Document</option>
+      <option value="memory">Memory</option>
+      <option value="chat">Chat message</option>
+    </select>
+
+    <label for="session" id="session-label" hidden>Session id (chat only)</label>
+    <input id="session" type="text" placeholder="e.g. 1a2b3c…" spellcheck="false" hidden />
+
+    <label for="mode">Capture</label>
+    <select id="mode">
+      <option value="selection">Page selection</option>
+      <option value="page">Whole page</option>
+    </select>
+
+    <label for="text">Text (editable)</label>
+    <textarea id="text" rows="6" placeholder="Selected text appears here; edit before sending."></textarea>
+
+    <div class="actions">
+      <button id="send" class="primary">Send</button>
+      <span id="status" role="status"></span>
+    </div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

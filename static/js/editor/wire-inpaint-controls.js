@@ -26,18 +26,20 @@
  * @param {{
  *   composite:                () => void,
  *   applyInpaintFeather:      (layer: object, featherPx: number, edgeShiftPx: number) => void,
+ *   autoMatchInpaint:         () => void,
  *   syncToolClearIndicators:  () => void,
  *   attachColorPicker:        (el: HTMLInputElement) => void,
  *   uiModule:                 object,
  * }} deps
  */
 import { state } from './state.js';
+import { invertMaskInPlace } from './mask-utils.js';
 
 const EYE_OPEN_SM = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF_SM  = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>';
 
 export function wireInpaintControls({
-  composite, applyInpaintFeather, syncToolClearIndicators,
+  composite, applyInpaintFeather, autoMatchInpaint, syncToolClearIndicators,
   attachColorPicker, uiModule,
 }) {
   // ── Feather + Strength preview swatches ──
@@ -93,6 +95,9 @@ export function wireInpaintControls({
     document.getElementById('ge-strength-label').textContent = (e.target.value / 100).toFixed(2);
     syncStrengthPreview(parseInt(e.target.value, 10));
   });
+  document.getElementById('ge-inpaint-automatch')?.addEventListener('click', () => {
+    if (typeof autoMatchInpaint === 'function') autoMatchInpaint();
+  });
   syncFeatherPreview(0);
   syncStrengthPreview(75);
 
@@ -108,17 +113,7 @@ export function wireInpaintControls({
   });
   document.getElementById('ge-inpaint-invert')?.addEventListener('click', () => {
     if (!state.maskCtx || !state.maskCanvas) return;
-    const imgData = state.maskCtx.getImageData(0, 0, state.maskCanvas.width, state.maskCanvas.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const alpha = d[i + 3];
-      if (alpha > 0) {
-        d[i] = 0; d[i+1] = 0; d[i+2] = 0; d[i+3] = 0;
-      } else {
-        d[i] = 255; d[i+1] = 255; d[i+2] = 255; d[i+3] = 255;
-      }
-    }
-    state.maskCtx.putImageData(imgData, 0, 0);
+    invertMaskInPlace(state.maskCanvas);
     composite();
     syncToolClearIndicators();
     uiModule.showToast('Mask inverted');

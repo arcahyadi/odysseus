@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Odysseus",
+    "slug": "odysseus-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0e0e12",
+    "scheme": "odysseus",
+    "description": "LAN companion app for a self-hosted Odysseus AI workspace.",
+    "android": {
+      "package": "com.odysseus.mobile",
+      "usesCleartextTraffic": true
+    },
+    "ios": {
+      "bundleIdentifier": "com.odysseus.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
