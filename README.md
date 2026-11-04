@@ -46,16 +46,19 @@ ODYSSEUS_IMAGE=ghcr.io/odysseus-dev/odysseus:1.0.2-7c8070f docker compose up -d
 
 Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](website/setup.md).
 
-## Features
+## Features and capabilities
 
-- **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.
-- **Cookbook** — hardware-aware model recommendations, downloads, and serving.
-- **Deep Research** — multi-step web research with source reading and report generation.
-- **Compare** — blind side-by-side model testing and synthesis.
-- **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
-- **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
-- **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
-- **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
+- **Model access:** Connect local or remote model endpoints, including OpenAI-compatible APIs, Ollama, ChatGPT subscriptions, and Featherless. Switch models within the same workspace.
+- **Chat and voice:** Keep persistent conversations, upload files, use web search, and speak or listen through configured speech providers.
+- **Agents and tools:** Run agents with file, browser, shell, and MCP tools; extend them with skills, memory, plans, and scheduled tasks. Tool access is governed by user privileges and approval settings.
+- **Model comparison:** Run blind side-by-side comparisons with voting and synthesis, or send one prompt to several models in a multi-model thread.
+- **Local model Cookbook:** Get hardware-aware recommendations, download models, and manage local or remote serving endpoints.
+- **Deep Research and knowledge:** Run multi-step web research with source reading and reports; search uploaded documents and use vector-backed memory and citations when configured.
+- **Documents:** Write and revise in an editor with AI suggestions, Markdown and HTML support, CSV handling, and syntax highlighting.
+- **Images and media:** Organize uploads in the gallery and edit images with layered controls and natural-language editing tools.
+- **Email:** Connect IMAP/SMTP accounts for inbox triage, tags, summaries, reminders, reply drafting, and bulk export.
+- **Notes, tasks, and calendar:** Capture notes and todos, schedule agent work, and sync calendar events through CalDAV.
+- **Workspace administration:** Manage user permissions, sessions and sharing, API tokens, webhooks, and TOTP two-factor authentication.
 
 ## Architecture
 
